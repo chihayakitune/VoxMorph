@@ -1,0 +1,53 @@
+name: Build VoxMorph
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (Universal binary)
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+      - name: Build
+        run: cmake --build build --parallel 3
+
+      - name: Ad-hoc codesign
+        run: |
+          codesign --force --deep -s - "build/VoxMorph_artefacts/Release/AU/VoxMorph.component"
+          codesign --force --deep -s - "build/VoxMorph_artefacts/Release/VST3/VoxMorph.vst3"
+          codesign --force --deep -s - "build/VoxMorph_artefacts/Release/Standalone/VoxMorph.app"
+
+      - name: Add install script
+        run: cp scripts/install-mac.command build/VoxMorph_artefacts/Release/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VoxMorph-macOS
+          path: |
+            build/VoxMorph_artefacts/Release/AU
+            build/VoxMorph_artefacts/Release/VST3
+            build/VoxMorph_artefacts/Release/Standalone
+            build/VoxMorph_artefacts/Release/install-mac.command
+
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 3
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VoxMorph-Windows
+          path: |
+            build/VoxMorph_artefacts/Release/VST3
+            build/VoxMorph_artefacts/Release/Standalone
