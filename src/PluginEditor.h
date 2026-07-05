@@ -1,19 +1,31 @@
 #pragma once
 #include "PluginProcessor.h"
 
+// StandalonePluginHolder gives access to the standalone wrapper's state
+// saving (used for the Cmd+S shortcut). Only present in the standalone build.
+#if defined(JUCE_STANDALONE_APPLICATION) && JUCE_STANDALONE_APPLICATION \
+    && __has_include(<juce_audio_plugin_client/Standalone/juce_StandaloneFilterWindow.h>)
+ #include <juce_audio_plugin_client/Standalone/juce_StandaloneFilterWindow.h>
+ #define VOXMORPH_HAS_STANDALONE_HOLDER 1
+#else
+ #define VOXMORPH_HAS_STANDALONE_HOLDER 0
+#endif
+
 // VoxMorph custom editor:
 //  - parameters grouped into sections, English UI
 //  - hover tooltips with bilingual (EN/JP) explanations, readable typography
 //  - editable value boxes (click the number, type, Enter)
 //  - per-parameter reset buttons + double-click-to-default on sliders
 
-class VoxMorphEditor : public juce::AudioProcessorEditor
+class VoxMorphEditor : public juce::AudioProcessorEditor,
+                       private juce::Timer
 {
 public:
     explicit VoxMorphEditor (VoxMorphProcessor& p)
         : juce::AudioProcessorEditor (&p), proc (p)
     {
         tooltipWindow.setLookAndFeel (&tipLnf);
+        setWantsKeyboardFocus (true);   // for the Cmd+S shortcut
 
         addSection ("PITCH");
         addSliderRow ("pitch", "Pitch (semitones)",
@@ -104,6 +116,13 @@ public:
                  "変換/未変換が交互に切り替わってロボット的になる現象を防ぎます。"
                  "必要な場合のみオンにしてください。"));
 
+        addToggleRow ("automute", "Auto-Mute on Feedback",
+            tip ("Standalone app: if the output stays extremely loud for over a second "
+                 "(a runaway feedback loop between speakers and mic), the output is muted "
+                 "for 3 seconds automatically. Has no effect in a DAW.",
+                 "スタンドアロン用。スピーカー→マイクのハウリングが暴走して出力が1秒以上"
+                 "大音量で鳴り続けた場合、自動で3秒間ミュートして回路を切ります。"
+                 "DAWプラグインとして使用中は動作しません。"));
         addSliderRow ("breath2", "Breath (Beta)",
             tip ("EXPERIMENTAL. Replaces the upper harmonics with aspiration noise shaped by your "
                  "vocal tract (harmonic+noise model). Small amounts (0.1-0.2) add air; the quality "
@@ -136,6 +155,7 @@ public:
         footer.setColour (juce::Label::textColourId, juce::Colours::grey);
         footer.setJustificationType (juce::Justification::topLeft);
         addAndMakeVisible (footer);
+        defaultFooterText = footer.getText();
 
         int total = 20;
         for (auto& it : items) total += it.h;
@@ -146,6 +166,28 @@ public:
     ~VoxMorphEditor() override
     {
         tooltipWindow.setLookAndFeel (nullptr);
+    }
+
+    // Cmd+S (Ctrl+S on Windows) saves the standalone app's settings so they
+    // survive a crash / force-quit. In a DAW the shortcut is left to the host.
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        if (proc.wrapperType == juce::AudioProcessor::wrapperType_Standalone
+            && key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier, 0))
+        {
+           #if VOXMORPH_HAS_STANDALONE_HOLDER
+            if (auto* holder = juce::StandalonePluginHolder::getInstance())
+            {
+                holder->savePluginState();
+                if (auto* props = holder->settings.get())
+                    props->saveIfNeeded();
+                flashFooter (juce::String::fromUTF8 (
+                    "\xE2\x9C\x93 Settings saved / \xE8\xA8\xAD\xE5\xAE\x9A\xE3\x82\x92\xE4\xBF\x9D\xE5\xAD\x98\xE3\x81\x97\xE3\x81\xBE\xE3\x81\x97\xE3\x81\x9F"));
+                return true;
+            }
+           #endif
+        }
+        return false;
     }
 
     void paint (juce::Graphics& g) override
@@ -162,6 +204,20 @@ public:
     }
 
 private:
+    void flashFooter (const juce::String& msg)
+    {
+        footer.setText (msg, juce::dontSendNotification);
+        footer.setColour (juce::Label::textColourId, juce::Colour (0xff9fd68a));
+        startTimer (1600);
+    }
+
+    void timerCallback() override
+    {
+        footer.setText (defaultFooterText, juce::dontSendNotification);
+        footer.setColour (juce::Label::textColourId, juce::Colours::grey);
+        stopTimer();
+    }
+
     // bilingual tooltip: English first, Japanese below, blank line between
     static juce::String tip (const char* en, const char* jpText)
     {
@@ -302,6 +358,7 @@ private:
     std::vector<Item> items;
     std::vector<std::unique_ptr<juce::Component>> owned;
     juce::Label footer;
+    juce::String defaultFooterText;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoxMorphEditor)
 };

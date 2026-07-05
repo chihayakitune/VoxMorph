@@ -43,6 +43,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::ParameterID { "robot", 1 }, "Robotize", false));
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "lowvoice", 1 }, "Low Voice Mode", false));
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "automute", 1 }, "Auto-Mute on Feedback", true));
     layout.add (std::make_unique<P> (juce::ParameterID { "pitchfloor", 1 }, "Pitch Floor (Hz)",
                 juce::NormalisableRange<float> (0.0f, 300.0f, 1.0f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "robotHz", 1 }, "Robot Pitch (Hz)",
@@ -60,6 +62,19 @@ VoxMorphProcessor::VoxMorphProcessor()
           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "params", createLayout())
 {
+    // Standalone: rename the confusing "Feedback Loop: / Mute audio input"
+    // checkbox in the audio settings dialog (JUCE routes its UI strings
+    // through the translation system, so we can remap them)
+    if (wrapperType == wrapperType_Standalone)
+    {
+        juce::LocalisedStrings::setCurrentMappings (new juce::LocalisedStrings (
+            juce::String ("language: en\n"
+                          "countries: en\n"
+                          "\"Feedback Loop:\" = \"Input Mute:\"\n"
+                          "\"Mute audio input\" = \"Mute mic passthrough (prevents feedback)\"\n"),
+            false));
+    }
+
     pPitch     = apvts.getRawParameterValue ("pitch");
     pFormant   = apvts.getRawParameterValue ("formant");
     pConsonant = apvts.getRawParameterValue ("consonant");
@@ -77,6 +92,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pRobot     = apvts.getRawParameterValue ("robot");
     pLowVoice  = apvts.getRawParameterValue ("lowvoice");
     pFloor     = apvts.getRawParameterValue ("pitchfloor");
+    pAutoMute  = apvts.getRawParameterValue ("automute");
     pRobotHz   = apvts.getRawParameterValue ("robotHz");
     pMix       = apvts.getRawParameterValue ("mix");
     pGain      = apvts.getRawParameterValue ("gain");
@@ -137,6 +153,35 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
 
     engine.process (m, m, n);
+
+    // Feedback-runaway protection (standalone): if the output stays very
+    // loud continuously (screaming feedback loop), mute for 3 s. The loop
+    // then breaks, the input settles, and normal operation resumes.
+    const bool fbActive = wrapperType == wrapperType_Standalone
+                       && pAutoMute->load() > 0.5f;
+    {
+        double sum = 0.0;
+        for (int i = 0; i < n; ++i) sum += (double) m[i] * m[i];
+        const float rms = (float) std::sqrt (sum / std::max (1, n));
+        rmsSm = 0.85f * rmsSm + 0.15f * rms;
+
+        const float dt = (float) n / (float) std::max (1.0, getSampleRate());
+        if (fbActive)
+        {
+            if (rmsSm > 0.45f) loudSec += dt;
+            else               loudSec = std::max (0.0f, loudSec - 2.0f * dt);
+            if (loudSec > 1.2f) { muteSec = 3.0f; loudSec = 0.0f; }
+        }
+        if (muteSec > 0.0f) muteSec -= dt;
+
+        const float target = (muteSec > 0.0f) ? 0.0f : 1.0f;
+        if (muteGain < 0.999f || target < 1.0f)
+            for (int i = 0; i < n; ++i)
+            {
+                muteGain += 0.002f * (target - muteGain);
+                m[i] *= muteGain;
+            }
+    }
 
     const float g = juce::Decibels::decibelsToGain (pGain->load());
     for (int c = 0; c < ch; ++c)

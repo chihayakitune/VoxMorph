@@ -50,6 +50,10 @@ private:
     std::atomic<float>* pRobot     = nullptr;
     std::atomic<float>* pLowVoice  = nullptr;
     std::atomic<float>* pFloor     = nullptr;
+    std::atomic<float>* pAutoMute  = nullptr;
+
+    // feedback-runaway protection state
+    float rmsSm = 0.0f, loudSec = 0.0f, muteSec = 0.0f, muteGain = 1.0f;
     std::atomic<float>* pRobotHz   = nullptr;
     std::atomic<float>* pMix       = nullptr;
     std::atomic<float>* pGain      = nullptr;
