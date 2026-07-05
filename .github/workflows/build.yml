@@ -22,17 +22,24 @@ jobs:
           codesign --force --deep -s - "build/VoxMorph_artefacts/Release/VST3/VoxMorph.vst3"
           codesign --force --deep -s - "build/VoxMorph_artefacts/Release/Standalone/VoxMorph.app"
 
-      - name: Add install script
-        run: cp scripts/install-mac.command build/VoxMorph_artefacts/Release/
+      - name: Build installer package (.pkg)
+        run: |
+          STAGE=pkgroot
+          mkdir -p "$STAGE/Library/Audio/Plug-Ins/Components" \
+                   "$STAGE/Library/Audio/Plug-Ins/VST3" \
+                   "$STAGE/Applications"
+          cp -R "build/VoxMorph_artefacts/Release/AU/VoxMorph.component"  "$STAGE/Library/Audio/Plug-Ins/Components/"
+          cp -R "build/VoxMorph_artefacts/Release/VST3/VoxMorph.vst3"    "$STAGE/Library/Audio/Plug-Ins/VST3/"
+          cp -R "build/VoxMorph_artefacts/Release/Standalone/VoxMorph.app" "$STAGE/Applications/"
+          pkgbuild --root "$STAGE" \
+                   --identifier com.hakamaaudio.voxmorph \
+                   --version 0.1.0 \
+                   "VoxMorph-Installer.pkg"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: VoxMorph-macOS
-          path: |
-            build/VoxMorph_artefacts/Release/AU
-            build/VoxMorph_artefacts/Release/VST3
-            build/VoxMorph_artefacts/Release/Standalone
-            build/VoxMorph_artefacts/Release/install-mac.command
+          name: VoxMorph-macOS-Installer
+          path: VoxMorph-Installer.pkg
 
   build-windows:
     runs-on: windows-2022
