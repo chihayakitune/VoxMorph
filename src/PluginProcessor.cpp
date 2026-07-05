@@ -1,4 +1,10 @@
 #include "PluginProcessor.h"
+#include "PluginEditor.h"
+
+juce::AudioProcessorEditor* VoxMorphProcessor::createEditor()
+{
+    return new VoxMorphEditor (*this);
+}
 
 juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLayout()
 {
@@ -11,9 +17,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::NormalisableRange<float> (-24.0f, 24.0f, 0.01f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "consonant", 1 }, "Consonant Shift (st)",
                 juce::NormalisableRange<float> (-12.0f, 12.0f, 0.01f), 0.0f));
-    layout.add (std::make_unique<P> (juce::ParameterID { "range", 1 }, "Pitch Range (%)",
+    layout.add (std::make_unique<P> (juce::ParameterID { "range", 1 }, "Intonation Amount (%)",
                 juce::NormalisableRange<float> (50.0f, 200.0f, 1.0f), 100.0f));
-    layout.add (std::make_unique<P> (juce::ParameterID { "center", 1 }, "Pitch Center (Hz)",
+    layout.add (std::make_unique<P> (juce::ParameterID { "center", 1 }, "Intonation Pivot (Hz)",
                 juce::NormalisableRange<float> (80.0f, 400.0f, 1.0f, 0.5f), 220.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "breath", 1 }, "Breath",
                 juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
