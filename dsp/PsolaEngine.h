@@ -553,16 +553,18 @@ private:
 
                 if (doBreath && k > bLo / 2)
                 {
-                    // noise excitation shaped by the (warped) envelope with
-                    // tilt compensation: the aspiration source is much
-                    // flatter than the -12 dB/oct glottal harmonics, so the
-                    // noise-to-harmonics ratio must RISE with frequency.
-                    // A floor (relative to the envelope peak) keeps the
-                    // breath audible where the envelope has died out.
+                    // Breathy phonation REPLACES the upper harmonics with
+                    // aspiration noise (harmonic+noise model); merely adding
+                    // noise on top of intact harmonics sounds electronic.
+                    // So: fade the deterministic part down as the shaped
+                    // noise (envelope-following, tilt-compensated) fades in.
                     const float hw   = std::clamp ((float)(k - bLo) / (float)(bHi - bLo), 0.0f, 1.0f);
+                    const float mixN = breath * hw;               // 0..1 noise share
+                    const float att  = 1.0f - 0.75f * mixN;       // harmonic fade-out
+                    nr *= att;  ni *= att;
                     const float lift = std::min (14.0f, (float) k / (float) bLo);
                     const float nEnv = std::max (lift * R * env[(size_t)k], 0.10f * envMax);
-                    const float g    = breath * 0.35f * hw * nEnv;
+                    const float g    = 0.45f * mixN * nEnv;
                     nr += g * nextRand();
                     ni += g * nextRand();
                 }
