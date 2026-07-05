@@ -41,9 +41,14 @@ public:
         float mix           = 1.0f;   // 0..1 dry/wet
 
         // Low Voice Mode: for deep/creaky voices (vocal fry). Extends pitch
-        // tracking down to 40 Hz and holds the last stable pitch through
+        // tracking down to 40 Hz, tracks the glottal pulse rate instead of
+        // sub-octave pattern periods, and holds the last stable pitch through
         // irregular stretches so voiced/unvoiced doesn't flutter.
         bool  lowVoice      = false;
+
+        // Pitch Floor: if the OUTPUT pitch falls below this, lift it softly
+        // toward the floor (log-domain soft knee). 0 = off.
+        float pitchFloorHz  = 0.0f;
     };
 
     void prepare (double sampleRate)
@@ -89,6 +94,7 @@ public:
         robotHz        = std::max (30.0f, q.robotHz);
         mix            = q.mix;
         lowVoice       = q.lowVoice;
+        floorHz        = std::clamp (q.pitchFloorHz, 0.0f, 400.0f);
     }
 
     // legacy convenience overload (kept for compatibility)
@@ -198,7 +204,28 @@ private:
         }
         int lag = pick > 0 ? pick : best;
 
-        const bool confident = (lag > 0) && ! (pick < 0 && bestVal > 0.45);
+        // Prefer the pulse rate over sub-octaves. Creaky/fry voices repeat
+        // most strongly at 2-3x the glottal pulse period, so the global
+        // minimum sits an octave (or more) too low; respacing single pulses
+        // both fixes the "pulled down an octave" tracking and regularises
+        // the fry in the output. Repeatedly try half the current lag.
+        while (lag > 0 && lag / 2 >= minLag)
+        {
+            const int c0 = lag / 2;
+            const int lo = std::max (minLag, (int) (c0 * 0.85f));
+            const int hi = std::min (effMaxLag, (int) (c0 * 1.15f));
+            int bl = -1; double bv = 1.0e9;
+            for (int t = lo; t <= hi; ++t)
+                if (d[(size_t) t] < bv) { bv = d[(size_t) t]; bl = t; }
+            const double dl = d[(size_t) lag];
+            const bool ok = bl > 0
+                         && (bv < 0.18 || (lowVoice && bv < std::min (0.62, dl * 2.5)));
+            if (! ok) break;
+            lag = bl;
+        }
+
+        const double confThr = lowVoice ? 0.62 : 0.45;   // fry is never "clean"
+        const bool confident = (lag > 0) && ! (pick < 0 && bestVal > confThr);
         if (! confident)
         {
             // Low Voice Mode: creaky/fry phonation is irregular, so the
@@ -216,18 +243,29 @@ private:
         }
         holdCount = 0;
 
-        // octave guard: when already voiced, prefer a dip near the previous period
+        // octave guard: resist sudden DOWNWARD period jumps (subharmonics),
+        // but always allow upward corrections back to the pulse rate —
+        // otherwise a wrong low lock can never recover.
         if (voiced)
         {
             const int lo = std::max (minLag, (int) (curP * 0.72f));
             const int hi = std::min (effMaxLag, (int) (curP * 1.38f));
-            if (lo < hi && (lag < lo || lag > hi))
+            if (lo < hi && lag > hi)                       // jumped lower
+            {
+                int    nl = -1; double nv = 1.0e9;
+                for (int t = lo; t <= hi; ++t)
+                    if (d[(size_t) t] < nv) { nv = d[(size_t) t]; nl = t; }
+                if (nl > 0 && nv < (lowVoice ? 0.55 : 0.35))
+                    lag = nl;   // stay on the established octave
+            }
+            else if (lo < hi && lag < lo                   // jumped higher
+                     && d[(size_t) lag] > (lowVoice ? 0.68 : 0.30))
             {
                 int    nl = -1; double nv = 1.0e9;
                 for (int t = lo; t <= hi; ++t)
                     if (d[(size_t) t] < nv) { nv = d[(size_t) t]; nl = t; }
                 if (nl > 0 && nv < 0.35)
-                    lag = nl;   // stay on the established octave
+                    lag = nl;   // higher dip was weak - keep current octave
             }
         }
 
@@ -241,7 +279,10 @@ private:
         }
 
         const float newP = (float) std::clamp (p, (double) minLag, (double) effMaxLag);
-        curP  = voiced ? 0.65f * curP + 0.35f * newP : newP;
+        // Low Voice Mode: heavier smoothing steadies the wobble of irregular
+        // fry pulses (individual periods jitter by >10%)
+        const float smooth = lowVoice ? 0.85f : 0.65f;
+        curP  = voiced ? smooth * curP + (1.0f - smooth) * newP : newP;
         voiced = true;
     }
 
@@ -261,6 +302,8 @@ private:
             double ft = (fs / (double) P) * (double) pitchRatio;
             if (range != 1.0f)
                 ft = (double) centerHz * std::pow (ft / (double) centerHz, (double) range);
+            if (floorHz > 20.0f && ft < (double) floorHz)          // soft low lift
+                ft = (double) floorHz * std::pow (ft / (double) floorHz, 0.4);
             ft = std::clamp (ft, 40.0, 1000.0);
             Ts = (float) (fs / ft);
         }
@@ -365,7 +408,7 @@ private:
     }
 
     // ---------------- state ----------------
-    static constexpr int kHoldMax = 16;   // ~170 ms of pitch hold (detect every ~512 samples)
+    static constexpr int kHoldMax = 24;   // ~250 ms of pitch hold (detect every ~512 samples)
 
     double fs = 48000.0;
     int    D = 2048, maxLag = 800, maxLagLow = 1200, minLag = 96, maxHout = 1200;
@@ -384,6 +427,6 @@ private:
     float pitchRatio = 1.0f, formantRatio = 1.0f, consonantRatio = 1.0f;
     float range = 1.0f, centerHz = 220.0f, breath = 0.0f, jitterAmt = 0.0f;
     float gLow = 1.0f, gHigh = 1.0f, tiltLp = 0.0f, tiltK = 0.12f;
-    float mix = 1.0f, robotHz = 120.0f;
+    float mix = 1.0f, robotHz = 120.0f, floorHz = 0.0f;
     bool  robotize = false, lowVoice = false;
 };
