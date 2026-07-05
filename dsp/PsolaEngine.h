@@ -263,8 +263,7 @@ private:
         const float baseHalf = v ? P : 256.0f;
         const int Hout = (int) std::clamp (baseHalf / f, 32.0f, (float) maxHout);
 
-        // pass 1: resample grain into scratch, measure RMS (for breath level)
-        double sumsq = 0.0;
+        // pass 1: resample grain into scratch
         for (int j = -Hout; j <= Hout; ++j)
         {
             const double  ip = c + ((double) j + err) * (double) f;
@@ -277,26 +276,28 @@ private:
                   + inBuf[(size_t) ((i0 + 1) & kMask)] * frac;
             }
             grainScratch[(size_t) (j + Hout)] = s;
-            sumsq += (double) s * s;
         }
-        const float rms  = (float) std::sqrt (sumsq / (double) (2 * Hout + 1));
-        const float bAmp = (v && breath > 0.0f) ? breath * rms * 1.2f : 0.0f;
 
-        // pass 2: window + optional pitch-synchronous aspiration, overlap-add
-        float nPrev = 0.0f;
+        // pass 2: window + optional aspiration, overlap-add.
+        // Aspiration model: band-limited noise (~1.5-5 kHz, like real breath
+        // turbulence) whose level follows a SMOOTHED envelope of the waveform.
+        // (Full-band noise with instantaneous modulation sounds like digital
+        // hiss / ring-mod — that was the v0.2 mistake.)
+        const bool doBreath = (v && breath > 0.0f);
+        float nPrev = 0.0f, nB1 = 0.0f, nB2 = 0.0f, envF = 0.0f;
         for (int j = -Hout; j <= Hout; ++j)
         {
             float x = grainScratch[(size_t) (j + Hout)];
 
-            if (bAmp > 0.0f)
+            if (doBreath)
             {
-                // high-passed noise, amplitude-modulated by the waveform itself
-                // (bursts follow the glottal cycle -> breathy source, not "added hiss")
+                envF += 0.02f * (std::abs (x) - envF);       // slow envelope (~1 ms)
                 const float nz = nextRand();
-                const float hp = nz - nPrev;
+                const float hp = nz - nPrev;                 // cut lows
                 nPrev = nz;
-                const float am = 0.4f + 0.6f * std::min (2.0f, std::abs (x) / (rms + 1.0e-9f));
-                x += bAmp * am * hp;
+                nB1  += 0.15f * (hp  - nB1);                 // 2-pole lowpass ->
+                nB2  += 0.15f * (nB1 - nB2);                 // band ~1.5-4 kHz
+                x += breath * 14.0f * nB2 * envF;
             }
 
             const float w = 0.5f * (1.0f + std::cos ((float) M_PI * (float) j / (float) Hout));
