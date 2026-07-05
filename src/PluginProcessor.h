@@ -45,6 +45,7 @@ private:
     std::atomic<float>* pJitter    = nullptr;
     std::atomic<float>* pRobot     = nullptr;
     std::atomic<float>* pLowVoice  = nullptr;
+    std::atomic<float>* pFloor     = nullptr;
     std::atomic<float>* pRobotHz   = nullptr;
     std::atomic<float>* pMix       = nullptr;
     std::atomic<float>* pGain      = nullptr;

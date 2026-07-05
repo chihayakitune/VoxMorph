@@ -76,6 +76,14 @@ public:
                  "変換/未変換が交互に切り替わってロボット的になる現象を防ぎます。"
                  "必要な場合のみオンにしてください。"));
 
+        addSliderRow ("pitchfloor", "Pitch Floor (Hz)",
+            tip ("If the converted pitch falls below this, it is lifted softly toward the floor. "
+                 "Useful when your voice drifts too low while speaking. 0 = off. "
+                 "Try 140-180 with a female target voice.",
+                 "変換後のピッチがこの値を下回ったとき、滑らかに引き上げます。"
+                 "話しているうちに声が低くなりすぎる場合の補正用。0=オフ。"
+                 "女声化なら140〜180が目安です。"));
+
         addSection ("OUTPUT");
         addSliderRow ("mix", "Mix",
             tip ("Balance between the converted voice (1.0) and the original (0.0). Usually 1.0.",
