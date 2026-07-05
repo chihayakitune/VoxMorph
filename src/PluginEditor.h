@@ -41,6 +41,34 @@ public:
                  "Female consonants are brighter: try +2 to +3. Too much sounds like a lisp.",
                  "無声子音(サ行・シャ行など)だけを追加でシフトします(Formantに加算)。"
                  "女声の子音は明るいので+2〜+3が目安。上げすぎると舌足らずに聞こえます。"));
+        addSliderRow ("f1shift", "F1 Shift (st)",
+            tip ("Moves only the first formant (jaw openness / throat size), on top of the global "
+                 "Formant. Male-to-female sounds most natural with F1 raised LESS than F2: "
+                 "try F1 +1 to +2 when F2 is +2 to +4.",
+                 "第1フォルマント(顎の開き・喉の広さ)だけを動かします(全体Formantに加算)。"
+                 "女声化はF1をF2より控えめに上げると自然です(F2が+2〜+4のときF1は+1〜+2)。"));
+        addSliderRow ("f1gain", "F1 Gain (dB)",
+            tip ("Boost or cut around the first formant. Cutting a few dB thins out a 'boomy' "
+                 "chest resonance.",
+                 "第1フォルマント付近の強さ。数dB下げると胸に響く「太さ」が抜けます。"));
+        addSliderRow ("f2shift", "F2 Shift (st)",
+            tip ("Moves only the second formant (tongue position). The strongest single cue for "
+                 "perceived gender/age of the vowels: +2 to +4 sounds younger and more feminine.",
+                 "第2フォルマント(舌の位置)だけを動かします。母音の性別・年齢感に最も効く帯域で、"
+                 "+2〜+4で若く女性的に聞こえます。"));
+        addSliderRow ("f2gain", "F2 Gain (dB)",
+            tip ("Boost or cut around the second formant. A few dB of boost adds clarity and "
+                 "'presence' to the vowels.",
+                 "第2フォルマント付近の強さ。数dB上げると母音の明瞭さ・華やかさが出ます。"));
+        addSliderRow ("f3shift", "F3 Shift (st)",
+            tip ("Moves only the third formant (front cavity / lip area). Small shifts (+1 to +2) "
+                 "refine the impression of a shorter vocal tract.",
+                 "第3フォルマント(声道前部・唇まわり)だけを動かします。+1〜+2の小さめの操作で"
+                 "「声道が短い」印象を仕上げます。"));
+        addSliderRow ("f3gain", "F3 Gain (dB)",
+            tip ("Boost or cut around the third formant. Boosting adds sheen and 'sparkle' - "
+                 "this region carries much of a voice's charm.",
+                 "第3フォルマント付近の強さ。上げると艶・張りが出ます。声の「華」が乗る帯域です。"));
 
         addSection ("INTONATION");
         addSliderRow ("range", "Intonation Amount (%)",
@@ -57,6 +85,12 @@ public:
                  "合わせてください(女声なら200〜250Hz)。Amountが100%のときは無効。"));
 
         addSection ("VOICE QUALITY");
+        addSliderRow ("breath2", "Breath",
+            tip ("Adds aspiration noise shaped by your vocal tract (noise-excited envelope), "
+                 "synchronised with the voice. Small amounts (0.1-0.3) give a soft, airy quality. "
+                 "Female voices naturally carry more breath than male voices.",
+                 "声道の響きで整形した気息ノイズを声に同期して加えます(ノイズ励振方式)。"
+                 "少量(0.1〜0.3)で柔らかく空気感のある質感に。女声は男声より息成分が多いのが自然です。"));
         addSliderRow ("tilt", "Softness / Tilt (dB)",
             tip ("Spectral tilt of the voice. + is softer and warmer, - is brighter and more present. "
                  "Start around +/-2 dB.",
@@ -211,7 +245,7 @@ private:
         lbl->setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
         lbl->setColour (juce::Label::textColourId, juce::Colour (0xffe8a33d));
         addAndMakeVisible (*lbl);
-        items.push_back ({ lbl.get(), 30 });
+        items.push_back ({ lbl.get(), 26 });
         owned.push_back (std::move (lbl));
     }
 
@@ -242,7 +276,7 @@ private:
         };
 
         addAndMakeVisible (*row);
-        items.push_back ({ row.get(), 34 });
+        items.push_back ({ row.get(), 30 });
         owned.push_back (std::move (row));
     }
 
@@ -254,7 +288,7 @@ private:
         row->att = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
                         proc.apvts, id, row->toggle);
         addAndMakeVisible (*row);
-        items.push_back ({ row.get(), 30 });
+        items.push_back ({ row.get(), 28 });
         owned.push_back (std::move (row));
     }
 

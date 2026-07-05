@@ -17,6 +17,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::NormalisableRange<float> (-24.0f, 24.0f, 0.01f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "consonant", 1 }, "Consonant Shift (st)",
                 juce::NormalisableRange<float> (-12.0f, 12.0f, 0.01f), 0.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "f1shift", 1 }, "F1 Shift (st)",
+                juce::NormalisableRange<float> (-6.0f, 6.0f, 0.01f), 0.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "f1gain", 1 }, "F1 Gain (dB)",
+                juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "f2shift", 1 }, "F2 Shift (st)",
+                juce::NormalisableRange<float> (-6.0f, 6.0f, 0.01f), 0.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "f2gain", 1 }, "F2 Gain (dB)",
+                juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "f3shift", 1 }, "F3 Shift (st)",
+                juce::NormalisableRange<float> (-6.0f, 6.0f, 0.01f), 0.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "f3gain", 1 }, "F3 Gain (dB)",
+                juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "breath2", 1 }, "Breath",
+                juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "range", 1 }, "Intonation Amount (%)",
                 juce::NormalisableRange<float> (50.0f, 200.0f, 1.0f), 100.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "center", 1 }, "Intonation Pivot (Hz)",
@@ -49,6 +63,13 @@ VoxMorphProcessor::VoxMorphProcessor()
     pPitch     = apvts.getRawParameterValue ("pitch");
     pFormant   = apvts.getRawParameterValue ("formant");
     pConsonant = apvts.getRawParameterValue ("consonant");
+    pF1S = apvts.getRawParameterValue ("f1shift");
+    pF1G = apvts.getRawParameterValue ("f1gain");
+    pF2S = apvts.getRawParameterValue ("f2shift");
+    pF2G = apvts.getRawParameterValue ("f2gain");
+    pF3S = apvts.getRawParameterValue ("f3shift");
+    pF3G = apvts.getRawParameterValue ("f3gain");
+    pBreath2 = apvts.getRawParameterValue ("breath2");
     pRange     = apvts.getRawParameterValue ("range");
     pCenter    = apvts.getRawParameterValue ("center");
     pTilt      = apvts.getRawParameterValue ("tilt");
@@ -91,9 +112,11 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.consonantSemi = pConsonant->load();
     p.pitchRange    = pRange->load() * 0.01f;   // % -> ratio
     p.pitchCenterHz = pCenter->load();
-    p.breath        = 0.0f;   // Breath UI removed for now — proper spectral
-                              // implementation planned with Phase 2 (per-formant)
+    p.breath        = pBreath2->load();      // spectral (noise-excited envelope)
     p.tiltDb        = pTilt->load();
+    p.f1Shift = pF1S->load();  p.f1Gain = pF1G->load();
+    p.f2Shift = pF2S->load();  p.f2Gain = pF2G->load();
+    p.f3Shift = pF3S->load();  p.f3Gain = pF3G->load();
     p.jitter        = pJitter->load();
     p.robotize      = pRobot->load() > 0.5f;
     p.lowVoice      = pLowVoice->load() > 0.5f;

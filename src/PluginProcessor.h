@@ -39,6 +39,10 @@ private:
     std::atomic<float>* pPitch     = nullptr;
     std::atomic<float>* pFormant   = nullptr;
     std::atomic<float>* pConsonant = nullptr;
+    std::atomic<float>* pF1S = nullptr; std::atomic<float>* pF1G = nullptr;
+    std::atomic<float>* pF2S = nullptr; std::atomic<float>* pF2G = nullptr;
+    std::atomic<float>* pF3S = nullptr; std::atomic<float>* pF3G = nullptr;
+    std::atomic<float>* pBreath2   = nullptr;
     std::atomic<float>* pRange     = nullptr;
     std::atomic<float>* pCenter    = nullptr;
     std::atomic<float>* pTilt      = nullptr;
