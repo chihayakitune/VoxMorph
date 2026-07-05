@@ -39,21 +39,28 @@ public:
         bool  robotize      = false;
         float robotHz       = 120.0f;
         float mix           = 1.0f;   // 0..1 dry/wet
+
+        // Low Voice Mode: for deep/creaky voices (vocal fry). Extends pitch
+        // tracking down to 40 Hz and holds the last stable pitch through
+        // irregular stretches so voiced/unvoiced doesn't flutter.
+        bool  lowVoice      = false;
     };
 
     void prepare (double sampleRate)
     {
-        fs      = sampleRate;
-        maxLag  = (int) (fs / 60.0);   // lowest tracked f0 = 60 Hz
-        minLag  = (int) (fs / 500.0);  // highest tracked f0 = 500 Hz
-        D       = 2048;                // lookahead (latency), samples
-        maxHout = 1200;
+        fs        = sampleRate;
+        maxLag    = (int) (fs / 60.0);   // lowest tracked f0 = 60 Hz (normal)
+        maxLagLow = (int) (fs / 40.0);   // lowest tracked f0 = 40 Hz (Low Voice Mode)
+        minLag    = (int) (fs / 500.0);  // highest tracked f0 = 500 Hz
+        D         = 2048;                // lookahead (latency), samples
+        maxHout   = 1200;
 
         inBuf .assign (kRing, 0.0f);
         accBuf.assign (kRing, 0.0f);
         normBuf.assign (kRing, 0.0f);
-        tmp.assign ((size_t) (kDetN + maxLag + 4), 0.0f);
+        tmp.assign ((size_t) (kDetN + maxLagLow + 4), 0.0f);
         grainScratch.assign ((size_t) (2 * maxHout + 2), 0.0f);
+        holdCount = 0;
 
         writePos    = 0;
         nextMarkF   = (double) D;
@@ -81,6 +88,7 @@ public:
         robotize       = q.robotize;
         robotHz        = std::max (30.0f, q.robotHz);
         mix            = q.mix;
+        lowVoice       = q.lowVoice;
     }
 
     // legacy convenience overload (kept for compatibility)
@@ -149,20 +157,21 @@ private:
     // ---------------- pitch detection (YIN + octave guard) ----------------
     void detectPitch()
     {
-        const int span = kDetN + maxLag;
+        const int effMaxLag = lowVoice ? maxLagLow : maxLag;
+        const int span = kDetN + effMaxLag;
         const int64_t s0 = writePos - span;
         for (int i = 0; i < span; ++i)
             tmp[(size_t) i] = inBuf[(size_t) ((s0 + i) & kMask)];
 
         double energy = 0.0;
         for (int i = 0; i < kDetN; ++i) energy += (double) tmp[(size_t)i] * tmp[(size_t)i];
-        if (energy / kDetN < 1.0e-8) { voiced = false; return; }
+        if (energy / kDetN < 1.0e-8) { voiced = false; holdCount = 0; return; }
 
         std::vector<double>& d = dbuf;
-        d.assign ((size_t) maxLag + 1, 1.0);
+        d.assign ((size_t) effMaxLag + 1, 1.0);
 
         double cum = 0.0;
-        for (int tau = 1; tau <= maxLag; ++tau)
+        for (int tau = 1; tau <= effMaxLag; ++tau)
         {
             double s = 0.0;
             const float* a = tmp.data();
@@ -179,22 +188,39 @@ private:
         // first local minimum below threshold, else global minimum
         int pick = -1, best = -1;
         double bestVal = 1.0e9;
-        for (int tau = minLag; tau <= maxLag; ++tau)
+        for (int tau = minLag; tau <= effMaxLag; ++tau)
         {
             const double v = d[(size_t) tau];
             if (v < bestVal) { bestVal = v; best = tau; }
-            if (pick < 0 && v < 0.15 && tau > minLag && tau < maxLag
+            if (pick < 0 && v < 0.15 && tau > minLag && tau < effMaxLag
                 && v <= d[(size_t)(tau-1)] && v <= d[(size_t)(tau+1)])
                 pick = tau;
         }
         int lag = pick > 0 ? pick : best;
-        if (lag <= 0 || (pick < 0 && bestVal > 0.45)) { voiced = false; return; }
+
+        const bool confident = (lag > 0) && ! (pick < 0 && bestVal > 0.45);
+        if (! confident)
+        {
+            // Low Voice Mode: creaky/fry phonation is irregular, so the
+            // detector loses confidence for a few frames although the voice
+            // continues. Hold the last stable pitch instead of dropping to
+            // the unvoiced path (which would toggle conversion on and off).
+            if (lowVoice && voiced && holdCount < kHoldMax)
+            {
+                ++holdCount;
+                return;                      // keep previous curP, stay voiced
+            }
+            voiced = false;
+            holdCount = 0;
+            return;
+        }
+        holdCount = 0;
 
         // octave guard: when already voiced, prefer a dip near the previous period
         if (voiced)
         {
             const int lo = std::max (minLag, (int) (curP * 0.72f));
-            const int hi = std::min (maxLag, (int) (curP * 1.38f));
+            const int hi = std::min (effMaxLag, (int) (curP * 1.38f));
             if (lo < hi && (lag < lo || lag > hi))
             {
                 int    nl = -1; double nv = 1.0e9;
@@ -206,7 +232,7 @@ private:
         }
 
         double p = (double) lag;
-        if (lag > minLag && lag < maxLag)
+        if (lag > minLag && lag < effMaxLag)
         {
             const double y0 = d[(size_t)(lag-1)], y1 = d[(size_t)lag], y2 = d[(size_t)(lag+1)];
             const double den = y0 - 2.0*y1 + y2;
@@ -214,7 +240,7 @@ private:
                 p += 0.5 * (y0 - y2) / den;
         }
 
-        const float newP = (float) std::clamp (p, (double) minLag, (double) maxLag);
+        const float newP = (float) std::clamp (p, (double) minLag, (double) effMaxLag);
         curP  = voiced ? 0.65f * curP + 0.35f * newP : newP;
         voiced = true;
     }
@@ -260,8 +286,12 @@ private:
             lastInMark = c;
         }
 
-        const float baseHalf = v ? P : 256.0f;
-        const int Hout = (int) std::clamp (baseHalf / f, 32.0f, (float) maxHout);
+        // grain half width: ~1 period, capped so very low pitches (Low Voice
+        // Mode, down to 40 Hz) still fit inside the lookahead window
+        const float capHalf  = lowVoice ? 700.0f : (float) maxLag;
+        const float baseHalf = v ? std::min (P, capHalf) : 256.0f;
+        const int   houtCap  = lowVoice ? std::min (maxHout, 900) : maxHout;
+        const int Hout = (int) std::clamp (baseHalf / f, 32.0f, (float) houtCap);
 
         // pass 1: resample grain into scratch
         for (int j = -Hout; j <= Hout; ++j)
@@ -335,8 +365,11 @@ private:
     }
 
     // ---------------- state ----------------
+    static constexpr int kHoldMax = 16;   // ~170 ms of pitch hold (detect every ~512 samples)
+
     double fs = 48000.0;
-    int    D = 2048, maxLag = 800, minLag = 96, maxHout = 1200;
+    int    D = 2048, maxLag = 800, maxLagLow = 1200, minLag = 96, maxHout = 1200;
+    int    holdCount = 0;
 
     std::vector<float>  inBuf, accBuf, normBuf, tmp, grainScratch;
     std::vector<double> dbuf;
@@ -352,5 +385,5 @@ private:
     float range = 1.0f, centerHz = 220.0f, breath = 0.0f, jitterAmt = 0.0f;
     float gLow = 1.0f, gHigh = 1.0f, tiltLp = 0.0f, tiltK = 0.12f;
     float mix = 1.0f, robotHz = 120.0f;
-    bool  robotize = false;
+    bool  robotize = false, lowVoice = false;
 };
