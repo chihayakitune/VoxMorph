@@ -179,8 +179,9 @@ public:
             if (auto* holder = juce::StandalonePluginHolder::getInstance())
             {
                 holder->savePluginState();
-                if (auto* props = holder->settings.get())
-                    props->saveIfNeeded();
+                // flush to disk immediately if the settings are file-backed
+                if (auto* pf = dynamic_cast<juce::PropertiesFile*> (holder->settings.get()))
+                    pf->saveIfNeeded();
                 flashFooter (juce::String::fromUTF8 (
                     "\xE2\x9C\x93 Settings saved / \xE8\xA8\xAD\xE5\xAE\x9A\xE3\x82\x92\xE4\xBF\x9D\xE5\xAD\x98\xE3\x81\x97\xE3\x81\xBE\xE3\x81\x97\xE3\x81\x9F"));
                 return true;
