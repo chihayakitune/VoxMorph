@@ -116,6 +116,13 @@ public:
                  "変換/未変換が交互に切り替わってロボット的になる現象を防ぎます。"
                  "必要な場合のみオンにしてください。"));
 
+        addToggleRow ("lowlat", "Low Latency Mode",
+            tip ("Halves the conversion delay (43 ms -> about 21 ms) for live streaming and "
+                 "monitoring. Trade-off: pitch tracking bottoms out around 90 Hz, so very deep "
+                 "voices may track worse. Ignored while Low Voice Mode is on.",
+                 "変換遅延を半分(43ms→約21ms)にします。配信やモニタリング向け。"
+                 "代わりにピッチ検出の下限が約90Hzに上がるため、非常に低い声では追跡が"
+                 "落ちる場合があります。Low Voice Modeがオンの間は無効です。"));
         addToggleRow ("automute", "Auto-Mute on Feedback",
             tip ("Standalone app: if the output stays extremely loud for over a second "
                  "(a runaway feedback loop between speakers and mic), the output is muted "

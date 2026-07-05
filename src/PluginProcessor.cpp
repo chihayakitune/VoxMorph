@@ -45,6 +45,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::ParameterID { "lowvoice", 1 }, "Low Voice Mode", false));
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "automute", 1 }, "Auto-Mute on Feedback", true));
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "lowlat", 1 }, "Low Latency Mode", false));
     layout.add (std::make_unique<P> (juce::ParameterID { "pitchfloor", 1 }, "Pitch Floor (Hz)",
                 juce::NormalisableRange<float> (0.0f, 300.0f, 1.0f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "robotHz", 1 }, "Robot Pitch (Hz)",
@@ -93,6 +95,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pLowVoice  = apvts.getRawParameterValue ("lowvoice");
     pFloor     = apvts.getRawParameterValue ("pitchfloor");
     pAutoMute  = apvts.getRawParameterValue ("automute");
+    pLowLat    = apvts.getRawParameterValue ("lowlat");
     pRobotHz   = apvts.getRawParameterValue ("robotHz");
     pMix       = apvts.getRawParameterValue ("mix");
     pGain      = apvts.getRawParameterValue ("gain");
@@ -137,6 +140,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.robotize      = pRobot->load() > 0.5f;
     p.lowVoice      = pLowVoice->load() > 0.5f;
     p.pitchFloorHz  = pFloor->load();
+    p.lowLatency    = pLowLat->load() > 0.5f;
     p.robotHz       = pRobotHz->load();
     p.mix           = pMix->load();
     engine.setParams (p);
@@ -153,6 +157,9 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
 
     engine.process (m, m, n);
+
+    if (getLatencySamples() != engine.latencySamples())
+        setLatencySamples (engine.latencySamples());
 
     // Feedback-runaway protection (standalone): if the output stays very
     // loud continuously (screaming feedback loop), mute for 3 s. The loop

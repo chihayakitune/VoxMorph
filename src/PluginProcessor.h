@@ -51,6 +51,7 @@ private:
     std::atomic<float>* pLowVoice  = nullptr;
     std::atomic<float>* pFloor     = nullptr;
     std::atomic<float>* pAutoMute  = nullptr;
+    std::atomic<float>* pLowLat    = nullptr;
 
     // feedback-runaway protection state
     float rmsSm = 0.0f, loudSec = 0.0f, muteSec = 0.0f, muteGain = 1.0f;
