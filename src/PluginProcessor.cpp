@@ -21,8 +21,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::NormalisableRange<float> (50.0f, 200.0f, 1.0f), 100.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "center", 1 }, "Intonation Pivot (Hz)",
                 juce::NormalisableRange<float> (80.0f, 400.0f, 1.0f, 0.5f), 220.0f));
-    layout.add (std::make_unique<P> (juce::ParameterID { "breath", 1 }, "Breath",
-                juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "tilt", 1 }, "Softness / Tilt (dB)",
                 juce::NormalisableRange<float> (-6.0f, 6.0f, 0.1f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "jitter", 1 }, "Natural Jitter",
@@ -49,7 +47,6 @@ VoxMorphProcessor::VoxMorphProcessor()
     pConsonant = apvts.getRawParameterValue ("consonant");
     pRange     = apvts.getRawParameterValue ("range");
     pCenter    = apvts.getRawParameterValue ("center");
-    pBreath    = apvts.getRawParameterValue ("breath");
     pTilt      = apvts.getRawParameterValue ("tilt");
     pJitter    = apvts.getRawParameterValue ("jitter");
     pRobot     = apvts.getRawParameterValue ("robot");
@@ -88,7 +85,8 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.consonantSemi = pConsonant->load();
     p.pitchRange    = pRange->load() * 0.01f;   // % -> ratio
     p.pitchCenterHz = pCenter->load();
-    p.breath        = pBreath->load();
+    p.breath        = 0.0f;   // Breath UI removed for now — proper spectral
+                              // implementation planned with Phase 2 (per-formant)
     p.tiltDb        = pTilt->load();
     p.jitter        = pJitter->load();
     p.robotize      = pRobot->load() > 0.5f;

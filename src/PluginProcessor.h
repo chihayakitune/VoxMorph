@@ -41,7 +41,6 @@ private:
     std::atomic<float>* pConsonant = nullptr;
     std::atomic<float>* pRange     = nullptr;
     std::atomic<float>* pCenter    = nullptr;
-    std::atomic<float>* pBreath    = nullptr;
     std::atomic<float>* pTilt      = nullptr;
     std::atomic<float>* pJitter    = nullptr;
     std::atomic<float>* pRobot     = nullptr;
