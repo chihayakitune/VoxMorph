@@ -55,6 +55,10 @@ public:
         // cut the region around each tracked formant.
         float f1Shift = 0.0f, f2Shift = 0.0f, f3Shift = 0.0f;   // semitones
         float f1Gain  = 0.0f, f2Gain  = 0.0f, f3Gain  = 0.0f;   // dB
+
+        // Low Latency Mode: halves the lookahead (43 -> ~21 ms). Pitch
+        // tracking floor rises to ~90 Hz. Ignored while lowVoice is on.
+        bool  lowLatency = false;
     };
 
     void prepare (double sampleRate)
@@ -116,6 +120,16 @@ public:
         perFmt = std::abs (q.f1Shift) > 0.01f || std::abs (q.f2Shift) > 0.01f
               || std::abs (q.f3Shift) > 0.01f || std::abs (q.f1Gain) > 0.05f
               || std::abs (q.f2Gain)  > 0.05f || std::abs (q.f3Gain) > 0.05f;
+
+        const bool lowLat = q.lowLatency && ! q.lowVoice;   // lowVoice wins
+        pendingD    = (int) (fs * (lowLat ? 0.0213 : 0.0427));
+        effMaxLagCur = lowVoice ? maxLagLow
+                                : (lowLat ? (int)(fs / 90.0) : maxLag);
+        capHalfCur   = lowVoice ? 700.0f
+                                : (lowLat ? (float)(fs / 150.0) : (float) maxLag);
+        houtCapCur   = lowVoice ? std::min (maxHout, 900)
+                                : (lowLat ? (int)(fs / 120.0) : maxHout);
+        guardFrac    = lowLat ? 0.35f : 1.0f;   // snap-grid drift budget
     }
 
     // legacy convenience overload (kept for compatibility)
@@ -132,6 +146,16 @@ public:
     // Mono in → mono out, n samples. out may alias in.
     void process (const float* in, float* out, int n)
     {
+        if (pendingD != D)     // latency mode changed: soft reset
+        {
+            D = pendingD;
+            std::fill (accBuf.begin(),  accBuf.end(),  0.0f);
+            std::fill (normBuf.begin(), normBuf.end(), 0.0f);
+            nextMarkF  = (double) (writePos + D);
+            lastInMark = (double) writePos;
+            voiced = false;
+            holdCount = 0;
+        }
         const int64_t start = writePos;
         for (int i = 0; i < n; ++i)
             inBuf[(size_t) ((start + i) & kMask)] = in[i];
@@ -144,7 +168,7 @@ public:
             sinceDetect = 0;
         }
 
-        while (nextMarkF < (double) (writePos + maxHout))
+        while (nextMarkF < (double) (writePos + houtCapCur))
             placeGrain();
 
         const bool doTilt = (gLow != 1.0f || gHigh != 1.0f);
@@ -184,7 +208,7 @@ private:
     // ---------------- pitch detection (YIN + octave guard) ----------------
     void detectPitch()
     {
-        const int effMaxLag = lowVoice ? maxLagLow : maxLag;
+        const int effMaxLag = effMaxLagCur;
         const int span = kDetN + effMaxLag;
         const int64_t s0 = writePos - span;
         for (int i = 0; i < span; ++i)
@@ -347,7 +371,7 @@ private:
         {
             const double k = std::round ((natural - lastInMark) / (double) P);
             c = lastInMark + k * (double) P;
-            if (std::abs (c - natural) > (double) P)
+            if (std::abs (c - natural) > (double) (guardFrac * P))
                 c = natural;
             c = alignToPeak (c, P);
             lastInMark = c;
@@ -359,12 +383,10 @@ private:
         // voices at once (doubling); narrowing to ~1.25x the output spacing
         // keeps exactly one pulse per grain. Also capped so very low pitches
         // (Low Voice Mode, down to 40 Hz) fit inside the lookahead window.
-        const float capHalf  = lowVoice ? 700.0f : (float) maxLag;
-        float baseHalf = v ? std::min (P, capHalf) : 256.0f;
+        float baseHalf = v ? std::min (P, capHalfCur) : 256.0f;
         if (v)
             baseHalf = std::min (baseHalf, std::max (48.0f, 1.25f * Ts));
-        const int   houtCap  = lowVoice ? std::min (maxHout, 900) : maxHout;
-        const int Hout = (int) std::clamp (baseHalf / f, 32.0f, (float) houtCap);
+        const int Hout = (int) std::clamp (baseHalf / f, 32.0f, (float) houtCapCur);
 
         // pass 1: resample grain into scratch
         for (int j = -Hout; j <= Hout; ++j)
@@ -649,8 +671,10 @@ private:
     static constexpr int kFFT = 4096;     // spectral-layer FFT size
 
     double fs = 48000.0;
-    int    D = 2048, maxLag = 800, maxLagLow = 1200, minLag = 96, maxHout = 1200;
+    int    D = 2048, pendingD = 2048, maxLag = 800, maxLagLow = 1200, minLag = 96, maxHout = 1200;
     int    holdCount = 0;
+    int    effMaxLagCur = 800, houtCapCur = 1200;
+    float  capHalfCur = 800.0f, guardFrac = 1.0f;
 
     std::vector<float>  inBuf, accBuf, normBuf, tmp, grainScratch;
     std::vector<float>  fr, fi, mag, env, envSm, pkV;
