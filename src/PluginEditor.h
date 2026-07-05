@@ -85,12 +85,6 @@ public:
                  "合わせてください(女声なら200〜250Hz)。Amountが100%のときは無効。"));
 
         addSection ("VOICE QUALITY");
-        addSliderRow ("breath2", "Breath",
-            tip ("Adds aspiration noise shaped by your vocal tract (noise-excited envelope), "
-                 "synchronised with the voice. Small amounts (0.1-0.3) give a soft, airy quality. "
-                 "Female voices naturally carry more breath than male voices.",
-                 "声道の響きで整形した気息ノイズを声に同期して加えます(ノイズ励振方式)。"
-                 "少量(0.1〜0.3)で柔らかく空気感のある質感に。女声は男声より息成分が多いのが自然です。"));
         addSliderRow ("tilt", "Softness / Tilt (dB)",
             tip ("Spectral tilt of the voice. + is softer and warmer, - is brighter and more present. "
                  "Start around +/-2 dB.",
@@ -110,6 +104,13 @@ public:
                  "変換/未変換が交互に切り替わってロボット的になる現象を防ぎます。"
                  "必要な場合のみオンにしてください。"));
 
+        addSliderRow ("breath2", "Breath (Beta)",
+            tip ("EXPERIMENTAL. Replaces the upper harmonics with aspiration noise shaped by your "
+                 "vocal tract (harmonic+noise model). Small amounts (0.1-0.2) add air; the quality "
+                 "is still being tuned - leave at 0 if it sounds synthetic to you.",
+                 "実験的機能。高域の倍音を、声道の響きで整形した気息ノイズに置き換えます"
+                 "(ハーモニック+ノイズモデル)。0.1〜0.2で空気感が出ます。品質は調整中なので、"
+                 "合成的に聞こえる場合は0のままにしてください。"));
         addSliderRow ("pitchfloor", "Pitch Floor (Hz)",
             tip ("If the converted pitch falls below this, it is lifted softly toward the floor. "
                  "Useful when your voice drifts too low while speaking. 0 = off. "
