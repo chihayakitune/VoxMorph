@@ -30,6 +30,18 @@ public:
             tip ("The fixed pitch (Hz) used while Robotize is on.",
                  "Robotizeがオンのとき固定されるピッチ(Hz)。"));
 
+        addSection ("FORMANT");
+        addSliderRow ("formant", "Formant (semitones)",
+            tip ("Changes the vocal-tract size = the timbre, without changing pitch. "
+                 "+ sounds younger/feminine, - sounds deeper/masculine. +3 to +4 for male-to-female.",
+                 "声道の長さ=声の響き・声色を変えます。ピッチは変わりません。"
+                 "+で若く/女性的に、-で太く/男性的に。女声化は+3〜+4が目安。"));
+        addSliderRow ("consonant", "Consonant Shift (st)",
+            tip ("Extra shift applied only to unvoiced consonants (s, sh...), added on top of Formant. "
+                 "Female consonants are brighter: try +2 to +3. Too much sounds like a lisp.",
+                 "無声子音(サ行・シャ行など)だけを追加でシフトします(Formantに加算)。"
+                 "女声の子音は明るいので+2〜+3が目安。上げすぎると舌足らずに聞こえます。"));
+
         addSection ("INTONATION");
         addSliderRow ("range", "Intonation Amount (%)",
             tip ("Exaggerates or flattens the pitch movement (intonation). 100% = unchanged. "
@@ -44,18 +56,6 @@ public:
                  "抑揚を拡大/縮小するときの中心になる音程。変換後の声の平均的な高さに"
                  "合わせてください(女声なら200〜250Hz)。Amountが100%のときは無効。"));
 
-        addSection ("FORMANT");
-        addSliderRow ("formant", "Formant (semitones)",
-            tip ("Changes the vocal-tract size = the timbre, without changing pitch. "
-                 "+ sounds younger/feminine, - sounds deeper/masculine. +3 to +4 for male-to-female.",
-                 "声道の長さ=声の響き・声色を変えます。ピッチは変わりません。"
-                 "+で若く/女性的に、-で太く/男性的に。女声化は+3〜+4が目安。"));
-        addSliderRow ("consonant", "Consonant Shift (st)",
-            tip ("Extra shift applied only to unvoiced consonants (s, sh...), added on top of Formant. "
-                 "Female consonants are brighter: try +2 to +3. Too much sounds like a lisp.",
-                 "無声子音(サ行・シャ行など)だけを追加でシフトします(Formantに加算)。"
-                 "女声の子音は明るいので+2〜+3が目安。上げすぎると舌足らずに聞こえます。"));
-
         addSection ("VOICE QUALITY");
         addSliderRow ("tilt", "Softness / Tilt (dB)",
             tip ("Spectral tilt of the voice. + is softer and warmer, - is brighter and more present. "
@@ -64,6 +64,17 @@ public:
         addSliderRow ("jitter", "Natural Jitter",
             tip ("Adds tiny natural pitch fluctuations to reduce the 'machine' feel. Try around 0.1.",
                  "ごく小さな音程の揺らぎを加え、変換の機械っぽさを和らげます。0.1前後から。"));
+
+        addSection ("ADVANCED");
+        addToggleRow ("lowvoice", "Low Voice Mode",
+            tip ("For deep or creaky voices (vocal fry). Extends pitch tracking down to 40 Hz and "
+                 "holds the last stable pitch through irregular, gravelly stretches - this prevents "
+                 "the converted/unconverted flutter on low 'mm' or 'eh' sounds. "
+                 "Leave off unless you need it.",
+                 "低くガラガラした声(ボーカルフライ)向けのモード。ピッチ検出を40Hzまで拡張し、"
+                 "不規則な区間では直前の安定ピッチを保持します。低い「んー」「えー」で"
+                 "変換/未変換が交互に切り替わってロボット的になる現象を防ぎます。"
+                 "必要な場合のみオンにしてください。"));
 
         addSection ("OUTPUT");
         addSliderRow ("mix", "Mix",

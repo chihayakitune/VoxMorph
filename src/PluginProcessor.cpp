@@ -27,6 +27,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "robot", 1 }, "Robotize", false));
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "lowvoice", 1 }, "Low Voice Mode", false));
     layout.add (std::make_unique<P> (juce::ParameterID { "robotHz", 1 }, "Robot Pitch (Hz)",
                 juce::NormalisableRange<float> (40.0f, 400.0f, 0.1f, 0.5f), 120.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "mix", 1 }, "Mix",
@@ -50,6 +52,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pTilt      = apvts.getRawParameterValue ("tilt");
     pJitter    = apvts.getRawParameterValue ("jitter");
     pRobot     = apvts.getRawParameterValue ("robot");
+    pLowVoice  = apvts.getRawParameterValue ("lowvoice");
     pRobotHz   = apvts.getRawParameterValue ("robotHz");
     pMix       = apvts.getRawParameterValue ("mix");
     pGain      = apvts.getRawParameterValue ("gain");
@@ -90,6 +93,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.tiltDb        = pTilt->load();
     p.jitter        = pJitter->load();
     p.robotize      = pRobot->load() > 0.5f;
+    p.lowVoice      = pLowVoice->load() > 0.5f;
     p.robotHz       = pRobotHz->load();
     p.mix           = pMix->load();
     engine.setParams (p);
