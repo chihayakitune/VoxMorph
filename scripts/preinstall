@@ -1,0 +1,21 @@
+#!/bin/bash
+# VoxMorph installer preinstall:
+# remove copies from older installs (v0.1 was installed into the user's home
+# by install-mac.command) so Installer's relocation logic can't get confused
+# and the new files always land in /Library and /Applications.
+
+CUSER=$(stat -f%Su /dev/console)
+UHOME=$(dscl . -read "/Users/$CUSER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+[ -z "$UHOME" ] && UHOME="/Users/$CUSER"
+
+rm -rf "$UHOME/Library/Audio/Plug-Ins/Components/VoxMorph.component" \
+       "$UHOME/Library/Audio/Plug-Ins/VST3/VoxMorph.vst3" \
+       "$UHOME/Applications/VoxMorph.app" \
+       "/Library/Audio/Plug-Ins/Components/VoxMorph.component" \
+       "/Library/Audio/Plug-Ins/VST3/VoxMorph.vst3" \
+       "/Applications/VoxMorph.app"
+
+# reset the AU registrar cache so Logic picks up the new version
+killall -9 AudioComponentRegistrar 2>/dev/null || true
+
+exit 0
