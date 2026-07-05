@@ -279,9 +279,12 @@ private:
         }
 
         const float newP = (float) std::clamp (p, (double) minLag, (double) effMaxLag);
-        // Low Voice Mode: heavier smoothing steadies the wobble of irregular
-        // fry pulses (individual periods jitter by >10%)
-        const float smooth = lowVoice ? 0.85f : 0.65f;
+        // Adaptive smoothing: heavy while steady (kills fry-pulse wobble),
+        // light while the pitch is really moving (glides must not lag —
+        // a lagging period estimate makes grains mismatch and sound doubled)
+        const float smoothBase = lowVoice ? 0.85f : 0.65f;
+        const float rel = std::abs (newP - curP) / std::max (curP, 1.0f);
+        const float smooth = (voiced && rel > 0.06f) ? 0.5f : smoothBase;
         curP  = voiced ? smooth * curP + (1.0f - smooth) * newP : newP;
         voiced = true;
     }
@@ -329,10 +332,16 @@ private:
             lastInMark = c;
         }
 
-        // grain half width: ~1 period, capped so very low pitches (Low Voice
-        // Mode, down to 40 Hz) still fit inside the lookahead window
+        // grain half width: ~1 input period, but never much wider than the
+        // OUTPUT spacing. With large upward shifts a 2-period grain carries a
+        // second pulse that lands between the new marks and sounds like two
+        // voices at once (doubling); narrowing to ~1.25x the output spacing
+        // keeps exactly one pulse per grain. Also capped so very low pitches
+        // (Low Voice Mode, down to 40 Hz) fit inside the lookahead window.
         const float capHalf  = lowVoice ? 700.0f : (float) maxLag;
-        const float baseHalf = v ? std::min (P, capHalf) : 256.0f;
+        float baseHalf = v ? std::min (P, capHalf) : 256.0f;
+        if (v)
+            baseHalf = std::min (baseHalf, std::max (48.0f, 1.25f * Ts));
         const int   houtCap  = lowVoice ? std::min (maxHout, 900) : maxHout;
         const int Hout = (int) std::clamp (baseHalf / f, 32.0f, (float) houtCap);
 
