@@ -8,7 +8,7 @@ jobs:
   build-macos:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Configure (Universal binary)
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
@@ -25,18 +25,37 @@ jobs:
       - name: Build installer package (.pkg)
         run: |
           STAGE=pkgroot
-          mkdir -p "$STAGE/Library/Audio/Plug-Ins/Components" \
-                   "$STAGE/Library/Audio/Plug-Ins/VST3" \
-                   "$STAGE/Applications"
-          cp -R "build/VoxMorph_artefacts/Release/AU/VoxMorph.component"  "$STAGE/Library/Audio/Plug-Ins/Components/"
-          cp -R "build/VoxMorph_artefacts/Release/VST3/VoxMorph.vst3"    "$STAGE/Library/Audio/Plug-Ins/VST3/"
+          mkdir -p "$STAGE/Library/Audio/Plug-Ins/Components" "$STAGE/Library/Audio/Plug-Ins/VST3" "$STAGE/Applications"
+          cp -R "build/VoxMorph_artefacts/Release/AU/VoxMorph.component" "$STAGE/Library/Audio/Plug-Ins/Components/"
+          cp -R "build/VoxMorph_artefacts/Release/VST3/VoxMorph.vst3" "$STAGE/Library/Audio/Plug-Ins/VST3/"
           cp -R "build/VoxMorph_artefacts/Release/Standalone/VoxMorph.app" "$STAGE/Applications/"
+
+          # disable bundle relocation: always install to the fixed paths,
+          # never "update" a stray old copy found somewhere else
+          pkgbuild --analyze --root "$STAGE" components.plist
+          python3 - <<'EOF'
+          import plistlib
+          with open('components.plist','rb') as f:
+              comps = plistlib.load(f)
+          for c in comps:
+              c['BundleIsRelocatable'] = False
+          with open('components.plist','wb') as f:
+              plistlib.dump(comps, f)
+          EOF
+
+          # preinstall script removes old v0.1 copies (incl. per-user installs)
+          mkdir -p pkgscripts
+          cp scripts/preinstall pkgscripts/preinstall
+          chmod +x pkgscripts/preinstall
+
           pkgbuild --root "$STAGE" \
+                   --component-plist components.plist \
+                   --scripts pkgscripts \
                    --identifier com.hakamaaudio.voxmorph \
                    --version 0.2.0 \
                    "VoxMorph-Installer.pkg"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: VoxMorph-macOS-Installer
           path: VoxMorph-Installer.pkg
@@ -44,7 +63,7 @@ jobs:
   build-windows:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Configure
         run: cmake -B build
@@ -52,7 +71,7 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel 3
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: VoxMorph-Windows
           path: |
