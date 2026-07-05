@@ -33,7 +33,7 @@ jobs:
           cp -R "build/VoxMorph_artefacts/Release/Standalone/VoxMorph.app" "$STAGE/Applications/"
           pkgbuild --root "$STAGE" \
                    --identifier com.hakamaaudio.voxmorph \
-                   --version 0.1.0 \
+                   --version 0.2.0 \
                    "VoxMorph-Installer.pkg"
 
       - uses: actions/upload-artifact@v4
