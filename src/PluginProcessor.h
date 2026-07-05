@@ -39,12 +39,18 @@ private:
     PsolaEngine engine;
     std::vector<float> monoScratch;
 
-    std::atomic<float>* pPitch   = nullptr;
-    std::atomic<float>* pFormant = nullptr;
-    std::atomic<float>* pRobot   = nullptr;
-    std::atomic<float>* pRobotHz = nullptr;
-    std::atomic<float>* pMix     = nullptr;
-    std::atomic<float>* pGain    = nullptr;
+    std::atomic<float>* pPitch     = nullptr;
+    std::atomic<float>* pFormant   = nullptr;
+    std::atomic<float>* pConsonant = nullptr;
+    std::atomic<float>* pRange     = nullptr;
+    std::atomic<float>* pCenter    = nullptr;
+    std::atomic<float>* pBreath    = nullptr;
+    std::atomic<float>* pTilt      = nullptr;
+    std::atomic<float>* pJitter    = nullptr;
+    std::atomic<float>* pRobot     = nullptr;
+    std::atomic<float>* pRobotHz   = nullptr;
+    std::atomic<float>* pMix       = nullptr;
+    std::atomic<float>* pGain      = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoxMorphProcessor)
 };
