@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(VoxMorph VERSION 0.2.0)
+project(VoxMorph VERSION 0.2.1)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,6 +35,10 @@ juce_add_plugin(VoxMorph
 
 target_sources(VoxMorph PRIVATE src/PluginProcessor.cpp)
 target_include_directories(VoxMorph PRIVATE dsp)
+
+if (MSVC)
+    target_compile_options(VoxMorph PRIVATE /utf-8)   # 日本語UI文字列のため
+endif()
 
 target_compile_definitions(VoxMorph PUBLIC
     JUCE_WEB_BROWSER=0
