@@ -1,0 +1,50 @@
+# VoxMorph 開発引き継ぎ書 (AIセッション用)
+
+最終更新: v0.5.2 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+
+## プロジェクト概要
+
+- **VoxMorph**: リアルタイム波形変換型ボイスチェンジャー。Logic Pro「Vocal Transformer」の上位互換が目標(達成済み)。AI音声変換ではなく信号処理方式。
+- リポジトリ: `github.com/chihayakitune/VoxMorph`(Public)
+- 形態: AU / VST3 プラグイン + スタンドアロンアプリ(macOS/Windows)、JUCE 8 + CMake
+- ビルド: GitHub Actions が push 毎に自動ビルド。Artifacts の `VoxMorph-macOS-Installer`(pkg、ダブルクリックで上書きインストール可)と `VoxMorph-Windows`
+- ユーザー(袴さん)は非プログラマー。**開発ワークフロー: AIが修正ファイルを渡し、ユーザーがGitHub Webへ手動アップロード**(AIによるブラウザ操作はしない約束)
+
+## アーキテクチャ
+
+- `dsp/PsolaEngine.h` — **依存ゼロの単一ヘッダC++17**。エンジン本体(TD-PSOLA):
+  - YINピッチ検出(×2デシメーション+全レート精密補正、512サンプル毎、オクターブ誤り補正、パルスレート優先、上方向復帰許可)
+  - ピッチ同期グレイン切出し(ピーク整列、グレイン幅=min(入力周期, 1.25×出力間隔)←二重声対策)
+  - スペクトル層(グレイン毎FFT 2048/4096適応): 倍音頂点結合の包絡推定→F1/F2/F3追跡→区分線形ワープ+個別ゲイン、Breath(ノイズ励振、Beta)
+  - **どんなホストバッファも内部で512サンプル毎に分割処理**(全挙動バッファ非依存、v0.5.2)
+  - 未使用機能は全て自動スキップ(CPU: 通常1.4%、F1-F3使用時2.6% @48k)
+- `src/PluginProcessor.{h,cpp}` — JUCEラッパ、パラメータ(APVTS)、ハウリング自動ミュート(時間基準、RMS>0.70が1.5秒で3秒ミュート)
+- `src/PluginEditor.h` — 英語UI+英日バイリンガルツールチップ、セクション: PITCH/FORMANT/INTONATION/VOICE QUALITY/ADVANCED/OUTPUT。Cmd+S保存(スタンドアロン)
+- `test/offline_test.cpp` + `analyze.py` — 合成母音での数値検証(Linux g++でコンパイル可、JUCE不要)。**エンジン変更時は必ず実行**: f0/フォルマント独立性、抑揚、子音シフト、フライ声、回帰一式
+
+## 主要パラメータ(内部ID)
+
+pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, range(抑揚)/center, breath2(Beta), tilt, jitter, robot/robotHz, lowvoice, lowlat, pitchfloor, automute, mix, gain
+
+## 重要な設計判断・経緯
+
+- Vocal Transformerはgranular(PSOLA近縁)方式 — Logic 9マニュアルに明記。同系統を自作した
+- 二重声バグ→グレイン幅を出力間隔に適応(v0.3.2)。低音フライ声→Low Voice Mode(40Hz+ホールド、v0.3系)
+- Breathは加算方式→HNM置換方式まで試したが**ユーザー評価は「電子ノイズ」でBeta棚上げ中**。次の本命=連続ノイズを声道フィルタに通す方式(グレイン毎ノイズ再生成をやめる)
+- 大バッファのブツブツ/無音バグ(v0.5.2で解決)=自動ミュートのバッファ依存誤爆+検出頻度低下
+- 推奨バッファ256@48k。バッファは音質に影響しない設計
+- バージョン番号は `CMakeLists.txt` の project(VERSION) と `.github/workflows/build.yml` の pkgbuild --version の**2箇所**を同時に上げる
+
+## 凍結中(ユーザー指示によりストップ)
+
+- Low Latency Mode の追加開発(実装済み・動作するが優先度下げ)
+- Breath改良、専用仮想デバイス同梱
+
+## 次の候補(未着手)
+
+- ChatGPT調査資料(`psola_engine_research_for_claude.txt`、ユーザー保有)より: Mixed区間処理(息混じり母音のharmonic+noise分離)、GCI/ESOLA同期 — 音質向上の本命2つ
+- 専用スキンUI、プリセット機能
+
+## 引き継ぎ手順
+
+新セッションで: このファイルと、必要に応じ `DESIGN.md` / `dsp/PsolaEngine.h` を読む。検証はサンドボックスで `g++ -O2 -std=c++17 test/offline_test.cpp` → `python3 test/analyze.py`(要numpy)。修正ファイルはユーザーに渡し、アップロード先フォルダを明記すること。
