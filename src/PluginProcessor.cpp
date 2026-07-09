@@ -170,14 +170,18 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         double sum = 0.0;
         for (int i = 0; i < n; ++i) sum += (double) m[i] * m[i];
         const float rms = (float) std::sqrt (sum / std::max (1, n));
-        rmsSm = 0.85f * rmsSm + 0.15f * rms;
-
         const float dt = (float) n / (float) std::max (1.0, getSampleRate());
+        // time-based smoothing (~50 ms) so behaviour does NOT depend on the
+        // host buffer size; threshold high enough that loud singing can't
+        // trigger it — genuine runaway feedback reaches near full scale
+        const float aR = std::min (1.0f, dt / 0.05f);
+        rmsSm += aR * (rms - rmsSm);
+
         if (fbActive)
         {
-            if (rmsSm > 0.45f) loudSec += dt;
+            if (rmsSm > 0.70f) loudSec += dt;
             else               loudSec = std::max (0.0f, loudSec - 2.0f * dt);
-            if (loudSec > 1.2f) { muteSec = 3.0f; loudSec = 0.0f; }
+            if (loudSec > 1.5f) { muteSec = 3.0f; loudSec = 0.0f; }
         }
         if (muteSec > 0.0f) muteSec -= dt;
 
