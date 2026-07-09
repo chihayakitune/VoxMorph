@@ -147,6 +147,20 @@ public:
     // Mono in → mono out, n samples. out may alias in.
     void process (const float* in, float* out, int n)
     {
+        // Internally chop large host buffers into <=512-sample chunks so the
+        // engine behaves identically at ANY buffer size: pitch-detection
+        // cadence, grain scheduling and dezippering all stay uniform.
+        while (n > 512)
+        {
+            processChunk (in, out, 512);
+            in += 512; out += 512; n -= 512;
+        }
+        if (n > 0)
+            processChunk (in, out, n);
+    }
+
+    void processChunk (const float* in, float* out, int n)
+    {
         if (pendingD != D)     // latency mode changed: soft reset
         {
             D = pendingD;
