@@ -74,6 +74,7 @@ public:
         accBuf.assign (kRing, 0.0f);
         normBuf.assign (kRing, 0.0f);
         tmp.assign ((size_t) (kDetN + maxLagLow + 4), 0.0f);
+        tmpD.assign ((size_t) ((kDetN + maxLagLow) / 2 + 4), 0.0f);
         grainScratch.assign ((size_t) (2 * maxHout + 2), 0.0f);
         holdCount = 0;
 
@@ -161,6 +162,15 @@ public:
             inBuf[(size_t) ((start + i) & kMask)] = in[i];
         writePos += n;
 
+        // dezipper: glide the conversion ratios over ~40 ms so parameter
+        // moves (or host automation) never step audibly between grains
+        {
+            const float a = std::min (1.0f, (float) (n / (0.04 * fs)));
+            prSm += a * (pitchRatio     - prSm);
+            frSm += a * (formantRatio   - frSm);
+            crSm += a * (consonantRatio - crSm);
+        }
+
         sinceDetect += n;
         if (sinceDetect >= 512 && writePos >= kDetN + maxLag)
         {
@@ -218,16 +228,26 @@ private:
         for (int i = 0; i < kDetN; ++i) energy += (double) tmp[(size_t)i] * tmp[(size_t)i];
         if (energy / kDetN < 1.0e-8) { voiced = false; holdCount = 0; return; }
 
+        // ---- decimate x2: the CMND search runs on a half-rate copy, cutting
+        // this burst (which lands on a SINGLE block every 512 samples) ~4x.
+        // That periodic burst was the main cause of dropouts at small buffers.
+        const int spanD = span / 2;
+        const int ND    = kDetN / 2;
+        const int minL  = std::max (2, minLag / 2);
+        const int maxL  = effMaxLag / 2;
+        for (int i = 0; i < spanD; ++i)
+            tmpD[(size_t)i] = 0.5f * (tmp[(size_t)(2*i)] + tmp[(size_t)(2*i + 1)]);
+
         std::vector<double>& d = dbuf;
-        d.assign ((size_t) effMaxLag + 1, 1.0);
+        d.assign ((size_t) maxL + 1, 1.0);
 
         double cum = 0.0;
-        for (int tau = 1; tau <= effMaxLag; ++tau)
+        for (int tau = 1; tau <= maxL; ++tau)
         {
             double s = 0.0;
-            const float* a = tmp.data();
-            const float* b = tmp.data() + tau;
-            for (int i = 0; i < kDetN; ++i)
+            const float* a = tmpD.data();
+            const float* b = tmpD.data() + tau;
+            for (int i = 0; i < ND; ++i)
             {
                 const double diff = (double) a[i] - (double) b[i];
                 s += diff * diff;
@@ -239,11 +259,11 @@ private:
         // first local minimum below threshold, else global minimum
         int pick = -1, best = -1;
         double bestVal = 1.0e9;
-        for (int tau = minLag; tau <= effMaxLag; ++tau)
+        for (int tau = minL; tau <= maxL; ++tau)
         {
             const double v = d[(size_t) tau];
             if (v < bestVal) { bestVal = v; best = tau; }
-            if (pick < 0 && v < 0.15 && tau > minLag && tau < effMaxLag
+            if (pick < 0 && v < 0.15 && tau > minL && tau < maxL
                 && v <= d[(size_t)(tau-1)] && v <= d[(size_t)(tau+1)])
                 pick = tau;
         }
@@ -254,11 +274,11 @@ private:
         // minimum sits an octave (or more) too low; respacing single pulses
         // both fixes the "pulled down an octave" tracking and regularises
         // the fry in the output. Repeatedly try half the current lag.
-        while (lag > 0 && lag / 2 >= minLag)
+        while (lag > 0 && lag / 2 >= minL)
         {
             const int c0 = lag / 2;
-            const int lo = std::max (minLag, (int) (c0 * 0.85f));
-            const int hi = std::min (effMaxLag, (int) (c0 * 1.15f));
+            const int lo = std::max (minL, (int) (c0 * 0.85f));
+            const int hi = std::min (maxL, (int) (c0 * 1.15f));
             int bl = -1; double bv = 1.0e9;
             for (int t = lo; t <= hi; ++t)
                 if (d[(size_t) t] < bv) { bv = d[(size_t) t]; bl = t; }
@@ -293,8 +313,9 @@ private:
         // otherwise a wrong low lock can never recover.
         if (voiced)
         {
-            const int lo = std::max (minLag, (int) (curP * 0.72f));
-            const int hi = std::min (effMaxLag, (int) (curP * 1.38f));
+            const float curPD = curP * 0.5f;              // decimated domain
+            const int lo = std::max (minL, (int) (curPD * 0.72f));
+            const int hi = std::min (maxL, (int) (curPD * 1.38f));
             if (lo < hi && lag > hi)                       // jumped lower
             {
                 int    nl = -1; double nv = 1.0e9;
@@ -314,10 +335,31 @@ private:
             }
         }
 
-        double p = (double) lag;
-        if (lag > minLag && lag < effMaxLag)
+        // ---- full-rate refinement around 2*lag: sub-sample precision from
+        // the plain difference function (cheap: 5 lags x kDetN)
+        const int Lc = std::clamp (2 * lag, minLag, effMaxLag);
+        double df[5];
+        for (int k = 0; k < 5; ++k)
         {
-            const double y0 = d[(size_t)(lag-1)], y1 = d[(size_t)lag], y2 = d[(size_t)(lag+1)];
+            const int L = std::clamp (Lc + k - 2, 1, effMaxLag);
+            double s = 0.0;
+            const float* a = tmp.data();
+            const float* b = tmp.data() + L;
+            for (int i = 0; i < kDetN; ++i)
+            {
+                const double diff = (double) a[i] - (double) b[i];
+                s += diff * diff;
+            }
+            df[k] = s;
+        }
+        int mi5 = 1;
+        for (int k = 2; k < 4; ++k) if (df[k] < df[mi5]) mi5 = k;
+        if (df[0] < df[mi5]) mi5 = 0;
+        if (df[4] < df[mi5]) mi5 = 4;
+        double p = (double) std::clamp (Lc + mi5 - 2, 1, effMaxLag);
+        if (mi5 > 0 && mi5 < 4)
+        {
+            const double y0 = df[mi5-1], y1 = df[mi5], y2 = df[mi5+1];
             const double den = y0 - 2.0*y1 + y2;
             if (std::abs (den) > 1.0e-12)
                 p += 0.5 * (y0 - y2) / den;
@@ -339,7 +381,7 @@ private:
     {
         const float P = curP;
         const bool  v = voiced;
-        const float f = std::max (0.25f, v ? formantRatio : consonantRatio);
+        const float f = std::max (0.25f, v ? frSm : crSm);
 
         float Ts;
         if (robotize)
@@ -347,7 +389,7 @@ private:
         else if (v)
         {
             // intonation scaling: f_out = center * (f_in*ratio / center)^range
-            double ft = (fs / (double) P) * (double) pitchRatio;
+            double ft = (fs / (double) P) * (double) prSm;
             if (range != 1.0f)
                 ft = (double) centerHz * std::pow (ft / (double) centerHz, (double) range);
             if (floorHz > 20.0f && ft < (double) floorHz)          // soft low lift
@@ -427,7 +469,8 @@ private:
     // noise-excited-envelope breath -> IFFT. The grain comes back windowed.
     void spectralProcess (int len, float f)
     {
-        const int N  = kFFT;
+        // adaptive FFT size: most grains fit in 2048, halving the burst cost
+        const int N  = (len <= 2040) ? kFFT / 2 : kFFT;
         const int NB = N / 2;
         if (len > N) len = N;
         const int H = (len - 1) / 2;
@@ -676,7 +719,7 @@ private:
     int    effMaxLagCur = 800, houtCapCur = 1200;
     float  capHalfCur = 800.0f, guardFrac = 1.0f;
 
-    std::vector<float>  inBuf, accBuf, normBuf, tmp, grainScratch;
+    std::vector<float>  inBuf, accBuf, normBuf, tmp, tmpD, grainScratch;
     std::vector<float>  fr, fi, mag, env, envSm, pkV;
     std::vector<int>    pkB;
     std::vector<double> dbuf, prefix;
@@ -693,6 +736,7 @@ private:
     uint32_t rng = 0x1234567u;
 
     float pitchRatio = 1.0f, formantRatio = 1.0f, consonantRatio = 1.0f;
+    float prSm = 1.0f, frSm = 1.0f, crSm = 1.0f;   // dezippered ratios
     float range = 1.0f, centerHz = 220.0f, breath = 0.0f, jitterAmt = 0.0f;
     float gLow = 1.0f, gHigh = 1.0f, tiltLp = 0.0f, tiltK = 0.12f;
     float mix = 1.0f, robotHz = 120.0f, floorHz = 0.0f;
