@@ -124,16 +124,18 @@ public:
                  "音程を動かしたときにザラつきや元の声の高さの残りが聴こえる場合は上げてください。"));
 
         addSection ("ADVANCED");
-        addToggleRow ("gci", "GCI Grain Sync",
-            tip ("Aligns the internal grain cutting to the glottal closure instants (the exact "
-                 "moments the vocal folds snap shut) and keeps them phase-locked from period to "
-                 "period. Can reduce roughness / graininess of the converted voice, especially on "
-                 "low or slightly hoarse voices. Falls back to the classic alignment automatically "
-                 "where no clear vocal-fold pulses exist. Off = previous behaviour.",
-                 "内部のグレイン切り出しを声帯の閉鎖瞬間(GCI)に同期させ、周期ごとの位相を"
-                 "揃えます。変換後の声のザラつき・粗さが減る場合があります(低い声や少しかすれた"
-                 "声で特に有効)。明確な声帯パルスが無い区間では自動的に従来の整列に戻ります。"
-                 "オフ=従来どおり。"));
+        addToggleRow ("gci", "GCI Grain Sync (Beta)",
+            tip ("EXPERIMENTAL. Aligns the internal grain cutting to the glottal closure instants "
+                 "(the exact moments the vocal folds snap shut) and keeps them phase-locked from "
+                 "period to period. Mainly helps low / slightly hoarse voices, especially with "
+                 "Low Voice Mode. It automatically reverts to the classic alignment where no clear "
+                 "pulses exist and while the pitch is sliding. If your voice sounds juddery or "
+                 "robotic with this on, leave it off - off is the previous behaviour.",
+                 "実験的機能。内部のグレイン切り出しを声帯の閉鎖瞬間(GCI)に同期させ、周期ごとの"
+                 "位相を揃えます。主に低い声・少しかすれた声(特にLow Voice Mode併用時)で効果が"
+                 "あります。明確な声帯パルスが無い区間や音程が動いている間は自動的に従来の整列に"
+                 "戻ります。オンにしてガタつき・ロボットっぽさを感じる場合はオフのままにして"
+                 "ください(オフ=従来どおり)。"));
         addToggleRow ("lowvoice", "Low Voice Mode",
             tip ("For deep or creaky voices (vocal fry). Extends pitch tracking down to 40 Hz and "
                  "holds the last stable pitch through irregular, gravelly stretches - this prevents "

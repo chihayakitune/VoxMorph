@@ -129,6 +129,7 @@ public:
         airG   = airB = 0.0f;
         airLp1 = airLp2 = 0.0f;
         lastGci = -1;
+        gciHold = 0;
         gciE.reserve ((size_t) (maxLagLow / 3 + 8));
         airP   = curP;
         airK   = 1.0f - std::exp ((float) (-1.0 / (0.005 * fs)));          // ~5 ms gate
@@ -487,6 +488,15 @@ private:
         const float smooth = (voiced && rel > 0.06f) ? 0.5f : smoothBase;
         curP  = voiced ? smooth * curP + (1.0f - smooth) * newP : newP;
         voiced = true;
+
+        // GCI epoch tracking is unreliable while the pitch is really moving:
+        // the lastGci + k*P prediction grid shears against the true epochs
+        // and the alignment judders audibly on gliding vowels. Revert to the
+        // classic alignment until the glide settles. Low Voice Mode is
+        // exempt — its alternating fry periods would trip this constantly,
+        // and regularising fry is exactly what the epoch tracking is for.
+        if (! lowVoice && rel > 0.04f) gciHold = 4;
+        else if (gciHold > 0)         --gciHold;
     }
 
     // ---------------- grain placement ----------------
@@ -827,6 +837,7 @@ private:
     // what causes shimmer with the plain peak search.
     double alignToGci (double c, float P)
     {
+        if (gciHold > 0) { lastGci = -1; return alignToPeak (c, P); }
         const int r = std::max (6, (int) (P / 6.0f));
         const int64_t c0 = (int64_t) std::llround (c);
         const int64_t lo = c0 - r;
@@ -937,6 +948,7 @@ private:
 
     // GCI Grain Sync state
     bool    gciOn   = false;
+    int     gciHold = 0;                  // detections left in glide fallback
     int64_t lastGci = -1;                 // tracked epoch (input position)
     std::vector<double> gciE;             // scratch: epoch-detector energies
 };
