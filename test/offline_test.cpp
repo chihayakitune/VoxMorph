@@ -1,5 +1,6 @@
 // Offline verification harness for PsolaEngine (v0.2 features included).
 #include "../dsp/PsolaEngine.h"
+#include "../dsp/VoiceAnalyzer.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -280,6 +281,21 @@ int main()
         P q; q.pitchSemi = 7.0f; q.lowVoice = true;
         q.gciSync = false; writeWav ("out_gci_creak_off.wav", run (creaky2, q));
         q.gciSync = true;  writeWav ("out_gci_creak_on.wav",  run (creaky2, q));
+    }
+
+    // v0.10: VoiceAnalyzer sanity — a synthetic vowel must report its own
+    // specs (f0 120, F ~700/1220/2600); the sweep must show a wider spread
+    {
+        const auto v  = makeVowel (120.0, 120.0, 3.0);
+        const auto pr = VoiceAnalyzer::analyze (v.data(), (int) v.size(), FS);
+        std::printf ("analyzer vowel : f0=%.1f (exp 120)  F=%.0f/%.0f/%.0f (exp ~700/1220/2600)"
+                     "  L=%+.1f/%+.1f/%+.1f dB  spread=%.2f st  frames=%d\n",
+                     pr.f0Hz, pr.F[0], pr.F[1], pr.F[2], pr.L[0], pr.L[1], pr.L[2],
+                     pr.f0SpreadSt, pr.voicedFrames);
+        const auto s  = makeVowel (110.0, 132.0, 4.0);
+        const auto ps = VoiceAnalyzer::analyze (s.data(), (int) s.size(), FS);
+        std::printf ("analyzer sweep : f0=%.1f  spread=%.2f st (exp > vowel's)\n",
+                     ps.f0Hz, ps.f0SpreadSt);
     }
 
     std::puts ("done");

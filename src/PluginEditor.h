@@ -1,5 +1,6 @@
 #pragma once
 #include "PluginProcessor.h"
+#include "VoiceAnalyzer.h"
 
 // StandalonePluginHolder gives access to the standalone wrapper's state
 // saving (used for the Cmd+S shortcut). Only present in the standalone build.
@@ -26,8 +27,10 @@
 //    at the position where it should appear. Layout, scrolling and window
 //    size all adjust automatically. The paramId must exist in
 //    PluginProcessor.cpp createLayout().
-//  - Row heights / widths: see the `items.push_back` calls and resized().
+//  - Row heights / widths: see the `items.push_back` calls and layoutMainPage().
 //  - Default window height is capped by kMaxInitialHeight below.
+//  - Tabs: MAIN = scrolling parameter list, ANALYZE = AnalyzePanel (below).
+//  - All theme colours live in the mainLnf block in the constructor.
 
 // Spectrum visualizer: INPUT (mint) and converted OUTPUT (pink) spectra
 // overlaid on a 20 Hz - 20 kHz log axis. Pulls samples from the processor's
@@ -148,6 +151,208 @@ private:
     std::vector<float> re, im, smIn, smOut;
 };
 
+// ANALYZE tab: 1) record your own voice -> Profile 1, 2) load a target
+// voice file -> Profile 2 (and preview it through the plugin output),
+// 3) Auto-Set derives conversion parameters from the two profiles:
+//   pitch      = F0 difference (st)
+//   formant    = mean formant difference (st); F1-F3 shifts = per-formant trim
+//   f1-f3 gain = relative-level difference (x0.7, conservative)
+//   range/center = intonation-spread ratio and target median F0
+//   tilt       = quarter of the texture (tilt) difference
+class AnalyzePanel : public juce::Component, private juce::Timer
+{
+public:
+    explicit AnalyzePanel (VoxMorphProcessor& p) : proc (p)
+    {
+        for (auto* b : { &recBtn, &loadBtn, &playBtn, &applyBtn })
+            addAndMakeVisible (*b);
+        for (auto* l : { &help, &p1Lbl, &p2Lbl, &outLbl })
+        {
+            l->setJustificationType (juce::Justification::topLeft);
+            l->setFont (juce::Font (juce::FontOptions (13.0f)));
+            addAndMakeVisible (*l);
+        }
+        help.setText (juce::String::fromUTF8 (
+            "1) Record your voice   2) Load the target voice file   3) Auto-Set\n"
+            "1) 自分の声を5秒録音(普段の調子で喋り続ける) → 2) 目標の声の音声ファイルを読み込む\n"
+            "→ 3) Auto-Setで2つの声質プロファイルの差からMAINタブのパラメータを自動設定します。"),
+            juce::dontSendNotification);
+        p1Lbl.setText ("Profile 1 (your voice): --", juce::dontSendNotification);
+        p2Lbl.setText ("Profile 2 (target): --",     juce::dontSendNotification);
+
+        recBtn.setTooltip (juce::String::fromUTF8 ("Records 5 s of the microphone input and analyzes it.\nマイク入力を5秒録音して分析します。録音中は普段の調子で喋り続けてください。"));
+        loadBtn.setTooltip (juce::String::fromUTF8 ("Load a voice file (wav/aiff/mp3/m4a/flac, first 60 s used).\n目標の声の音声ファイルを読み込みます(先頭60秒まで)。"));
+        playBtn.setTooltip (juce::String::fromUTF8 ("Preview the loaded file through the plugin output.\n読み込んだファイルを出力から再生します。"));
+        applyBtn.setTooltip (juce::String::fromUTF8 ("Writes the derived settings into the MAIN tab parameters.\n分析結果から求めた設定をMAINタブのパラメータに書き込みます。"));
+
+        recBtn.onClick = [this]
+        {
+            proc.capLen = 0;
+            proc.capturing = true;
+            waitingCapture = true;
+            recBtn.setButtonText ("Recording... speak!");
+        };
+        loadBtn.onClick  = [this] { loadFile(); };
+        playBtn.onClick  = [this]
+        {
+            if (proc.prevPos.load() >= 0) proc.prevPos = -1;
+            else if (proc.prevLen.load() > 0) proc.prevPos = 0;
+        };
+        applyBtn.onClick = [this] { apply(); };
+        startTimerHz (10);
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (16, 12);
+        help.setBounds (r.removeFromTop (58));
+        auto r1 = r.removeFromTop (66);
+        recBtn.setBounds (r1.removeFromLeft (170).withHeight (26));
+        p1Lbl.setBounds (r1.withTrimmedLeft (10));
+        auto r2 = r.removeFromTop (66);
+        loadBtn.setBounds (r2.removeFromLeft (170).withHeight (26));
+        playBtn.setBounds (r2.removeFromLeft (90).withHeight (26).translated (8, 0));
+        p2Lbl.setBounds (r2.withTrimmedLeft (18));
+        applyBtn.setBounds (r.removeFromTop (30).withWidth (220));
+        outLbl.setBounds (r.withTrimmedTop (6));
+    }
+
+private:
+    void timerCallback() override
+    {
+        if (waitingCapture && ! proc.capturing.load())
+        {
+            waitingCapture = false;
+            recBtn.setButtonText ("Record My Voice (5s)");
+            prof1 = VoiceAnalyzer::analyze (proc.capBuf.data(), proc.capLen.load(),
+                                            proc.getSampleRate() > 0 ? proc.getSampleRate() : 48000.0);
+            p1Lbl.setText ("Profile 1 (your voice):\n" + fmt (prof1), juce::dontSendNotification);
+        }
+        playBtn.setButtonText (proc.prevPos.load() >= 0 ? "Stop" : "Play");
+    }
+
+    static juce::String fmt (const VoiceProfile& pr)
+    {
+        if (! pr.valid())
+            return juce::String::fromUTF8 ("分析できませんでした(有声区間が不足)。もう一度、声を出し続けて試してください。");
+        return juce::String::formatted ("F0 %.0f Hz (intonation %.1f st)   tilt %+.1f dB\n"
+                                        "F1 %.0f / F2 %.0f / F3 %.0f Hz   levels %+.0f / %+.0f / %+.0f dB",
+                                        pr.f0Hz, pr.f0SpreadSt, pr.tiltDb,
+                                        pr.F[0], pr.F[1], pr.F[2], pr.L[0], pr.L[1], pr.L[2]);
+    }
+
+    void loadFile()
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Select the target voice file",
+                      juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg");
+        chooser->launchAsync (juce::FileBrowserComponent::openMode
+                            | juce::FileBrowserComponent::canSelectFiles,
+            [this] (const juce::FileChooser& fc)
+        {
+            const auto file = fc.getResult();
+            if (file == juce::File()) return;
+            proc.prevPos = -1;                              // stop before writing
+            juce::AudioFormatManager fm;
+            fm.registerBasicFormats();
+            std::unique_ptr<juce::AudioFormatReader> rd (fm.createReaderFor (file));
+            if (rd == nullptr || rd->sampleRate <= 0)
+            {
+                p2Lbl.setText ("Could not read: " + file.getFileName(), juce::dontSendNotification);
+                return;
+            }
+            const int nIn = (int) std::min<juce::int64> (rd->lengthInSamples,
+                                                         (juce::int64) (rd->sampleRate * 60.0));
+            juce::AudioBuffer<float> tb ((int) rd->numChannels, nIn);
+            rd->read (&tb, 0, nIn, 0, true, true);
+
+            const double sr    = proc.getSampleRate() > 0 ? proc.getSampleRate() : 48000.0;
+            const double ratio = rd->sampleRate / sr;       // linear resample -> engine rate
+            const int nOut = std::min ((int) proc.prevBuf.size(),
+                                       (int) ((nIn - 2) / ratio));
+            const int nch = tb.getNumChannels();
+            for (int i = 0; i < nOut; ++i)
+            {
+                const double pos = i * ratio;
+                const int   i0 = (int) pos;
+                const float t  = (float) (pos - i0);
+                float sum = 0.0f;
+                for (int c = 0; c < nch; ++c)
+                    sum += tb.getSample (c, i0) * (1.0f - t)
+                         + tb.getSample (c, std::min (i0 + 1, nIn - 1)) * t;
+                proc.prevBuf[(size_t) i] = sum / (float) nch;
+            }
+            proc.prevLen = nOut;
+            prof2 = VoiceAnalyzer::analyze (proc.prevBuf.data(), nOut, sr);
+            p2Lbl.setText ("Profile 2 (" + file.getFileName() + "):\n" + fmt (prof2),
+                           juce::dontSendNotification);
+        });
+    }
+
+    void setP (const char* id, float v)
+    {
+        if (auto* p = proc.apvts.getParameter (id))
+        {
+            p->beginChangeGesture();
+            p->setValueNotifyingHost (p->convertTo0to1 (v));
+            p->endChangeGesture();
+        }
+    }
+
+    void apply()
+    {
+        if (! prof1.valid() || ! prof2.valid())
+        {
+            outLbl.setText (juce::String::fromUTF8 ("両方のプロファイルを先に作成してください。"),
+                            juce::dontSendNotification);
+            return;
+        }
+        auto st = [] (float a, float b) { return 12.0f * std::log2 (a / b); };
+        const float pitch = juce::jlimit (-24.0f, 24.0f, st (prof2.f0Hz, prof1.f0Hz));
+        float sh[3];
+        for (int i = 0; i < 3; ++i) sh[i] = st (prof2.F[i], prof1.F[i]);
+        const float formant = juce::jlimit (-24.0f, 24.0f, (sh[0] + sh[1] + sh[2]) / 3.0f);
+        const float tilt = juce::jlimit (-4.0f, 4.0f, 0.25f * (prof2.tiltDb - prof1.tiltDb));
+
+        setP ("pitch",   pitch);
+        setP ("formant", formant);
+        const char* sid[3] = { "f1shift", "f2shift", "f3shift" };
+        const char* gid[3] = { "f1gain",  "f2gain",  "f3gain"  };
+        for (int i = 0; i < 3; ++i)
+        {
+            setP (sid[i], juce::jlimit (-6.0f, 6.0f, sh[i] - formant));
+            setP (gid[i], juce::jlimit (-12.0f, 12.0f, 0.7f * (prof2.L[i] - prof1.L[i])));
+        }
+        setP ("tilt", tilt);
+        juce::String extra;
+        if (prof1.f0SpreadSt > 0.3f && prof2.f0SpreadSt > 0.3f)
+        {
+            const float range = juce::jlimit (50.0f, 200.0f,
+                                              100.0f * prof2.f0SpreadSt / prof1.f0SpreadSt);
+            setP ("range",  range);
+            setP ("center", juce::jlimit (80.0f, 400.0f, prof2.f0Hz));
+            extra = juce::String::formatted ("  range %.0f%%  center %.0f Hz", range, prof2.f0Hz);
+        }
+        outLbl.setText (juce::String::fromUTF8 ("設定しました → MAINタブで確認・微調整してください。\n")
+                        + juce::String::formatted ("pitch %+.1f st   formant %+.1f st   tilt %+.1f dB", pitch, formant, tilt)
+                        + extra, juce::dontSendNotification);
+    }
+
+    VoxMorphProcessor& proc;
+    VoiceProfile prof1, prof2;
+    bool waitingCapture = false;
+    juce::TextButton recBtn { "Record My Voice (5s)" }, loadBtn { "Load Target File..." },
+                     playBtn { "Play" }, applyBtn { "Auto-Set Parameters" };
+    juce::Label help, p1Lbl, p2Lbl, outLbl;
+    std::unique_ptr<juce::FileChooser> chooser;
+};
+
+// simple component that forwards resized() to a lambda (used for tab pages)
+struct FnComponent : public juce::Component
+{
+    std::function<void()> fn;
+    void resized() override { if (fn) fn(); }
+};
+
 class VoxMorphEditor : public juce::AudioProcessorEditor,
                        private juce::Timer
 {
@@ -173,8 +378,19 @@ public:
         mainLnf.setColour (juce::TextButton::textColourOffId,       juce::Colour (0xff54c0aa)); // reset arrows
         setLookAndFeel (&mainLnf);
 
+        // MAIN / ANALYZE tabs. The MAIN page holds the scrolling parameter
+        // list (viewport -> content); ANALYZE holds the profile tools.
+        addAndMakeVisible (tabs);
+        tabs.setTabBarDepth (30);
+        tabs.setColour (juce::TabbedComponent::outlineColourId, juce::Colours::transparentBlack);
+        tabs.setColour (juce::TabbedButtonBar::tabTextColourId,   juce::Colour (0xff9aa5a2));
+        tabs.setColour (juce::TabbedButtonBar::frontTextColourId, juce::Colour (0xff45bda5));
+        tabs.addTab ("MAIN",    juce::Colour (0xfffcf9f9), &mainPage,     false);
+        tabs.addTab ("ANALYZE", juce::Colour (0xfffcf9f9), &analyzePanel, false);
+        mainPage.fn = [this] { layoutMainPage(); };
+
         // all rows are children of `content`, which scrolls inside `viewport`
-        addAndMakeVisible (viewport);
+        mainPage.addAndMakeVisible (viewport);
         viewport.setViewedComponent (&content, false);
         viewport.setScrollBarsShown (true, false);
         viewport.setScrollBarThickness (10);
@@ -376,8 +592,12 @@ public:
         contentHeight += 52;
 
         setResizable (true, true);
-        setResizeLimits (440, 320, 900, contentHeight + 20);
-        setSize (560, juce::jmin (contentHeight + 12, kMaxInitialHeight));
+        setResizeLimits (440, 320, 900, contentHeight + 50);
+        setSize (560, juce::jmin (contentHeight + 42, kMaxInitialHeight));
+
+        // sliders build their value boxes before this editor's LookAndFeel is
+        // attached to them, so push the theme colours down explicitly
+        sendLookAndFeelChange();
     }
 
     ~VoxMorphEditor() override
@@ -416,7 +636,12 @@ public:
 
     void resized() override
     {
-        viewport.setBounds (getLocalBounds());
+        tabs.setBounds (getLocalBounds());
+    }
+
+    void layoutMainPage()
+    {
+        viewport.setBounds (mainPage.getLocalBounds());
         const int w = juce::jmax (420, viewport.getMaximumVisibleWidth());
         content.setSize (w, contentHeight);
         auto r = juce::Rectangle<int> (0, 0, w, contentHeight).reduced (14, 10);
@@ -581,6 +806,9 @@ private:
     juce::Viewport  viewport;    // scroll container
     juce::Component content;     // holds every row; taller than the window
     SpectrumView    spectrum { proc };
+    AnalyzePanel    analyzePanel { proc };
+    FnComponent     mainPage;    // MAIN tab page (declared before tabs!)
+    juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
     int contentHeight = 0;
 
     struct Item { juce::Component* comp; int h; };

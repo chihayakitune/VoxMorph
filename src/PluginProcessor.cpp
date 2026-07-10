@@ -132,6 +132,11 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     engine.prepare (sampleRate);
     monoScratch.assign ((size_t) samplesPerBlock, 0.0f);
     setLatencySamples (engine.latencySamples());
+
+    capBuf.assign ((size_t) (sampleRate * 5.0), 0.0f);
+    capLen = 0;  capturing = false;
+    prevBuf.assign ((size_t) (sampleRate * 60.0), 0.0f);
+    prevLen = 0;  prevPos = -1;
 }
 
 void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -184,6 +189,16 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     for (int i = 0; i < n; ++i)
         vizIn[(size_t) ((vp + i) & (kVizLen - 1))] = m[i];
 
+    if (capturing.load())          // ANALYZE tab: capture raw input
+    {
+        const int cl   = capLen.load();
+        const int room = (int) capBuf.size() - cl;
+        const int c    = std::min (n, room);
+        if (c > 0) std::copy (m, m + c, capBuf.data() + cl);
+        capLen.store (cl + c);
+        if (c >= room) capturing.store (false);
+    }
+
     engine.process (m, m, n);
 
     if (getLatencySamples() != engine.latencySamples())
@@ -232,6 +247,19 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     for (int i = 0; i < n; ++i)
         vizOut[(size_t) ((vp + i) & (kVizLen - 1))] = g * m[i];
     vizPos.store (vp + n, std::memory_order_release);
+
+    const int pp = prevPos.load();     // ANALYZE tab: target-file preview
+    if (pp >= 0)
+    {
+        const int pl = prevLen.load();
+        const int c  = std::min (n, pl - pp);
+        for (int c2 = 0; c2 < ch; ++c2)
+        {
+            float* d = buffer.getWritePointer (c2);
+            for (int i = 0; i < c; ++i) d[i] += 0.9f * prevBuf[(size_t) (pp + i)];
+        }
+        prevPos.store (pp + n >= pl ? -1 : pp + n);
+    }
 }
 
 void VoxMorphProcessor::getStateInformation (juce::MemoryBlock& dest)

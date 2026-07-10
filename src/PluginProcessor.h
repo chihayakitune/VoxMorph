@@ -37,6 +37,16 @@ public:
     std::vector<float> vizOut = std::vector<float> ((size_t) kVizLen, 0.0f);
     std::atomic<int>   vizPos { 0 };
 
+    // ANALYZE tab support. capBuf: 5 s mic capture (raw input, pre-engine).
+    // prevBuf: target-file preview, pre-allocated in prepareToPlay and only
+    // written while prevPos == -1 (stopped), so no locking is needed.
+    std::vector<float> capBuf;
+    std::atomic<int>   capLen { 0 };
+    std::atomic<bool>  capturing { false };
+    std::vector<float> prevBuf;
+    std::atomic<int>   prevLen { 0 };
+    std::atomic<int>   prevPos { -1 };                 // -1 = stopped
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
 

@@ -1,6 +1,6 @@
 # VoxMorph 開発引き継ぎ書 (AIセッション用)
 
-最終更新: v0.9.1 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+最終更新: v0.10.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
 
 ## プロジェクト概要
 
@@ -22,8 +22,10 @@
   - **Air Preserve(Mixed区間処理、v0.6.0/強化v0.6.1)**: 因果2タップピッチコム(P, 2P遅延・Catmull-Rom補間)で周期成分を予測→残差をairband(既定1kHz)ハイパス=息成分。グレインは息を除いた `harmBuf` から切出し、息は**ピッチ変換せず**遅延整列して出力に加算(連続ノイズのまま)。ノブ0〜1.0=分離量0〜最大(2/3=分散最適、これ超の減算は逆にノイズ増)でエネルギー中立、1.0〜1.5=息を追加ブースト(最大約+4dB、可聴性・マスキング用。v0.7.0でユーザー要望によりこのスケールに変更)。有声ゲート+5msデジッパー、ノブ0で完全従来動作+自動スキップ
   - 未使用機能は全て自動スキップ(CPU: 通常1.4%、F1-F3使用時2.6% @48k)
 - `src/PluginProcessor.{h,cpp}` — JUCEラッパ、パラメータ(APVTS)、ハウリング自動ミュート(時間基準、RMS>0.70が1.5秒で3秒ミュート)
-- `src/PluginEditor.h` — 英語UI+英日バイリンガルツールチップ、セクション: PITCH/HIGH RANGE/FORMANT/INTONATION/VOICE QUALITY/ADVANCED/OUTPUT。Cmd+S保存(スタンドアロン)。**v0.8.0からViewportでスクロール+リサイズ可能**。行の追加はコンストラクタに addSliderRow/addToggleRow を1行書くだけで、レイアウト・スクロール・ウィンドウサイズは自動調整(ファイル冒頭に保守手順コメントあり。UI調整は高度AIでなくても可能な構造)。**v0.9.0: SpectrumView**(最上段、入力ミント/出力ピンクの重ねスペクトラム 20Hz-20kHz対数軸、30Hzタイマー、FFTはエンジンのfftForViz流用=依存追加なし。データはProcessorのvizIn/vizOut/vizPosリングから)+全体をパステル配色(色は mainLnf 設定の1箇所に集約。v0.9.1でユーザー指定のミント基調=見出し/スライダー/つまみ/リセット矢印がミント、本文と数値が濃グレー、背景ほぼ白に確定。グラフ配色は入力ミント/出力ピンクのまま)。ユーザー保有のUI完成イメージ(サイドバー+カード式のかわいい系デザイン)への本格スキン化は未着手
-- `test/offline_test.cpp` + `analyze.py` — 合成母音での数値検証(Linux g++でコンパイル可、JUCE不要)。**エンジン変更時は必ず実行**: f0/フォルマント独立性、抑揚、子音シフト、フライ声、回帰一式
+- `src/PluginEditor.h` — 英語UI+英日バイリンガルツールチップ、セクション: PITCH/HIGH RANGE/FORMANT/INTONATION/VOICE QUALITY/ADVANCED/OUTPUT。Cmd+S保存(スタンドアロン)。**v0.8.0からViewportでスクロール+リサイズ可能**。行の追加はコンストラクタに addSliderRow/addToggleRow を1行書くだけで、レイアウト・スクロール・ウィンドウサイズは自動調整(ファイル冒頭に保守手順コメントあり。UI調整は高度AIでなくても可能な構造)。**v0.9.0: SpectrumView**(最上段、入力ミント/出力ピンクの重ねスペクトラム 20Hz-20kHz対数軸、30Hzタイマー、FFTはエンジンのfftForViz流用=依存追加なし。データはProcessorのvizIn/vizOut/vizPosリングから)+全体をパステル配色(色は mainLnf 設定の1箇所に集約。v0.9.1でユーザー指定のミント基調=見出し/スライダー/つまみ/リセット矢印がミント、本文と数値が濃グレー、背景ほぼ白に確定。グラフ配色は入力ミント/出力ピンクのまま)。ユーザー保有のUI完成イメージ(サイドバー+カード式のかわいい系デザイン)への本格スキン化は未着手。**v0.10.0でMAIN/ANALYZEの2タブ構成**(TabbedComponent、ページはFnComponent。数値欄の白文字問題はsendLookAndFeelChange()で解決=スライダーのテキストボックスはLnF適用前に生成されるため必須)
+- `dsp/VoiceAnalyzer.h` — **声質プロファイル分析(v0.10.0、依存ゼロ)**。2048フレーム/hop1024、4xデシメYIN f0+FFT包絡→F1-F3・相対レベル・tilt・抑揚spread(p10-p90/2、MADは二峰性で破綻するため不可)。全て中央値でロバスト化。ANALYZEタブと offline_test で共用
+- `src/PluginEditor.h` 内 AnalyzePanel — **ANALYZEタブ(v0.10.0)**: ①Record 5s(processorのcapBufに音声スレッドで録音)→Profile1 ②Load Target File(wav/mp3等、60秒まで、線形リサンプルでprevBufへ、Playで出力にミックス再生)→Profile2 ③Auto-Set=差分からpitch/formant/F1-3 shift&gain(0.7倍)/range/center/tilt(0.25倍)を自動設定
+- `test/offline_test.cpp` + `analyze.py` — 合成母音での数値検証(Linux g++でコンパイル可、JUCE不要)。**エンジン変更時は必ず実行**: f0/フォルマント独立性、抑揚、子音シフト、フライ声、VoiceAnalyzer、回帰一式
 
 ## 主要パラメータ(内部ID)
 
