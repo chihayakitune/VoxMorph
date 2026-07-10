@@ -52,7 +52,7 @@ jobs:
                    --component-plist components.plist \
                    --scripts pkgscripts \
                    --identifier com.hakamaaudio.voxmorph \
-                   --version 0.9.0 \
+                   --version 0.9.1 \
                    "VoxMorph-Installer.pkg"
 
       - uses: actions/upload-artifact@v6

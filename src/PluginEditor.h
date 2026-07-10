@@ -158,19 +158,19 @@ public:
         tooltipWindow.setLookAndFeel (&tipLnf);
         setWantsKeyboardFocus (true);   // for the Cmd+S shortcut
 
-        // pastel theme (all colours in one place — edit freely)
-        mainLnf.setColour (juce::Slider::trackColourId,             juce::Colour (0xff8fd4bf)); // mint fill
-        mainLnf.setColour (juce::Slider::backgroundColourId,        juce::Colour (0xffe9dade));
-        mainLnf.setColour (juce::Slider::thumbColourId,             juce::Colour (0xfff08ba5)); // pink
-        mainLnf.setColour (juce::Slider::textBoxTextColourId,       juce::Colour (0xff4a4247));
+        // pastel mint theme (all colours in one place — edit freely)
+        mainLnf.setColour (juce::Slider::trackColourId,             juce::Colour (0xff54c0aa)); // mint fill
+        mainLnf.setColour (juce::Slider::backgroundColourId,        juce::Colour (0xffe9e9e9)); // rest of track
+        mainLnf.setColour (juce::Slider::thumbColourId,             juce::Colour (0xff54c0aa)); // mint thumb
+        mainLnf.setColour (juce::Slider::textBoxTextColourId,       juce::Colour (0xff2e2e32)); // value digits
         mainLnf.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::white);
-        mainLnf.setColour (juce::Slider::textBoxOutlineColourId,    juce::Colour (0xffdcccd2));
-        mainLnf.setColour (juce::Label::textColourId,               juce::Colour (0xff4a4247));
-        mainLnf.setColour (juce::ToggleButton::textColourId,        juce::Colour (0xff4a4247));
-        mainLnf.setColour (juce::ToggleButton::tickColourId,        juce::Colour (0xfff08ba5));
-        mainLnf.setColour (juce::ToggleButton::tickDisabledColourId,juce::Colour (0xffc9bcc2));
-        mainLnf.setColour (juce::TextButton::buttonColourId,        juce::Colour (0xfff7e8ec));
-        mainLnf.setColour (juce::TextButton::textColourOffId,       juce::Colour (0xff8a5f6d));
+        mainLnf.setColour (juce::Slider::textBoxOutlineColourId,    juce::Colour (0xffdedede));
+        mainLnf.setColour (juce::Label::textColourId,               juce::Colour (0xff2e2e32)); // body text
+        mainLnf.setColour (juce::ToggleButton::textColourId,        juce::Colour (0xff2e2e32));
+        mainLnf.setColour (juce::ToggleButton::tickColourId,        juce::Colour (0xff54c0aa));
+        mainLnf.setColour (juce::ToggleButton::tickDisabledColourId,juce::Colour (0xffbfd9d2));
+        mainLnf.setColour (juce::TextButton::buttonColourId,        juce::Colours::white);
+        mainLnf.setColour (juce::TextButton::textColourOffId,       juce::Colour (0xff54c0aa)); // reset arrows
         setLookAndFeel (&mainLnf);
 
         // all rows are children of `content`, which scrolls inside `viewport`
@@ -411,7 +411,7 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        g.fillAll (juce::Colour (0xfffaf1f3));   // soft pink-white
+        g.fillAll (juce::Colour (0xfffcf9f9));   // near-white
     }
 
     void resized() override
@@ -522,7 +522,7 @@ private:
         auto lbl = std::make_unique<juce::Label>();
         lbl->setText (text, juce::dontSendNotification);
         lbl->setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-        lbl->setColour (juce::Label::textColourId, juce::Colour (0xffe36f8e));   // section pink
+        lbl->setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));   // section mint
         content.addAndMakeVisible (*lbl);
         items.push_back ({ lbl.get(), 26 });
         owned.push_back (std::move (lbl));
