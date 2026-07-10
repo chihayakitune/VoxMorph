@@ -260,6 +260,17 @@ int main()
         q.airPreserve = 1.0f;  writeWav ("out_air_id.wav",  run (breathy, q));
     }
 
+    // v0.8: High Range guard — input jumps 150 -> 300 Hz ("laugh"); with the
+    // guard at 200 Hz / amount 0 %, the high half must stay near its natural
+    // pitch instead of being shifted the full +7 st
+    {
+        const auto lowhigh = makeVowel (150.0, 300.0, 4.0);
+        P p; p.pitchSemi = 7.0f;
+        writeWav ("out_hi_off.wav", run (lowhigh, p));
+        p.hiRangeHz = 200.0f; p.hiPitchAmt = 0.0f;
+        writeWav ("out_hi_on.wav",  run (lowhigh, p));
+    }
+
     // v0.7: GCI Grain Sync — regression on the clean vowel plus a creaky
     // (irregular-pulse) comparison pair for listening
     {

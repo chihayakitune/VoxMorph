@@ -81,6 +81,17 @@ public:
         // higher keeps only the top "air".
         float airFreqHz   = 1000.0f;   // 300..4000
 
+        // High Range guard (Babisei-style variable pitch): when the INPUT
+        // pitch rises above hiRangeHz (laughing, squealing), the pitch and
+        // formant shifts blend from their normal amounts toward
+        // hiPitchAmt / hiFormantAmt (a fraction of the normal shift, 0..1),
+        // reaching the full high-range amounts one octave above hiRangeHz.
+        // Stops laughs from being shifted into unnaturally high tones.
+        // hiRangeHz = 0 disables the feature entirely (previous behaviour).
+        float hiRangeHz    = 0.0f;    // 0 = off, else ~150..600
+        float hiPitchAmt   = 0.5f;    // 0..1: pitch shift kept in high range
+        float hiFormantAmt = 1.0f;    // 0..1: formant shift kept in high range
+
         // GCI Grain Sync: align grain centres to the glottal closure
         // instants (sharpest flank of each period, found by short-time
         // derivative energy) and track them period-to-period, ESOLA-style,
@@ -165,6 +176,9 @@ public:
         airKSplit      = 0.6667f * std::min (1.0f, airAmt);
         airBoost       = 1.0f + 1.2f * std::max (0.0f, airAmt - 1.0f);
         gciOn          = q.gciSync;
+        hiFreq         = (q.hiRangeHz > 20.0f) ? std::clamp (q.hiRangeHz, 100.0f, 600.0f) : 0.0f;
+        hiPAmt         = std::clamp (q.hiPitchAmt,   0.0f, 1.0f);
+        hiFAmt         = std::clamp (q.hiFormantAmt, 0.0f, 1.0f);
 
         fShiftRatio[0] = std::pow (2.0f, q.f1Shift / 12.0f);
         fShiftRatio[1] = std::pow (2.0f, q.f2Shift / 12.0f);
@@ -504,15 +518,33 @@ private:
     {
         const float P = curP;
         const bool  v = voiced;
-        const float f = std::max (0.25f, v ? frSm : crSm);
+
+        // High Range guard: blend the shift amounts toward the high-range
+        // fractions as the input pitch rises past hiFreq (full one octave up).
+        // Per-grain and driven by the smoothed period, so it is seamless.
+        float wHi = 0.0f;
+        if (v && hiFreq > 0.0f && ! robotize)
+        {
+            const float f0in = (float) (fs / P);
+            if (f0in > hiFreq)
+                wHi = std::min (1.0f, std::log2 (f0in / hiFreq));
+        }
+
+        float fRat = v ? frSm : crSm;
+        if (wHi > 0.0f)
+            fRat = std::pow (frSm, 1.0f - wHi * (1.0f - hiFAmt));
+        const float f = std::max (0.25f, fRat);
 
         float Ts;
         if (robotize)
             Ts = (float) (fs / robotHz);
         else if (v)
         {
+            double pr = (double) prSm;
+            if (wHi > 0.0f)
+                pr = std::pow (pr, (double) (1.0f - wHi * (1.0f - hiPAmt)));
             // intonation scaling: f_out = center * (f_in*ratio / center)^range
-            double ft = (fs / (double) P) * (double) prSm;
+            double ft = (fs / (double) P) * pr;
             if (range != 1.0f)
                 ft = (double) centerHz * std::pow (ft / (double) centerHz, (double) range);
             if (floorHz > 20.0f && ft < (double) floorHz)          // soft low lift
@@ -936,6 +968,7 @@ private:
     float gLow = 1.0f, gHigh = 1.0f, tiltLp = 0.0f, tiltK = 0.12f;
     float mix = 1.0f, robotHz = 120.0f, floorHz = 0.0f;
     bool  robotize = false, lowVoice = false;
+    float hiFreq = 0.0f, hiPAmt = 0.5f, hiFAmt = 1.0f;   // High Range guard
 
     // Air Preserve (harmonic/noise split) state
     float airAmt    = 0.0f;               // knob value

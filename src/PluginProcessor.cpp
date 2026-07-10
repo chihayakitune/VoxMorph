@@ -57,6 +57,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::NormalisableRange<float> (0.0f, 300.0f, 1.0f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "robotHz", 1 }, "Robot Pitch (Hz)",
                 juce::NormalisableRange<float> (40.0f, 400.0f, 0.1f, 0.5f), 120.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "hifreq", 1 }, "High Range Start (Hz)",
+                juce::NormalisableRange<float> (0.0f, 600.0f, 1.0f, 0.5f), 0.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "hipitch", 1 }, "High Pitch Amount (%)",
+                juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 50.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "hiformant", 1 }, "High Formant Amount (%)",
+                juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 100.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "mix", 1 }, "Mix",
                 juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 1.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "gain", 1 }, "Output Gain (dB)",
@@ -96,6 +102,9 @@ VoxMorphProcessor::VoxMorphProcessor()
     pAir     = apvts.getRawParameterValue ("air");
     pAirBand = apvts.getRawParameterValue ("airband");
     pGci     = apvts.getRawParameterValue ("gci");
+    pHiFreq  = apvts.getRawParameterValue ("hifreq");
+    pHiPitch = apvts.getRawParameterValue ("hipitch");
+    pHiFmt   = apvts.getRawParameterValue ("hiformant");
     pRange     = apvts.getRawParameterValue ("range");
     pCenter    = apvts.getRawParameterValue ("center");
     pTilt      = apvts.getRawParameterValue ("tilt");
@@ -144,6 +153,9 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.airPreserve   = pAir->load();          // mixed harmonic+noise split
     p.airFreqHz     = pAirBand->load();
     p.gciSync       = pGci->load() > 0.5f;
+    p.hiRangeHz     = pHiFreq->load();       // high-range guard (laughs)
+    p.hiPitchAmt    = pHiPitch->load() * 0.01f;
+    p.hiFormantAmt  = pHiFmt->load()   * 0.01f;
     p.tiltDb        = pTilt->load();
     p.f1Shift = pF1S->load();  p.f1Gain = pF1G->load();
     p.f2Shift = pF2S->load();  p.f2Gain = pF2G->load();

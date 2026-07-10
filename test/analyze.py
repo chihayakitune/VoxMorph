@@ -125,6 +125,15 @@ rel = np.sqrt((d*d).mean() / max((i0[s]**2).mean(), 1e-30))
 print(f"identity diff (air 1.0 vs 0, no conversion): rel RMS={rel:.3f}  "
       f"(mostly breath phase rearrangement, not a tonal change)")
 
+print("== high range guard v0.8 (input 150->300Hz, pitch+7st, start 200Hz, amount 0%) ==")
+ho_, hn_ = load("out_hi_off.wav"), load("out_hi_on.wav")
+n = len(ho_)
+for name, x in [("guard off", ho_), ("guard on ", hn_)]:
+    fa = f0_autocorr(x, n//4, n//4 + 8192)
+    fb = f0_autocorr(x, 3*n//4, 3*n//4 + 8192)
+    print(f"{name}: low half={fa:6.1f} Hz (expect ~225 both)   "
+          f"high half={fb:6.1f} Hz (off ~449, on ~355: guard tames the shift)")
+
 print("== GCI grain sync v0.7 (pitch+7st) ==")
 g = load("out_gci_vowel.wav")
 fmts = " ".join(f"{p:5.0f}" for p in formants_lpc(g))

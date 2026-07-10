@@ -16,6 +16,18 @@
 //  - hover tooltips with bilingual (EN/JP) explanations, readable typography
 //  - editable value boxes (click the number, type, Enter)
 //  - per-parameter reset buttons + double-click-to-default on sliders
+//  - scrollable + resizable window (rows live inside a Viewport)
+//
+// HOW TO EDIT THIS UI (for future maintainers):
+//  - To add a control: add ONE line in the constructor —
+//      addSliderRow ("paramId", "Display Name", tip ("english", "日本語"));
+//      addToggleRow ("paramId", "Display Name", tip ("english", "日本語"));
+//      addSection   ("SECTION NAME");
+//    at the position where it should appear. Layout, scrolling and window
+//    size all adjust automatically. The paramId must exist in
+//    PluginProcessor.cpp createLayout().
+//  - Row heights / widths: see the `items.push_back` calls and resized().
+//  - Default window height is capped by kMaxInitialHeight below.
 
 class VoxMorphEditor : public juce::AudioProcessorEditor,
                        private juce::Timer
@@ -26,6 +38,12 @@ public:
     {
         tooltipWindow.setLookAndFeel (&tipLnf);
         setWantsKeyboardFocus (true);   // for the Cmd+S shortcut
+
+        // all rows are children of `content`, which scrolls inside `viewport`
+        addAndMakeVisible (viewport);
+        viewport.setViewedComponent (&content, false);
+        viewport.setScrollBarsShown (true, false);
+        viewport.setScrollBarThickness (10);
 
         addSection ("PITCH");
         addSliderRow ("pitch", "Pitch (semitones)",
@@ -41,6 +59,27 @@ public:
         addSliderRow ("robotHz", "Robot Pitch (Hz)",
             tip ("The fixed pitch (Hz) used while Robotize is on.",
                  "Robotizeがオンのとき固定されるピッチ(Hz)。"));
+
+        addSection ("HIGH RANGE");
+        addSliderRow ("hifreq", "High Range Start (Hz)",
+            tip ("When your INPUT pitch (before conversion) rises above this - laughing, squealing, "
+                 "exclamations - the Pitch/Formant shifts blend smoothly toward the High amounts "
+                 "below, reaching them fully one octave up. Stops laughs from being shifted into "
+                 "unnaturally high tones. 0 = off. Try 250-350 Hz.",
+                 "入力(変換前)のピッチがこの値を超えると(笑い声・叫び・感嘆など)、ピッチ/"
+                 "フォルマントの変化量が下のHigh設定へ滑らかに移行し、1オクターブ上で完全に"
+                 "切り替わります。笑い声が不自然な高音まで上がるのを防ぎます。0=オフ。"
+                 "250〜350Hzが目安。"));
+        addSliderRow ("hipitch", "High Pitch Amount (%)",
+            tip ("How much of the Pitch shift remains in the high range. 100% = same as normal, "
+                 "0% = no shift there (laughs keep their natural pitch). Try 30-60%.",
+                 "高音域で残すPitchシフトの割合。100%=通常と同じ、0%=シフトなし(笑い声は"
+                 "地声の高さのまま)。30〜60%が目安。"));
+        addSliderRow ("hiformant", "High Formant Amount (%)",
+            tip ("How much of the Formant shift remains in the high range. Usually leave at 100% "
+                 "so the voice keeps its character while only the pitch settles down.",
+                 "高音域で残すFormantシフトの割合。通常は100%のまま(声色は保ちつつピッチだけ"
+                 "落ち着かせる)が自然です。"));
 
         addSection ("FORMANT");
         addSliderRow ("formant", "Formant (semitones)",
@@ -191,13 +230,16 @@ public:
         footer.setFont (juce::Font (juce::FontOptions (11.5f)));
         footer.setColour (juce::Label::textColourId, juce::Colours::grey);
         footer.setJustificationType (juce::Justification::topLeft);
-        addAndMakeVisible (footer);
+        content.addAndMakeVisible (footer);
         defaultFooterText = footer.getText();
 
-        int total = 20;
-        for (auto& it : items) total += it.h;
-        total += 52;
-        setSize (560, total);
+        contentHeight = 20;
+        for (auto& it : items) contentHeight += it.h;
+        contentHeight += 52;
+
+        setResizable (true, true);
+        setResizeLimits (440, 320, 900, contentHeight + 20);
+        setSize (560, juce::jmin (contentHeight + 12, kMaxInitialHeight));
     }
 
     ~VoxMorphEditor() override
@@ -235,7 +277,10 @@ public:
 
     void resized() override
     {
-        auto r = getLocalBounds().reduced (14, 10);
+        viewport.setBounds (getLocalBounds());
+        const int w = juce::jmax (420, viewport.getMaximumVisibleWidth());
+        content.setSize (w, contentHeight);
+        auto r = juce::Rectangle<int> (0, 0, w, contentHeight).reduced (14, 10);
         for (auto& it : items)
             it.comp->setBounds (r.removeFromTop (it.h));
         footer.setBounds (r.removeFromTop (48));
@@ -339,7 +384,7 @@ private:
         lbl->setText (text, juce::dontSendNotification);
         lbl->setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
         lbl->setColour (juce::Label::textColourId, juce::Colour (0xffe8a33d));
-        addAndMakeVisible (*lbl);
+        content.addAndMakeVisible (*lbl);
         items.push_back ({ lbl.get(), 26 });
         owned.push_back (std::move (lbl));
     }
@@ -370,7 +415,7 @@ private:
             rp->endChangeGesture();
         };
 
-        addAndMakeVisible (*row);
+        content.addAndMakeVisible (*row);
         items.push_back ({ row.get(), 30 });
         owned.push_back (std::move (row));
     }
@@ -382,15 +427,20 @@ private:
         row->toggle.setTooltip (tipText);
         row->att = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
                         proc.apvts, id, row->toggle);
-        addAndMakeVisible (*row);
+        content.addAndMakeVisible (*row);
         items.push_back ({ row.get(), 28 });
         owned.push_back (std::move (row));
     }
 
     // ---- members --------------------------------------------------------------
+    static constexpr int kMaxInitialHeight = 720;   // window opens no taller
+
     VoxMorphProcessor& proc;
     TipLookAndFeel tipLnf;
     juce::TooltipWindow tooltipWindow { this, 350 };
+    juce::Viewport  viewport;    // scroll container
+    juce::Component content;     // holds every row; taller than the window
+    int contentHeight = 0;
 
     struct Item { juce::Component* comp; int h; };
     std::vector<Item> items;

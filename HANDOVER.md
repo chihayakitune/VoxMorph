@@ -1,6 +1,6 @@
 # VoxMorph 開発引き継ぎ書 (AIセッション用)
 
-最終更新: v0.7.1 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+最終更新: v0.8.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
 
 ## プロジェクト概要
 
@@ -17,16 +17,17 @@
   - ピッチ同期グレイン切出し(ピーク整列、グレイン幅=min(入力周期, 1.25×出力間隔)←二重声対策)
   - スペクトル層(グレイン毎FFT 2048/4096適応): 倍音頂点結合の包絡推定→F1/F2/F3追跡→区分線形ワープ+個別ゲイン、Breath(ノイズ励振、Beta)
   - **どんなホストバッファも内部で512サンプル毎に分割処理**(全挙動バッファ非依存、v0.5.2)
+  - **High Rangeガード(v0.8.0、バ美声の可変ピッチ参考)**: 入力f0がhifreq(0=オフ)を超えると、Pitch/Formantの半音量に hipitch/hiformant(%)を乗じた量へ log2ブレンド(1オクターブ上で100%移行、グレイン毎・平滑化済みcurP駆動でシームレス)。用途=笑い声が非人間的高音に飛ぶのを防ぐ。検証: 入力150→300Hz/+7st/開始200Hz/量0%で高音側448.6→355.6Hz(理論値一致)。Robotize時は無効
   - **GCI Grain Sync(v0.7.0、gciトグル・既定オフ)**: グレイン整列を従来のエネルギーピーク探索から、声帯閉鎖瞬間(微分エネルギー最大点=各周期の最急峻フランク、中央差分でHFノイズ耐性)+周期間トラッキング(lastGci+k*P近傍を優先、自由探索ピークが2倍強い時だけ乗換=ダブルパルス飛び移り防止)に切替。息/無声/平坦区間は自動でalignToPeakへフォールバック、オフ時は完全従来動作。検証: クリーン母音は完全一致(非破壊)、不規則フライ声+7stで出力周期性0.066→0.225(3.4倍)。**v0.7.1でBeta化**: ユーザー実声評価「あ/う のトーン移動でゴロゴロと周期的にガタつく・音程を動かすとロボットっぽい」→ 原因はグライド中の lastGci+k*P 予測グリッドと実エポックのずり。対策: ピッチ変化>4%/フレームで4フレーム従来整列へ自動退避(Low Voice Mode時は除外=フライ周期交代で常時発動してしまうため)。これ以上のチューニングはユーザー指示で凍結
   - **Air Preserve(Mixed区間処理、v0.6.0/強化v0.6.1)**: 因果2タップピッチコム(P, 2P遅延・Catmull-Rom補間)で周期成分を予測→残差をairband(既定1kHz)ハイパス=息成分。グレインは息を除いた `harmBuf` から切出し、息は**ピッチ変換せず**遅延整列して出力に加算(連続ノイズのまま)。ノブ0〜1.0=分離量0〜最大(2/3=分散最適、これ超の減算は逆にノイズ増)でエネルギー中立、1.0〜1.5=息を追加ブースト(最大約+4dB、可聴性・マスキング用。v0.7.0でユーザー要望によりこのスケールに変更)。有声ゲート+5msデジッパー、ノブ0で完全従来動作+自動スキップ
   - 未使用機能は全て自動スキップ(CPU: 通常1.4%、F1-F3使用時2.6% @48k)
 - `src/PluginProcessor.{h,cpp}` — JUCEラッパ、パラメータ(APVTS)、ハウリング自動ミュート(時間基準、RMS>0.70が1.5秒で3秒ミュート)
-- `src/PluginEditor.h` — 英語UI+英日バイリンガルツールチップ、セクション: PITCH/FORMANT/INTONATION/VOICE QUALITY/ADVANCED/OUTPUT。Cmd+S保存(スタンドアロン)
+- `src/PluginEditor.h` — 英語UI+英日バイリンガルツールチップ、セクション: PITCH/HIGH RANGE/FORMANT/INTONATION/VOICE QUALITY/ADVANCED/OUTPUT。Cmd+S保存(スタンドアロン)。**v0.8.0からViewportでスクロール+リサイズ可能**。行の追加はコンストラクタに addSliderRow/addToggleRow を1行書くだけで、レイアウト・スクロール・ウィンドウサイズは自動調整(ファイル冒頭に保守手順コメントあり。UI調整は高度AIでなくても可能な構造)
 - `test/offline_test.cpp` + `analyze.py` — 合成母音での数値検証(Linux g++でコンパイル可、JUCE不要)。**エンジン変更時は必ず実行**: f0/フォルマント独立性、抑揚、子音シフト、フライ声、回帰一式
 
 ## 主要パラメータ(内部ID)
 
-pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, range(抑揚)/center, breath2(Beta), air/airband(Air Preserve, airは0〜1.5), gci(GCI同期), tilt, jitter, robot/robotHz, lowvoice, lowlat, pitchfloor, automute, mix, gain
+pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, range(抑揚)/center, breath2(Beta), air/airband(Air Preserve, airは0〜1.5), gci(GCI同期), hifreq/hipitch/hiformant(High Rangeガード), tilt, jitter, robot/robotHz, lowvoice, lowlat, pitchfloor, automute, mix, gain
 
 ## 重要な設計判断・経緯
 
