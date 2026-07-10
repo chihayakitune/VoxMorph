@@ -70,16 +70,25 @@ public:
         // repeats its noise verbatim), which is what makes breathy voices
         // turn metallic; routing the breath around the shifter keeps it a
         // continuous natural noise. 0 = off (identical to previous versions).
-        // 0..0.7 scales the split up to its variance-optimal maximum (energy
-        // neutral); above 0.7 the bypassed breath is additionally boosted
-        // (up to ~+4 dB at 1.0) so the effect is clearly audible.
-        float airPreserve = 0.0f;   // 0..1
+        // 0..1 scales the split up to its variance-optimal maximum (energy
+        // neutral); 1..1.5 additionally boosts the bypassed breath (up to
+        // ~+4 dB at 1.5) so the effect is clearly audible.
+        float airPreserve = 0.0f;   // 0..1.5
 
         // Separation crossover for Air Preserve: everything above this is
         // treated as breath. Lower reaches further into the mids (stronger,
         // but pitch movement may leak a ghost of the original pitch);
         // higher keeps only the top "air".
         float airFreqHz   = 1000.0f;   // 300..4000
+
+        // GCI Grain Sync: align grain centres to the glottal closure
+        // instants (sharpest flank of each period, found by short-time
+        // derivative energy) and track them period-to-period, ESOLA-style,
+        // instead of the plain energy-peak search. Keeps successive grains
+        // phase-consistent, reducing roughness/shimmer. Falls back to the
+        // classic alignment automatically where no clear epochs exist;
+        // off = identical to previous versions.
+        bool  gciSync     = false;
     };
 
     void prepare (double sampleRate)
@@ -119,6 +128,8 @@ public:
 
         airG   = airB = 0.0f;
         airLp1 = airLp2 = 0.0f;
+        lastGci = -1;
+        gciE.reserve ((size_t) (maxLagLow / 3 + 8));
         airP   = curP;
         airK   = 1.0f - std::exp ((float) (-1.0 / (0.005 * fs)));          // ~5 ms gate
         hpAirK = 1.0f - std::exp ((float) (-2.0 * M_PI * 1400.0 / fs));    // breath band HP
@@ -142,16 +153,17 @@ public:
         mix            = q.mix;
         lowVoice       = q.lowVoice;
         floorHz        = std::clamp (q.pitchFloorHz, 0.0f, 400.0f);
-        airAmt         = std::clamp (q.airPreserve, 0.0f, 1.0f);
+        airAmt         = std::clamp (q.airPreserve, 0.0f, 1.5f);
         hpAirK         = 1.0f - std::exp ((float) (-2.0 * M_PI
                              * std::clamp (q.airFreqHz, 300.0f, 4000.0f) / fs));
-        // 0..0.7 -> split amount up to the variance-optimal 2/3 (beyond it,
+        // 0..1 -> split amount up to the variance-optimal 2/3 (beyond it,
         // subtracting more noise puts anti-correlated copies back into the
-        // grains); 0.7..1 -> boost the bypassed breath instead, which both
+        // grains); 1..1.5 -> boost the bypassed breath instead, which both
         // masks what is left of the periodic noise and makes the knob move
         // clearly audible.
-        airKSplit      = 0.6667f * std::min (1.0f, airAmt / 0.7f);
-        airBoost       = 1.0f + 2.0f * std::max (0.0f, airAmt - 0.7f);
+        airKSplit      = 0.6667f * std::min (1.0f, airAmt);
+        airBoost       = 1.0f + 1.2f * std::max (0.0f, airAmt - 1.0f);
+        gciOn          = q.gciSync;
 
         fShiftRatio[0] = std::pow (2.0f, q.f1Shift / 12.0f);
         fShiftRatio[1] = std::pow (2.0f, q.f2Shift / 12.0f);
@@ -209,6 +221,7 @@ public:
             lastInMark = (double) writePos;
             voiced = false;
             holdCount = 0;
+            lastGci = -1;
         }
         const int64_t start = writePos;
         for (int i = 0; i < n; ++i)
@@ -325,7 +338,7 @@ private:
 
         double energy = 0.0;
         for (int i = 0; i < kDetN; ++i) energy += (double) tmp[(size_t)i] * tmp[(size_t)i];
-        if (energy / kDetN < 1.0e-8) { voiced = false; holdCount = 0; return; }
+        if (energy / kDetN < 1.0e-8) { voiced = false; holdCount = 0; lastGci = -1; return; }
 
         // ---- decimate x2: the CMND search runs on a half-rate copy, cutting
         // this burst (which lands on a SINGLE block every 512 samples) ~4x.
@@ -403,6 +416,7 @@ private:
             }
             voiced = false;
             holdCount = 0;
+            lastGci = -1;
             return;
         }
         holdCount = 0;
@@ -514,7 +528,7 @@ private:
             c = lastInMark + k * (double) P;
             if (std::abs (c - natural) > (double) (guardFrac * P))
                 c = natural;
-            c = alignToPeak (c, P);
+            c = gciOn ? alignToGci (c, P) : alignToPeak (c, P);
             lastInMark = c;
         }
 
@@ -803,6 +817,59 @@ private:
         return (double) bestI;
     }
 
+    // ---------------- GCI-synchronous alignment (v0.7) ----------------
+    // The glottal closure instant is the sharpest flank of each period;
+    // locate it by short-time derivative energy (central difference, which
+    // also attenuates HF noise), then keep the epoch train consistent from
+    // period to period: a candidate near lastGci + k*P wins unless the
+    // free-search peak is at least twice as strong. That hysteresis stops
+    // the alignment from hopping between double-pulse candidates, which is
+    // what causes shimmer with the plain peak search.
+    double alignToGci (double c, float P)
+    {
+        const int r = std::max (6, (int) (P / 6.0f));
+        const int64_t c0 = (int64_t) std::llround (c);
+        const int64_t lo = c0 - r;
+        gciE.assign ((size_t) (2 * r + 1), 0.0);
+
+        double best = -1.0, sum = 0.0;
+        int    bi = -1, cnt = 0;
+        for (int j = 0; j <= 2 * r; ++j)
+        {
+            const int64_t i = lo + j;
+            if (i < 3 || i + 3 >= writePos) continue;
+            double e = 0.0;
+            for (int64_t k = i - 2; k <= i + 2; ++k)
+            {
+                const double d = (double) inBuf[(size_t) ((k + 1) & kMask)]
+                               - (double) inBuf[(size_t) ((k - 1) & kMask)];
+                e += d * d;
+            }
+            gciE[(size_t) j] = e;
+            sum += e; ++cnt;
+            if (e > best) { best = e; bi = j; }
+        }
+        if (cnt < 5 || best <= 0.0) { lastGci = -1; return alignToPeak (c, P); }
+
+        if (best < 2.5 * (sum / cnt))   // flat: no clear epoch (breathy/weak)
+        { lastGci = -1; return alignToPeak (c, P); }
+
+        int choice = bi;
+        if (lastGci >= 0)
+        {
+            const double kP  = std::round ((double) (c0 - lastGci) / (double) P);
+            const int    pj  = (int) (lastGci + (int64_t) std::llround (kP * (double) P) - lo);
+            const int    w   = std::max (2, (int) (P / 12.0f));
+            int pb = -1; double pv = -1.0;
+            for (int j = std::max (0, pj - w); j <= std::min (2 * r, pj + w); ++j)
+                if (gciE[(size_t) j] > pv) { pv = gciE[(size_t) j]; pb = j; }
+            if (pb >= 0 && 2.0 * pv >= best)
+                choice = pb;            // stay on the tracked epoch train
+        }
+        lastGci = lo + choice;
+        return (double) lastGci;
+    }
+
     float nextRand()   // fast LCG, uniform -1..1
     {
         rng = rng * 1664525u + 1013904223u;
@@ -867,4 +934,9 @@ private:
     float airP   = 320.0f;                // per-sample smoothed comb period
     float airLp1 = 0.0f, airLp2 = 0.0f;   // HP filter states (2x one-pole)
     float airK   = 0.004f, hpAirK = 0.17f;
+
+    // GCI Grain Sync state
+    bool    gciOn   = false;
+    int64_t lastGci = -1;                 // tracked epoch (input position)
+    std::vector<double> gciE;             // scratch: epoch-detector energies
 };

@@ -253,11 +253,22 @@ int main()
         writeWav ("out_air_dry.wav", breathy);
         P p; p.pitchSemi = 7.0f;
         p.airPreserve = 0.0f;  writeWav ("out_air_off.wav", run (breathy, p));
-        p.airPreserve = 0.8f;  writeWav ("out_air_on.wav",  run (breathy, p));
-        p.airPreserve = 1.0f;  p.airFreqHz = 700.0f;
+        p.airPreserve = 1.0f;  writeWav ("out_air_on.wav",  run (breathy, p));
+        p.airPreserve = 1.5f;  p.airFreqHz = 700.0f;
                                writeWav ("out_air_max.wav", run (breathy, p));
         P q;                   writeWav ("out_air_id0.wav", run (breathy, q));
-        q.airPreserve = 0.8f;  writeWav ("out_air_id.wav",  run (breathy, q));
+        q.airPreserve = 1.0f;  writeWav ("out_air_id.wav",  run (breathy, q));
+    }
+
+    // v0.7: GCI Grain Sync — regression on the clean vowel plus a creaky
+    // (irregular-pulse) comparison pair for listening
+    {
+        P p; p.pitchSemi = 7.0f; p.gciSync = true;
+        writeWav ("out_gci_vowel.wav", run (vowel, p));
+        const auto creaky2 = makeCreaky (55.0, 3.0);
+        P q; q.pitchSemi = 7.0f; q.lowVoice = true;
+        q.gciSync = false; writeWav ("out_gci_creak_off.wav", run (creaky2, q));
+        q.gciSync = true;  writeWav ("out_gci_creak_on.wav",  run (creaky2, q));
     }
 
     std::puts ("done");

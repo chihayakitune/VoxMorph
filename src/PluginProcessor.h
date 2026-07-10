@@ -45,6 +45,7 @@ private:
     std::atomic<float>* pBreath2   = nullptr;
     std::atomic<float>* pAir       = nullptr;
     std::atomic<float>* pAirBand   = nullptr;
+    std::atomic<float>* pGci       = nullptr;
     std::atomic<float>* pRange     = nullptr;
     std::atomic<float>* pCenter    = nullptr;
     std::atomic<float>* pTilt      = nullptr;

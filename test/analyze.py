@@ -105,22 +105,39 @@ f0out = 120.0 * 2**(7/12)
 dry_p = hf_periodicity(load("out_air_dry.wav"), f0out)
 mx = load("out_air_max.wav")
 print(f"HF periodicity @f0out lag: dry={dry_p:.3f}  off={hf_periodicity(off, f0out):.3f}  "
-      f"on={hf_periodicity(on, f0out):.3f}  max(1.0,band700)={hf_periodicity(mx, f0out):.3f}"
+      f"on(1.0)={hf_periodicity(on, f0out):.3f}  max(1.5,band700)={hf_periodicity(mx, f0out):.3f}"
       f"   (on/max should approach dry)")
 print(f"max setting: f0={f0_autocorr(mx):6.1f}  "
-      f"HF 3-10k={band_ratio(mx, 3000, 10000):.4f}   (breath boosted ~2x expected)")
+      f"HF 3-10k={band_ratio(mx, 3000, 10000):.4f}   (breath boosted ~2.6x expected)")
 print(f"f0: off={f0_autocorr(off):6.1f}  on={f0_autocorr(on):6.1f}   (both ~{f0out:.0f})")
 fo = " ".join(f"{p:5.0f}" for p in formants_lpc(off))
 fn = " ".join(f"{p:5.0f}" for p in formants_lpc(on))
 print(f"formants: off={fo}   on={fn}   (should match)")
 ho, hn = band_ratio(off, 3000, 10000), band_ratio(on, 3000, 10000)
 print(f"HF 3-10k energy ratio: off={ho:.4f}  on={hn:.4f}   "
-      f"(knob<=0.7 preserves energy; 0.8 boosts breath ~1.6x by design)")
+      f"(similar = energy preserved; boost only engages above knob 1.0)")
 
 # identity transparency: air=0.8 with no conversion must stay ~equal to air=0
 i0, i1 = load("out_air_id0.wav"), load("out_air_id.wav")
 n = min(len(i0), len(i1)); s = slice(n//3, n//3 + 32768)
 d = i1[s] - i0[s]
 rel = np.sqrt((d*d).mean() / max((i0[s]**2).mean(), 1e-30))
-print(f"identity diff (air 0.8 vs 0, no conversion): rel RMS={rel:.3f}  "
-      f"(mostly breath phase rearrangement + boost, not a tonal change)")
+print(f"identity diff (air 1.0 vs 0, no conversion): rel RMS={rel:.3f}  "
+      f"(mostly breath phase rearrangement, not a tonal change)")
+
+print("== GCI grain sync v0.7 (pitch+7st) ==")
+g = load("out_gci_vowel.wav")
+fmts = " ".join(f"{p:5.0f}" for p in formants_lpc(g))
+print(f"vowel gci=on: f0={f0_autocorr(g):6.1f} (expect ~179.8)  F={fmts} (expect ~= gci off)")
+def periodicity(x, f0):
+    seg = x[len(x)//3 : len(x)//3 + 16384]; seg = seg - seg.mean()
+    ac = np.correlate(seg, seg, 'full')[len(seg)-1:]
+    lag = int(round(FS / f0))
+    return ac[max(1,lag-20):lag+20].max() / ac[0]
+p_off = periodicity(load("out_p7_f0.wav"), 179.8)
+p_on  = periodicity(g, 179.8)
+print(f"full-band periodicity r(T): off={p_off:.4f}  on={p_on:.4f}   (>= off is good)")
+co, cn = load("out_gci_creak_off.wav"), load("out_gci_creak_on.wav")
+print(f"creaky+7st f0: off={f0_autocorr(co):5.1f}  on={f0_autocorr(cn):5.1f}  "
+      f"r(T): off={periodicity(co, 82.4):.4f}  on={periodicity(cn, 82.4):.4f}"
+      f"   (compare by listening too)")

@@ -107,13 +107,13 @@ public:
         addSliderRow ("air", "Air Preserve",
             tip ("Separates the natural breath (air) in your voice from the harmonics and passes it "
                  "through WITHOUT pitch shifting. Fixes the metallic 'buzzy' texture that appears on "
-                 "breathy or whispery vowels when shifting pitch. Up to 0.7 the separation increases "
-                 "at natural loudness; above 0.7 the preserved breath is also emphasized for a "
+                 "breathy or whispery vowels when shifting pitch. Up to 1.0 the separation increases "
+                 "at natural loudness; from 1.0 to 1.5 the preserved breath is also emphasized for a "
                  "clearly audible airy character. 0 = off.",
                  "声に含まれる自然な息(気息)成分を倍音成分から分離し、息だけはピッチ変換せずに"
                  "そのまま通します。息混じりの声をピッチシフトしたときに出る金属的なジャリジャリ感を"
-                 "軽減します。0.7までは自然な音量のまま分離が増え、0.7を超えると息成分を強調して"
-                 "効果がはっきり聴こえるようになります。0=オフ(従来どおり)。"));
+                 "軽減します。1.0までは自然な音量のまま分離が増え(1.0=分離最大)、1.0〜1.5では"
+                 "息成分を強調して効果がはっきり聴こえるようになります。0=オフ(従来どおり)。"));
         addSliderRow ("airband", "Air Preserve Band (Hz)",
             tip ("The frequency above which the voice is treated as breath (used only while Air "
                  "Preserve is up). Lower = stronger, reaching into the mids: try 700-900 if the "
@@ -124,6 +124,16 @@ public:
                  "音程を動かしたときにザラつきや元の声の高さの残りが聴こえる場合は上げてください。"));
 
         addSection ("ADVANCED");
+        addToggleRow ("gci", "GCI Grain Sync",
+            tip ("Aligns the internal grain cutting to the glottal closure instants (the exact "
+                 "moments the vocal folds snap shut) and keeps them phase-locked from period to "
+                 "period. Can reduce roughness / graininess of the converted voice, especially on "
+                 "low or slightly hoarse voices. Falls back to the classic alignment automatically "
+                 "where no clear vocal-fold pulses exist. Off = previous behaviour.",
+                 "内部のグレイン切り出しを声帯の閉鎖瞬間(GCI)に同期させ、周期ごとの位相を"
+                 "揃えます。変換後の声のザラつき・粗さが減る場合があります(低い声や少しかすれた"
+                 "声で特に有効)。明確な声帯パルスが無い区間では自動的に従来の整列に戻ります。"
+                 "オフ=従来どおり。"));
         addToggleRow ("lowvoice", "Low Voice Mode",
             tip ("For deep or creaky voices (vocal fry). Extends pitch tracking down to 40 Hz and "
                  "holds the last stable pitch through irregular, gravelly stretches - this prevents "

@@ -32,7 +32,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     layout.add (std::make_unique<P> (juce::ParameterID { "breath2", 1 }, "Breath",
                 juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "air", 1 }, "Air Preserve",
-                juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
+                juce::NormalisableRange<float> (0.0f, 1.5f, 0.001f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "airband", 1 }, "Air Preserve Band (Hz)",
                 juce::NormalisableRange<float> (500.0f, 3000.0f, 1.0f, 0.5f), 1000.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "range", 1 }, "Intonation Amount (%)",
@@ -45,6 +45,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "robot", 1 }, "Robotize", false));
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "gci", 1 }, "GCI Grain Sync", false));
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "lowvoice", 1 }, "Low Voice Mode", false));
     layout.add (std::make_unique<juce::AudioParameterBool> (
@@ -93,6 +95,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pBreath2 = apvts.getRawParameterValue ("breath2");
     pAir     = apvts.getRawParameterValue ("air");
     pAirBand = apvts.getRawParameterValue ("airband");
+    pGci     = apvts.getRawParameterValue ("gci");
     pRange     = apvts.getRawParameterValue ("range");
     pCenter    = apvts.getRawParameterValue ("center");
     pTilt      = apvts.getRawParameterValue ("tilt");
@@ -140,6 +143,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.breath        = pBreath2->load();      // spectral (noise-excited envelope)
     p.airPreserve   = pAir->load();          // mixed harmonic+noise split
     p.airFreqHz     = pAirBand->load();
+    p.gciSync       = pGci->load() > 0.5f;
     p.tiltDb        = pTilt->load();
     p.f1Shift = pF1S->load();  p.f1Gain = pF1G->load();
     p.f2Shift = pF2S->load();  p.f2Gain = pF2G->load();
