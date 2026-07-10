@@ -30,6 +30,13 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
+    // Visualizer taps: mono input (pre-conversion) and output (as heard),
+    // written on the audio thread, read by the editor's SpectrumView.
+    static constexpr int kVizLen = 16384;              // power of two
+    std::vector<float> vizIn  = std::vector<float> ((size_t) kVizLen, 0.0f);
+    std::vector<float> vizOut = std::vector<float> ((size_t) kVizLen, 0.0f);
+    std::atomic<int>   vizPos { 0 };
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
 

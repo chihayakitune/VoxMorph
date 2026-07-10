@@ -180,6 +180,10 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         for (int i = 0; i < n; ++i) m[i] = 0.5f * (L[i] + R[i]);
     }
 
+    const int vp = vizPos.load (std::memory_order_relaxed);
+    for (int i = 0; i < n; ++i)
+        vizIn[(size_t) ((vp + i) & (kVizLen - 1))] = m[i];
+
     engine.process (m, m, n);
 
     if (getLatencySamples() != engine.latencySamples())
@@ -224,6 +228,10 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         float* d = buffer.getWritePointer (c);
         for (int i = 0; i < n; ++i) d[i] = g * m[i];
     }
+
+    for (int i = 0; i < n; ++i)
+        vizOut[(size_t) ((vp + i) & (kVizLen - 1))] = g * m[i];
+    vizPos.store (vp + n, std::memory_order_release);
 }
 
 void VoxMorphProcessor::getStateInformation (juce::MemoryBlock& dest)

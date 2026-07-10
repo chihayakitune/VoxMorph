@@ -149,6 +149,10 @@ public:
 
     int latencySamples() const { return D; }
 
+    // forward FFT for the plugin's spectrum visualizer (reuses the engine's
+    // own radix-2 so the UI needs no extra dependencies). n = power of two.
+    static void fftForViz (float* re, float* im, int n) { fftRadix2 (re, im, n, false); }
+
     void setParams (const Params& q)
     {
         pitchRatio     = std::pow (2.0f, q.pitchSemi / 12.0f);

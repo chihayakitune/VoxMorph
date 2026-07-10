@@ -29,6 +29,125 @@
 //  - Row heights / widths: see the `items.push_back` calls and resized().
 //  - Default window height is capped by kMaxInitialHeight below.
 
+// Spectrum visualizer: INPUT (mint) and converted OUTPUT (pink) spectra
+// overlaid on a 20 Hz - 20 kHz log axis. Pulls samples from the processor's
+// viz ring buffers on its own 30 Hz timer; FFT is the engine's radix-2.
+class SpectrumView : public juce::Component, private juce::Timer
+{
+public:
+    explicit SpectrumView (VoxMorphProcessor& p) : proc (p)
+    {
+        re.assign ((size_t) kN, 0.0f);
+        im.assign ((size_t) kN, 0.0f);
+        smIn .assign ((size_t) kCols, kFloor);
+        smOut.assign ((size_t) kCols, kFloor);
+        startTimerHz (30);
+    }
+
+private:
+    static constexpr int   kN     = 4096;     // FFT size
+    static constexpr int   kCols  = 220;      // drawn columns
+    static constexpr float kFloor = -66.0f, kTop = 6.0f;   // dB display range
+
+    void timerCallback() override
+    {
+        if (! isShowing()) return;
+        analyze (proc.vizIn,  smIn);
+        analyze (proc.vizOut, smOut);
+        repaint();
+    }
+
+    void analyze (const std::vector<float>& src, std::vector<float>& dest)
+    {
+        const int pos  = proc.vizPos.load (std::memory_order_acquire);
+        const int mask = VoxMorphProcessor::kVizLen - 1;
+        for (int i = 0; i < kN; ++i)
+        {
+            const float w = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi * (float) i / (float) kN);
+            re[(size_t) i] = src[(size_t) ((pos - kN + i) & mask)] * w;
+            im[(size_t) i] = 0.0f;
+        }
+        PsolaEngine::fftForViz (re.data(), im.data(), kN);
+
+        const double fs = proc.getSampleRate() > 0 ? proc.getSampleRate() : 48000.0;
+        for (int c = 0; c < kCols; ++c)
+        {
+            // log axis: 20 Hz .. 20 kHz over kCols columns
+            const double f0 = 20.0 * std::pow (1000.0, (double)  c      / kCols);
+            const double f1 = 20.0 * std::pow (1000.0, (double) (c + 1) / kCols);
+            int b0 = std::clamp ((int) (f0 * kN / fs), 1, kN / 2 - 1);
+            int b1 = std::clamp ((int) (f1 * kN / fs) + 1, b0 + 1, kN / 2);
+            float pk = 1.0e-12f;
+            for (int b = b0; b < b1; ++b)
+                pk = std::max (pk, re[(size_t) b] * re[(size_t) b] + im[(size_t) b] * im[(size_t) b]);
+            // 0 dB ~= full-scale sine (Hann-windowed peak = N/4)
+            float db = std::clamp (10.0f * std::log10 (pk) - 60.2f, kFloor, kTop);
+            float& s = dest[(size_t) c];        // fast attack, slow release
+            s = db > s ? 0.45f * s + 0.55f * db
+                       : 0.86f * s + 0.14f * db;
+        }
+    }
+
+    void drawCurve (juce::Graphics& g, const std::vector<float>& v,
+                    juce::Rectangle<float> r, juce::Colour col) const
+    {
+        juce::Path p;
+        for (int c = 0; c < kCols; ++c)
+        {
+            const float x = r.getX() + r.getWidth()  * (float) c / (float) (kCols - 1);
+            const float y = r.getY() + r.getHeight() * (kTop - v[(size_t) c]) / (kTop - kFloor);
+            if (c == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
+        }
+        g.setColour (col);
+        g.strokePath (p, juce::PathStrokeType (1.8f));
+        p.lineTo (r.getRight(), r.getBottom());
+        p.lineTo (r.getX(),     r.getBottom());
+        p.closeSubPath();
+        g.setColour (col.withAlpha (0.18f));
+        g.fillPath (p);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced (2.0f);
+        g.setColour (juce::Colours::white);
+        g.fillRoundedRectangle (b, 8.0f);
+        g.setColour (juce::Colour (0xffe9d8dd));
+        g.drawRoundedRectangle (b, 8.0f, 1.0f);
+
+        auto r = b.reduced (10.0f, 10.0f);
+        g.setColour (juce::Colour (0x12000000));                   // grid
+        g.setFont (juce::Font (juce::FontOptions (10.0f)));
+        for (double f : { 100.0, 1000.0, 10000.0 })
+        {
+            const float x = r.getX() + r.getWidth() * (float) (std::log10 (f / 20.0) / 3.0);
+            g.setColour (juce::Colour (0x12000000));
+            g.drawVerticalLine ((int) x, r.getY(), r.getBottom());
+            g.setColour (juce::Colour (0x66000000));
+            g.drawText (f >= 1000.0 ? juce::String (f / 1000.0, 0) + "k" : juce::String ((int) f),
+                        (int) x + 3, (int) r.getBottom() - 13, 34, 12, juce::Justification::left);
+        }
+        for (float db : { 0.0f, -24.0f, -48.0f })
+        {
+            const float y = r.getY() + r.getHeight() * (kTop - db) / (kTop - kFloor);
+            g.setColour (juce::Colour (0x12000000));
+            g.drawHorizontalLine ((int) y, r.getX(), r.getRight());
+        }
+
+        drawCurve (g, smIn,  r, juce::Colour (0xff54bda1));        // input: mint
+        drawCurve (g, smOut, r, juce::Colour (0xfff08ba5));        // output: pink
+
+        g.setFont (juce::Font (juce::FontOptions (11.0f)));        // legend
+        g.setColour (juce::Colour (0xff54bda1));
+        g.drawText ("Input",  (int) r.getRight() - 110, (int) r.getY() + 2, 50, 14, juce::Justification::left);
+        g.setColour (juce::Colour (0xfff08ba5));
+        g.drawText ("Output", (int) r.getRight() - 56,  (int) r.getY() + 2, 54, 14, juce::Justification::left);
+    }
+
+    VoxMorphProcessor& proc;
+    std::vector<float> re, im, smIn, smOut;
+};
+
 class VoxMorphEditor : public juce::AudioProcessorEditor,
                        private juce::Timer
 {
@@ -39,11 +158,30 @@ public:
         tooltipWindow.setLookAndFeel (&tipLnf);
         setWantsKeyboardFocus (true);   // for the Cmd+S shortcut
 
+        // pastel theme (all colours in one place — edit freely)
+        mainLnf.setColour (juce::Slider::trackColourId,             juce::Colour (0xff8fd4bf)); // mint fill
+        mainLnf.setColour (juce::Slider::backgroundColourId,        juce::Colour (0xffe9dade));
+        mainLnf.setColour (juce::Slider::thumbColourId,             juce::Colour (0xfff08ba5)); // pink
+        mainLnf.setColour (juce::Slider::textBoxTextColourId,       juce::Colour (0xff4a4247));
+        mainLnf.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::white);
+        mainLnf.setColour (juce::Slider::textBoxOutlineColourId,    juce::Colour (0xffdcccd2));
+        mainLnf.setColour (juce::Label::textColourId,               juce::Colour (0xff4a4247));
+        mainLnf.setColour (juce::ToggleButton::textColourId,        juce::Colour (0xff4a4247));
+        mainLnf.setColour (juce::ToggleButton::tickColourId,        juce::Colour (0xfff08ba5));
+        mainLnf.setColour (juce::ToggleButton::tickDisabledColourId,juce::Colour (0xffc9bcc2));
+        mainLnf.setColour (juce::TextButton::buttonColourId,        juce::Colour (0xfff7e8ec));
+        mainLnf.setColour (juce::TextButton::textColourOffId,       juce::Colour (0xff8a5f6d));
+        setLookAndFeel (&mainLnf);
+
         // all rows are children of `content`, which scrolls inside `viewport`
         addAndMakeVisible (viewport);
         viewport.setViewedComponent (&content, false);
         viewport.setScrollBarsShown (true, false);
         viewport.setScrollBarThickness (10);
+
+        addSection ("VISUALIZER");
+        content.addAndMakeVisible (spectrum);
+        items.push_back ({ &spectrum, 168 });
 
         addSection ("PITCH");
         addSliderRow ("pitch", "Pitch (semitones)",
@@ -244,6 +382,7 @@ public:
 
     ~VoxMorphEditor() override
     {
+        setLookAndFeel (nullptr);
         tooltipWindow.setLookAndFeel (nullptr);
     }
 
@@ -272,7 +411,7 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        g.fillAll (juce::Colour (0xff1d1e23));
+        g.fillAll (juce::Colour (0xfffaf1f3));   // soft pink-white
     }
 
     void resized() override
@@ -383,7 +522,7 @@ private:
         auto lbl = std::make_unique<juce::Label>();
         lbl->setText (text, juce::dontSendNotification);
         lbl->setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-        lbl->setColour (juce::Label::textColourId, juce::Colour (0xffe8a33d));
+        lbl->setColour (juce::Label::textColourId, juce::Colour (0xffe36f8e));   // section pink
         content.addAndMakeVisible (*lbl);
         items.push_back ({ lbl.get(), 26 });
         owned.push_back (std::move (lbl));
@@ -437,9 +576,11 @@ private:
 
     VoxMorphProcessor& proc;
     TipLookAndFeel tipLnf;
+    juce::LookAndFeel_V4 mainLnf { juce::LookAndFeel_V4::getLightColourScheme() };
     juce::TooltipWindow tooltipWindow { this, 350 };
     juce::Viewport  viewport;    // scroll container
     juce::Component content;     // holds every row; taller than the window
+    SpectrumView    spectrum { proc };
     int contentHeight = 0;
 
     struct Item { juce::Component* comp; int h; };
