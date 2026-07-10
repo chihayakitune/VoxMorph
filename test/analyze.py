@@ -103,18 +103,24 @@ def hf_periodicity(x, f0_out, hp=3000):
 off, on = load("out_air_off.wav"), load("out_air_on.wav")
 f0out = 120.0 * 2**(7/12)
 dry_p = hf_periodicity(load("out_air_dry.wav"), f0out)
+mx = load("out_air_max.wav")
 print(f"HF periodicity @f0out lag: dry={dry_p:.3f}  off={hf_periodicity(off, f0out):.3f}  "
-      f"on={hf_periodicity(on, f0out):.3f}   (on should approach dry)")
+      f"on={hf_periodicity(on, f0out):.3f}  max(1.0,band700)={hf_periodicity(mx, f0out):.3f}"
+      f"   (on/max should approach dry)")
+print(f"max setting: f0={f0_autocorr(mx):6.1f}  "
+      f"HF 3-10k={band_ratio(mx, 3000, 10000):.4f}   (breath boosted ~2x expected)")
 print(f"f0: off={f0_autocorr(off):6.1f}  on={f0_autocorr(on):6.1f}   (both ~{f0out:.0f})")
 fo = " ".join(f"{p:5.0f}" for p in formants_lpc(off))
 fn = " ".join(f"{p:5.0f}" for p in formants_lpc(on))
 print(f"formants: off={fo}   on={fn}   (should match)")
 ho, hn = band_ratio(off, 3000, 10000), band_ratio(on, 3000, 10000)
-print(f"HF 3-10k energy ratio: off={ho:.4f}  on={hn:.4f}   (similar = energy preserved)")
+print(f"HF 3-10k energy ratio: off={ho:.4f}  on={hn:.4f}   "
+      f"(knob<=0.7 preserves energy; 0.8 boosts breath ~1.6x by design)")
 
 # identity transparency: air=0.8 with no conversion must stay ~equal to air=0
 i0, i1 = load("out_air_id0.wav"), load("out_air_id.wav")
 n = min(len(i0), len(i1)); s = slice(n//3, n//3 + 32768)
 d = i1[s] - i0[s]
 rel = np.sqrt((d*d).mean() / max((i0[s]**2).mean(), 1e-30))
-print(f"identity diff (air 0.8 vs 0, no conversion): rel RMS={rel:.3f}  (small = transparent)")
+print(f"identity diff (air 0.8 vs 0, no conversion): rel RMS={rel:.3f}  "
+      f"(mostly breath phase rearrangement + boost, not a tonal change)")

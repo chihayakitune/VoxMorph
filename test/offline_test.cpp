@@ -254,6 +254,8 @@ int main()
         P p; p.pitchSemi = 7.0f;
         p.airPreserve = 0.0f;  writeWav ("out_air_off.wav", run (breathy, p));
         p.airPreserve = 0.8f;  writeWav ("out_air_on.wav",  run (breathy, p));
+        p.airPreserve = 1.0f;  p.airFreqHz = 700.0f;
+                               writeWav ("out_air_max.wav", run (breathy, p));
         P q;                   writeWav ("out_air_id0.wav", run (breathy, q));
         q.airPreserve = 0.8f;  writeWav ("out_air_id.wav",  run (breathy, q));
     }

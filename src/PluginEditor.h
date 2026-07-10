@@ -107,10 +107,21 @@ public:
         addSliderRow ("air", "Air Preserve",
             tip ("Separates the natural breath (air) in your voice from the harmonics and passes it "
                  "through WITHOUT pitch shifting. Fixes the metallic 'buzzy' texture that appears on "
-                 "breathy or whispery vowels when shifting pitch. Try 0.5-0.8. 0 = off.",
+                 "breathy or whispery vowels when shifting pitch. Up to 0.7 the separation increases "
+                 "at natural loudness; above 0.7 the preserved breath is also emphasized for a "
+                 "clearly audible airy character. 0 = off.",
                  "声に含まれる自然な息(気息)成分を倍音成分から分離し、息だけはピッチ変換せずに"
                  "そのまま通します。息混じりの声をピッチシフトしたときに出る金属的なジャリジャリ感を"
-                 "軽減します。0.5〜0.8が目安。0=オフ(従来どおり)。"));
+                 "軽減します。0.7までは自然な音量のまま分離が増え、0.7を超えると息成分を強調して"
+                 "効果がはっきり聴こえるようになります。0=オフ(従来どおり)。"));
+        addSliderRow ("airband", "Air Preserve Band (Hz)",
+            tip ("The frequency above which the voice is treated as breath (used only while Air "
+                 "Preserve is up). Lower = stronger, reaching into the mids: try 700-900 if the "
+                 "effect feels too subtle. If you hear roughness or a ghost of your original pitch "
+                 "during pitch slides, raise it.",
+                 "この周波数より上を「息」として扱います(Air Preserve使用時のみ有効)。"
+                 "下げるほど中音域まで効いて効果が強くなります。効きが弱いと感じたら700〜900に。"
+                 "音程を動かしたときにザラつきや元の声の高さの残りが聴こえる場合は上げてください。"));
 
         addSection ("ADVANCED");
         addToggleRow ("lowvoice", "Low Voice Mode",

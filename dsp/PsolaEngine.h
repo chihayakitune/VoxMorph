@@ -70,7 +70,16 @@ public:
         // repeats its noise verbatim), which is what makes breathy voices
         // turn metallic; routing the breath around the shifter keeps it a
         // continuous natural noise. 0 = off (identical to previous versions).
+        // 0..0.7 scales the split up to its variance-optimal maximum (energy
+        // neutral); above 0.7 the bypassed breath is additionally boosted
+        // (up to ~+4 dB at 1.0) so the effect is clearly audible.
         float airPreserve = 0.0f;   // 0..1
+
+        // Separation crossover for Air Preserve: everything above this is
+        // treated as breath. Lower reaches further into the mids (stronger,
+        // but pitch movement may leak a ghost of the original pitch);
+        // higher keeps only the top "air".
+        float airFreqHz   = 1000.0f;   // 300..4000
     };
 
     void prepare (double sampleRate)
@@ -108,7 +117,7 @@ public:
         tiltLp      = 0.0f;
         tiltK       = 1.0f - std::exp ((float) (-2.0 * M_PI * 1000.0 / fs));
 
-        airG   = 0.0f;
+        airG   = airB = 0.0f;
         airLp1 = airLp2 = 0.0f;
         airP   = curP;
         airK   = 1.0f - std::exp ((float) (-1.0 / (0.005 * fs)));          // ~5 ms gate
@@ -134,6 +143,15 @@ public:
         lowVoice       = q.lowVoice;
         floorHz        = std::clamp (q.pitchFloorHz, 0.0f, 400.0f);
         airAmt         = std::clamp (q.airPreserve, 0.0f, 1.0f);
+        hpAirK         = 1.0f - std::exp ((float) (-2.0 * M_PI
+                             * std::clamp (q.airFreqHz, 300.0f, 4000.0f) / fs));
+        // 0..0.7 -> split amount up to the variance-optimal 2/3 (beyond it,
+        // subtracting more noise puts anti-correlated copies back into the
+        // grains); 0.7..1 -> boost the bypassed breath instead, which both
+        // masks what is left of the periodic noise and makes the knob move
+        // clearly audible.
+        airKSplit      = 0.6667f * std::min (1.0f, airAmt / 0.7f);
+        airBoost       = 1.0f + 2.0f * std::max (0.0f, airAmt - 0.7f);
 
         fShiftRatio[0] = std::pow (2.0f, q.f1Shift / 12.0f);
         fShiftRatio[1] = std::pow (2.0f, q.f2Shift / 12.0f);
@@ -206,14 +224,17 @@ public:
         // on voicing and dezippers knob moves; when it is fully off the
         // buffers are a plain copy and the comb is skipped (no CPU cost).
         {
-            const float target = (voiced && airAmt > 0.001f) ? airAmt : 0.0f;
-            if (target > 0.0f || airG > 1.0e-4f)
+            const bool  on      = voiced && airAmt > 0.001f;
+            const float tSplit  = on ? airKSplit            : 0.0f;
+            const float tBypass = on ? airKSplit * airBoost : 0.0f;
+            if (tSplit > 0.0f || airG > 1.0e-4f)
             {
                 for (int i = 0; i < n; ++i)
                 {
                     const int64_t pos = start + i;
                     const size_t  idx = (size_t) (pos & kMask);
-                    airG += airK * (target - airG);
+                    airG += airK * (tSplit  - airG);
+                    airB += airK * (tBypass - airB);
                     airP += 0.002f * (curP - airP);        // ~10 ms period glide
                     const double P = (double) std::max (32.0f, airP);
                     const float per = 0.5f * (readCubic ((double) pos - P)
@@ -221,9 +242,8 @@ public:
                     float res = inBuf[idx] - per;
                     airLp1 += hpAirK * (res - airLp1);  res -= airLp1;
                     airLp2 += hpAirK * (res - airLp2);  res -= airLp2;
-                    const float nz = airG * 0.6667f * res;
-                    noiseBuf[idx] = nz;
-                    harmBuf[idx]  = inBuf[idx] - nz;
+                    noiseBuf[idx] = airB * res;
+                    harmBuf[idx]  = inBuf[idx] - airG * res;
                 }
             }
             else
@@ -234,7 +254,7 @@ public:
                     harmBuf[idx]  = inBuf[idx];
                     noiseBuf[idx] = 0.0f;
                 }
-                airG = 0.0f;  airLp1 = airLp2 = 0.0f;  airP = curP;
+                airG = airB = 0.0f;  airLp1 = airLp2 = 0.0f;  airP = curP;
             }
         }
 
@@ -840,8 +860,10 @@ private:
     bool  robotize = false, lowVoice = false;
 
     // Air Preserve (harmonic/noise split) state
-    float airAmt = 0.0f;                  // knob value
-    float airG   = 0.0f;                  // smoothed, voicing-gated gain
+    float airAmt    = 0.0f;               // knob value
+    float airKSplit = 0.0f;               // split coefficient (<= 2/3)
+    float airBoost  = 1.0f;               // bypass emphasis (knob > 0.7)
+    float airG   = 0.0f, airB = 0.0f;     // smoothed, voicing-gated gains
     float airP   = 320.0f;                // per-sample smoothed comb period
     float airLp1 = 0.0f, airLp2 = 0.0f;   // HP filter states (2x one-pole)
     float airK   = 0.004f, hpAirK = 0.17f;
