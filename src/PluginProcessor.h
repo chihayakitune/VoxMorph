@@ -44,6 +44,7 @@ public:
     std::vector<float> capBuf;
     std::atomic<int>   capLen { 0 }, capTarget { 0 };
     std::atomic<bool>  capturing { false };
+    std::atomic<bool>  capFromOutput { false };   // false = mic in, true = converted out
     std::vector<float> prevBuf;
     std::atomic<int>   prevLen { 0 };
     std::atomic<int>   prevPos { -1 };                 // -1 = stopped

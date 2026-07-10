@@ -164,7 +164,7 @@ class AnalyzePanel : public juce::Component, private juce::Timer
 public:
     explicit AnalyzePanel (VoxMorphProcessor& p) : proc (p)
     {
-        for (auto* b : { &recBtn, &loadBtn, &playBtn, &applyBtn })
+        for (auto* b : { &recBtn, &loadBtn, &playBtn, &applyBtn, &refineBtn })
             addAndMakeVisible (*b);
         durBox.addItem ("5 s", 5);  durBox.addItem ("10 s", 10);  durBox.addItem ("15 s", 15);
         durBox.setSelectedId (10, juce::dontSendNotification);
@@ -177,9 +177,9 @@ public:
             addAndMakeVisible (*l);
         }
         help.setText (juce::String::fromUTF8 (
-            "1) Load the target voice file   2) Record your voice (listen with Play)   3) Auto-Set\n"
             "1) 目標の声の音声ファイルを読み込む → 2) Playで聴きながら合わせて自分の声を録音(普段の\n"
-            "調子で喋り続ける・ヘッドホン推奨) → 3) Auto-Setで差分からMAINのパラメータを自動設定。"),
+            "調子で喋り続ける・ヘッドホン推奨) → 3) Auto-Setで差分からMAINのパラメータを自動設定。\n"
+            "4) Refine=変換後の声を録音して目標との残差でパラメータを再調整 → 繰り返すほど目標に接近。"),
             juce::dontSendNotification);
         p1Lbl.setText ("Your voice: --", juce::dontSendNotification);
         p2Lbl.setText ("Target: --",     juce::dontSendNotification);
@@ -189,14 +189,27 @@ public:
         playBtn.setTooltip (juce::String::fromUTF8 ("Preview the loaded file through the plugin output.\n読み込んだファイルを出力から再生します。"));
         applyBtn.setTooltip (juce::String::fromUTF8 ("Writes the derived settings into the MAIN tab parameters.\n分析結果から求めた設定をMAINタブのパラメータに書き込みます。"));
 
+        refineBtn.setTooltip (juce::String::fromUTF8 (
+            "Records the CONVERTED output voice, compares it with the target and nudges the "
+            "parameters to close the remaining gap. Repeatable - each pass gets closer.\n"
+            "変換後の出力音声を録音し、目標と比較して残差分だけパラメータを再調整します。"
+            "何度でも繰り返せて、繰り返すほど目標に近づきます。現在の設定のまま喋ってください。"));
+
         recBtn.onClick = [this]
         {
-            const double sr = proc.getSampleRate() > 0 ? proc.getSampleRate() : 48000.0;
-            proc.capTarget = (int) (sr * durBox.getSelectedId());
-            proc.capLen = 0;
-            proc.capturing = true;
-            waitingCapture = true;
-            recBtn.setButtonText ("Recording... speak!");
+            proc.capFromOutput = false;
+            startCapture (recBtn, waitingCapture);
+        };
+        refineBtn.onClick = [this]
+        {
+            if (! prof2.valid())
+            {
+                outLbl.setText (juce::String::fromUTF8 ("先に目標ファイルを読み込んでください。"),
+                                juce::dontSendNotification);
+                return;
+            }
+            proc.capFromOutput = true;
+            startCapture (refineBtn, waitingRefine);
         };
         loadBtn.onClick  = [this] { loadFile(); };
         playBtn.onClick  = [this]
@@ -220,20 +233,43 @@ public:
         recBtn.setBounds (r2.removeFromLeft (170).withHeight (26));
         durBox.setBounds (r2.removeFromLeft (70).withHeight (26).translated (8, 0));
         p1Lbl.setBounds (r2.withTrimmedLeft (18));
-        applyBtn.setBounds (r.removeFromTop (30).withWidth (220));   // step 3
+        auto r3 = r.removeFromTop (34);                       // steps 3 + 4/5
+        applyBtn.setBounds (r3.removeFromLeft (190).withHeight (28));
+        refineBtn.setBounds (r3.removeFromLeft (230).withHeight (28).translated (10, 0));
         outLbl.setBounds (r.withTrimmedTop (6));
     }
 
 private:
+    void startCapture (juce::TextButton& b, bool& waitFlag)
+    {
+        const double sr = proc.getSampleRate() > 0 ? proc.getSampleRate() : 48000.0;
+        proc.capTarget = (int) (sr * durBox.getSelectedId());
+        proc.capLen = 0;
+        proc.capturing = true;
+        waitFlag = true;
+        b.setButtonText ("Recording... speak!");
+    }
+
+    VoiceProfile analyzeCapture() const
+    {
+        return VoiceAnalyzer::analyze (proc.capBuf.data(), proc.capLen.load(),
+                                       proc.getSampleRate() > 0 ? proc.getSampleRate() : 48000.0);
+    }
+
     void timerCallback() override
     {
         if (waitingCapture && ! proc.capturing.load())
         {
             waitingCapture = false;
             recBtn.setButtonText ("Record My Voice");
-            prof1 = VoiceAnalyzer::analyze (proc.capBuf.data(), proc.capLen.load(),
-                                            proc.getSampleRate() > 0 ? proc.getSampleRate() : 48000.0);
+            prof1 = analyzeCapture();
             p1Lbl.setText ("Your voice:\n" + fmt (prof1), juce::dontSendNotification);
+        }
+        if (waitingRefine && ! proc.capturing.load())
+        {
+            waitingRefine = false;
+            refineBtn.setButtonText ("Record Converted + Refine");
+            refine (analyzeCapture());
         }
         playBtn.setButtonText (proc.prevPos.load() >= 0 ? "Stop" : "Play");
     }
@@ -347,11 +383,54 @@ private:
                         + extra, juce::dontSendNotification);
     }
 
+    // Refine loop (steps 4/5): record the CONVERTED output, compare with the
+    // target, and nudge the parameters by the damped residual. Damping keeps
+    // repeated passes converging instead of oscillating.
+    void refine (const VoiceProfile& pc)
+    {
+        if (! pc.valid())
+        {
+            outLbl.setText (juce::String::fromUTF8 ("変換後の声を分析できませんでした。もう一度、喋り続けて録音してください。"),
+                            juce::dontSendNotification);
+            return;
+        }
+        auto cur = [this] (const char* id) { return proc.apvts.getRawParameterValue (id)->load(); };
+        auto st  = [] (float a, float b)   { return 12.0f * std::log2 (a / b); };
+
+        const float dPitch = juce::jlimit (-6.0f, 6.0f, st (prof2.f0Hz, pc.f0Hz));
+        setP ("pitch", juce::jlimit (-24.0f, 24.0f, cur ("pitch") + 0.8f * dPitch));
+
+        float sh[3];
+        for (int i = 0; i < 3; ++i) sh[i] = st (prof2.F[i], pc.F[i]);
+        const float dFmt = juce::jlimit (-6.0f, 6.0f, (sh[0] + sh[1] + sh[2]) / 3.0f);
+        setP ("formant", juce::jlimit (-24.0f, 24.0f, cur ("formant") + 0.7f * dFmt));
+
+        const char* sid[3] = { "f1shift", "f2shift", "f3shift" };
+        const char* gid[3] = { "f1gain",  "f2gain",  "f3gain"  };
+        for (int i = 0; i < 3; ++i)
+        {
+            setP (sid[i], juce::jlimit (-3.0f, 3.0f, cur (sid[i]) + 0.4f * (sh[i] - dFmt)));
+            setP (gid[i], juce::jlimit (-8.0f, 8.0f, cur (gid[i]) + 0.4f * (prof2.L[i] - pc.L[i])));
+        }
+        const float dTilt = 0.25f * (prof2.tiltDb - pc.tiltDb);
+        setP ("tilt", juce::jlimit (-6.0f, 6.0f, cur ("tilt") + juce::jlimit (-1.5f, 1.5f, dTilt)));
+        if (prof2.f0SpreadSt > 0.3f && pc.f0SpreadSt > 0.3f)
+            setP ("range", juce::jlimit (50.0f, 200.0f,
+                     cur ("range") * juce::jlimit (0.75f, 1.35f, prof2.f0SpreadSt / pc.f0SpreadSt)));
+
+        outLbl.setText (juce::String::fromUTF8 ("再調整しました(残差が小さくなるまで④を繰り返せます)。\n")
+                        + "converted now: " + fmt (pc).replace ("\n", "   ")
+                        + juce::String::formatted ("\nresidual: pitch %+.1f st  formant %+.1f st  tilt %+.1f dB",
+                                                   dPitch, dFmt, prof2.tiltDb - pc.tiltDb),
+                        juce::dontSendNotification);
+    }
+
     VoxMorphProcessor& proc;
     VoiceProfile prof1, prof2;
-    bool waitingCapture = false;
+    bool waitingCapture = false, waitingRefine = false;
     juce::TextButton recBtn { "Record My Voice" }, loadBtn { "Load Target File..." },
-                     playBtn { "Play" }, applyBtn { "Auto-Set Parameters" };
+                     playBtn { "Play" }, applyBtn { "Auto-Set Parameters" },
+                     refineBtn { "Record Converted + Refine" };
     juce::ComboBox durBox;
     juce::Label help, p1Lbl, p2Lbl, outLbl;
     std::unique_ptr<juce::FileChooser> chooser;

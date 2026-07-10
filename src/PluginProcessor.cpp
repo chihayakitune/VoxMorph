@@ -189,7 +189,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     for (int i = 0; i < n; ++i)
         vizIn[(size_t) ((vp + i) & (kVizLen - 1))] = m[i];
 
-    if (capturing.load())          // ANALYZE tab: capture raw input
+    if (capturing.load() && ! capFromOutput.load())   // ANALYZE: capture raw input
     {
         const int cl   = capLen.load();
         const int room = std::min ((int) capBuf.size(), capTarget.load()) - cl;
@@ -247,6 +247,16 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     for (int i = 0; i < n; ++i)
         vizOut[(size_t) ((vp + i) & (kVizLen - 1))] = g * m[i];
     vizPos.store (vp + n, std::memory_order_release);
+
+    if (capturing.load() && capFromOutput.load())     // ANALYZE: capture converted
+    {                                                 // output (before file preview)
+        const int cl   = capLen.load();
+        const int room = std::min ((int) capBuf.size(), capTarget.load()) - cl;
+        const int c    = std::max (0, std::min (n, room));
+        for (int i = 0; i < c; ++i) capBuf[(size_t) (cl + i)] = g * m[i];
+        capLen.store (cl + c);
+        if (c >= room) capturing.store (false);
+    }
 
     const int pp = prevPos.load();     // ANALYZE tab: target-file preview
     if (pp >= 0)
