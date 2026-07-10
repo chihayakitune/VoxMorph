@@ -97,6 +97,83 @@ static void writeWav (const std::string& path, const std::vector<float>& x)
     std::fclose (f);
 }
 
+// "creaky" low vowel: irregular glottal pulses (vocal fry style) —
+// alternating period +/-12% and alternating pulse amplitude, f0 ~= 55 Hz
+static std::vector<float> makeCreaky (double f0, double seconds)
+{
+    const int n = (int) (FS * seconds);
+    std::vector<double> src ((size_t) n, 0.0);
+    double nextPulse = 100.0;
+    bool flip = false;
+    for (int i = 0; i < n; ++i)
+    {
+        if ((double) i >= nextPulse)
+        {
+            src[(size_t)i] = flip ? 0.6 : 1.0;
+            const double per = FS / f0;
+            nextPulse += per * (flip ? 0.88 : 1.12);
+            flip = ! flip;
+        }
+    }
+    Reso f1 (600.0, 110.0), f2 (1100.0, 130.0), f3 (2500.0, 170.0);
+    std::vector<double> y ((size_t) n, 0.0);
+    double maxA = 1e-12;
+    for (int i = 0; i < n; ++i)
+    {
+        const double s = f1.tick (src[(size_t)i]) + 0.7 * f2.tick (src[(size_t)i])
+                       + 0.3 * f3.tick (src[(size_t)i]);
+        y[(size_t)i] = s;
+        maxA = std::max (maxA, std::abs (s));
+    }
+    std::vector<float> v ((size_t) n, 0.0f);
+    for (int i = 0; i < n; ++i) v[(size_t)i] = (float) (0.7 * y[(size_t)i] / maxA);
+    return v;
+}
+
+// breathy vowel: vowel with realistic HF rolloff (-12 dB/oct above ~1.8 kHz,
+// real voices carry little harmonic energy up there) plus continuous
+// high-passed aspiration noise — the input type Air Preserve targets.
+// Above ~3 kHz the aspiration dominates, as in a real breathy voice.
+static std::vector<float> makeBreathy (double f0, double seconds)
+{
+    auto v = makeVowel (f0, f0, seconds);
+    uint32_t rng = 24681357u;
+    double lp1 = 0.0, lp2 = 0.0, vl1 = 0.0, vl2 = 0.0;
+    const double k  = 1.0 - std::exp (-2.0 * M_PI * 2000.0 / FS);
+    const double kv = 1.0 - std::exp (-2.0 * M_PI * 1800.0 / FS);
+    for (auto& s : v)
+    {
+        vl1 += kv * ((double) s - vl1);          // 2x one-pole LP @1.8k
+        vl2 += kv * (vl1 - vl2);
+        rng = rng * 1664525u + 1013904223u;
+        double nz = (double) ((int32_t) rng) / 2147483648.0;
+        lp1 += k * (nz - lp1);  nz -= lp1;       // 2x one-pole HP @2k
+        lp2 += k * (nz - lp2);  nz -= lp2;
+        s = (float) (0.9 * vl2 + 0.08 * nz);
+    }
+    return v;
+}
+
+// run and also count voiced/unvoiced transitions (the "flutter" artifact)
+static std::vector<float> runToggles (const std::vector<float>& in,
+                                      const PsolaEngine::Params& p, int& toggles)
+{
+    PsolaEngine eng;
+    eng.prepare (FS);
+    eng.setParams (p);
+    std::vector<float> out (in.size(), 0.0f);
+    const int B = 256;
+    bool last = false;
+    toggles = 0;
+    for (size_t i = 0; i < in.size(); i += B)
+    {
+        const int n = (int) std::min ((size_t) B, in.size() - i);
+        eng.process (in.data() + i, out.data() + i, n);
+        if (i > (size_t)(FS/4) && eng.isVoiced() != last) { ++toggles; last = eng.isVoiced(); }
+    }
+    return out;
+}
+
 static std::vector<float> run (const std::vector<float>& in, const PsolaEngine::Params& p)
 {
     PsolaEngine eng;
@@ -135,6 +212,51 @@ int main()
     { P p; p.consonantSemi = 7;                    writeWav ("out_cons7.wav",  run (conson, p)); }
     { P p;                                         writeWav ("out_cons0.wav",  run (conson, p)); }
     { P p; p.tiltDb = 6.0f;                        writeWav ("out_tilt6.wav",  run (vowel,  p)); }
+
+    // Low Voice Mode: creaky 55 Hz vowel, pitch +7st
+    {
+        const auto creaky = makeCreaky (55.0, 3.0);
+        int togOff = 0, togOn = 0;
+        P p; p.pitchSemi = 7.0f;
+        p.lowVoice = false; writeWav ("out_creaky_off.wav", runToggles (creaky, p, togOff));
+        p.lowVoice = true;  writeWav ("out_creaky_on.wav",  runToggles (creaky, p, togOn));
+        std::printf ("creaky 55Hz +7st: voiced/unvoiced toggles  off=%d  on=%d (lower is better)\n",
+                     togOff, togOn);
+
+        // recovery test: modal 120Hz -> creaky 55Hz -> modal 120Hz
+        const auto modal = makeVowel (120.0, 120.0, 1.5);
+        std::vector<float> seq;
+        seq.insert (seq.end(), modal.begin(),  modal.end());
+        seq.insert (seq.end(), creaky.begin(), creaky.begin() + (int) FS * 3 / 2);
+        seq.insert (seq.end(), modal.begin(),  modal.end());
+        int tog = 0;
+        writeWav ("out_seq_on.wav", runToggles (seq, p, tog));
+
+        // pitch floor: lift the converted creaky voice toward 160 Hz
+        p.pitchFloorHz = 160.0f;
+        writeWav ("out_creaky_floor.wav", runToggles (creaky, p, tog));
+    }
+
+    // Phase 2: per-formant control + spectral breath
+    { P p; p.f2Shift = 4.0f;                       writeWav ("out_pf_f2s4.wav",  run (vowel, p)); }
+    { P p; p.f1Shift = -3.0f;                      writeWav ("out_pf_f1sm3.wav", run (vowel, p)); }
+    { P p; p.f1Gain = -9.0f;                       writeWav ("out_pf_f1gm9.wav", run (vowel, p)); }
+    { P p; p.f3Gain = 9.0f;                        writeWav ("out_pf_f3g9.wav",  run (vowel, p)); }
+    { P p; p.breath = 0.6f;                        writeWav ("out_pf_breath.wav",run (vowel, p)); }
+    { P p; p.pitchSemi = 7.0f; p.f2Shift = 3.0f;   writeWav ("out_pf_mix.wav",   run (vowel, p)); }
+
+    // v0.6: Air Preserve (mixed harmonic+noise) on a breathy vowel.
+    // With air ON the aspiration must stay continuous (less periodic HF)
+    // while f0/formants and total HF energy stay the same.
+    {
+        const auto breathy = makeBreathy (120.0, 2.0);
+        writeWav ("out_air_dry.wav", breathy);
+        P p; p.pitchSemi = 7.0f;
+        p.airPreserve = 0.0f;  writeWav ("out_air_off.wav", run (breathy, p));
+        p.airPreserve = 0.8f;  writeWav ("out_air_on.wav",  run (breathy, p));
+        P q;                   writeWav ("out_air_id0.wav", run (breathy, q));
+        q.airPreserve = 0.8f;  writeWav ("out_air_id.wav",  run (breathy, q));
+    }
 
     std::puts ("done");
     return 0;

@@ -85,3 +85,36 @@ print("== tilt +6dB (low/high balance) ==")
 lo0 = band_ratio(load("out_p0_f0.wav"), 0, 1000);  hi0 = band_ratio(load("out_p0_f0.wav"), 2000, 8000)
 lo6 = band_ratio(load("out_tilt6.wav"), 0, 1000);  hi6 = band_ratio(load("out_tilt6.wav"), 2000, 8000)
 print(f"tilt 0: low={lo0:.3f} high={hi0:.3f}   tilt+6: low={lo6:.3f} high={hi6:.3f} (low up, high down)")
+
+print("== air preserve v0.6 (breathy vowel 120Hz, pitch+7st) ==")
+def hf_periodicity(x, f0_out, hp=3000):
+    """Normalized autocorrelation of the >hp band at the OUTPUT pitch lag.
+    High = aspiration was made periodic (metallic buzz); low = natural."""
+    seg = x[len(x)//3 : len(x)//3 + 32768]
+    X = np.fft.rfft(seg)
+    fr = np.fft.rfftfreq(len(seg), 1/FS)
+    X[fr < hp] = 0
+    y = np.fft.irfft(X)
+    y -= y.mean()
+    lag = int(round(FS / f0_out))
+    a, b = y[:-lag], y[lag:]
+    return (a*b).sum() / np.sqrt((a*a).sum() * (b*b).sum() + 1e-30)
+
+off, on = load("out_air_off.wav"), load("out_air_on.wav")
+f0out = 120.0 * 2**(7/12)
+dry_p = hf_periodicity(load("out_air_dry.wav"), f0out)
+print(f"HF periodicity @f0out lag: dry={dry_p:.3f}  off={hf_periodicity(off, f0out):.3f}  "
+      f"on={hf_periodicity(on, f0out):.3f}   (on should approach dry)")
+print(f"f0: off={f0_autocorr(off):6.1f}  on={f0_autocorr(on):6.1f}   (both ~{f0out:.0f})")
+fo = " ".join(f"{p:5.0f}" for p in formants_lpc(off))
+fn = " ".join(f"{p:5.0f}" for p in formants_lpc(on))
+print(f"formants: off={fo}   on={fn}   (should match)")
+ho, hn = band_ratio(off, 3000, 10000), band_ratio(on, 3000, 10000)
+print(f"HF 3-10k energy ratio: off={ho:.4f}  on={hn:.4f}   (similar = energy preserved)")
+
+# identity transparency: air=0.8 with no conversion must stay ~equal to air=0
+i0, i1 = load("out_air_id0.wav"), load("out_air_id.wav")
+n = min(len(i0), len(i1)); s = slice(n//3, n//3 + 32768)
+d = i1[s] - i0[s]
+rel = np.sqrt((d*d).mean() / max((i0[s]**2).mean(), 1e-30))
+print(f"identity diff (air 0.8 vs 0, no conversion): rel RMS={rel:.3f}  (small = transparent)")

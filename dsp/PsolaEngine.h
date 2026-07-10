@@ -12,6 +12,8 @@
 //   * Consonant shift  = separate formant ratio for unvoiced segments
 //   * Breath           = pitch-synchronous aspiration noise (glottal source model)
 //   * Tilt             = source spectral tilt (low/high balance around 1 kHz)
+//   * Air preserve     = mixed harmonic+noise handling: the natural breath
+//                        component bypasses the pitch shifter un-pitched
 
 #pragma once
 #include <vector>
@@ -59,6 +61,16 @@ public:
         // Low Latency Mode: halves the lookahead (43 -> ~21 ms). Pitch
         // tracking floor rises to ~90 Hz. Ignored while lowVoice is on.
         bool  lowLatency = false;
+
+        // Air Preserve (mixed harmonic+noise processing for breathy vowels):
+        // the aperiodic breath component above ~1.4 kHz is separated from the
+        // harmonics BEFORE grain cutting and passed through to the output
+        // un-pitched. Re-spacing grains imposes the new pitch period on any
+        // noise inside them (worst when an upward shift reuses a grain and
+        // repeats its noise verbatim), which is what makes breathy voices
+        // turn metallic; routing the breath around the shifter keeps it a
+        // continuous natural noise. 0 = off (identical to previous versions).
+        float airPreserve = 0.0f;   // 0..1
     };
 
     void prepare (double sampleRate)
@@ -71,6 +83,8 @@ public:
         maxHout   = 1200;
 
         inBuf .assign (kRing, 0.0f);
+        harmBuf .assign (kRing, 0.0f);
+        noiseBuf.assign (kRing, 0.0f);
         accBuf.assign (kRing, 0.0f);
         normBuf.assign (kRing, 0.0f);
         tmp.assign ((size_t) (kDetN + maxLagLow + 4), 0.0f);
@@ -93,6 +107,12 @@ public:
         sinceDetect = 0;
         tiltLp      = 0.0f;
         tiltK       = 1.0f - std::exp ((float) (-2.0 * M_PI * 1000.0 / fs));
+
+        airG   = 0.0f;
+        airLp1 = airLp2 = 0.0f;
+        airP   = curP;
+        airK   = 1.0f - std::exp ((float) (-1.0 / (0.005 * fs)));          // ~5 ms gate
+        hpAirK = 1.0f - std::exp ((float) (-2.0 * M_PI * 1400.0 / fs));    // breath band HP
     }
 
     int latencySamples() const { return D; }
@@ -113,6 +133,7 @@ public:
         mix            = q.mix;
         lowVoice       = q.lowVoice;
         floorHz        = std::clamp (q.pitchFloorHz, 0.0f, 400.0f);
+        airAmt         = std::clamp (q.airPreserve, 0.0f, 1.0f);
 
         fShiftRatio[0] = std::pow (2.0f, q.f1Shift / 12.0f);
         fShiftRatio[1] = std::pow (2.0f, q.f2Shift / 12.0f);
@@ -176,6 +197,47 @@ public:
             inBuf[(size_t) ((start + i) & kMask)] = in[i];
         writePos += n;
 
+        // ---- harmonic/noise split (Air Preserve) ----
+        // A causal 2-tap pitch comb predicts the periodic part; the high-
+        // passed residual is the natural breath. Grains are cut from
+        // harmBuf (= input minus breath) and noiseBuf is added back to the
+        // output un-pitched, D samples later. At the optimal split (2/3 of
+        // the residual) total noise energy is preserved exactly. airG gates
+        // on voicing and dezippers knob moves; when it is fully off the
+        // buffers are a plain copy and the comb is skipped (no CPU cost).
+        {
+            const float target = (voiced && airAmt > 0.001f) ? airAmt : 0.0f;
+            if (target > 0.0f || airG > 1.0e-4f)
+            {
+                for (int i = 0; i < n; ++i)
+                {
+                    const int64_t pos = start + i;
+                    const size_t  idx = (size_t) (pos & kMask);
+                    airG += airK * (target - airG);
+                    airP += 0.002f * (curP - airP);        // ~10 ms period glide
+                    const double P = (double) std::max (32.0f, airP);
+                    const float per = 0.5f * (readCubic ((double) pos - P)
+                                            + readCubic ((double) pos - 2.0 * P));
+                    float res = inBuf[idx] - per;
+                    airLp1 += hpAirK * (res - airLp1);  res -= airLp1;
+                    airLp2 += hpAirK * (res - airLp2);  res -= airLp2;
+                    const float nz = airG * 0.6667f * res;
+                    noiseBuf[idx] = nz;
+                    harmBuf[idx]  = inBuf[idx] - nz;
+                }
+            }
+            else
+            {
+                for (int i = 0; i < n; ++i)
+                {
+                    const size_t idx = (size_t) ((start + i) & kMask);
+                    harmBuf[idx]  = inBuf[idx];
+                    noiseBuf[idx] = 0.0f;
+                }
+                airG = 0.0f;  airLp1 = airLp2 = 0.0f;  airP = curP;
+            }
+        }
+
         // dezipper: glide the conversion ratios over ~40 ms so parameter
         // moves (or host automation) never step audibly between grains
         {
@@ -204,6 +266,10 @@ public:
             const float   nrm = normBuf[idx];
             float wet = nrm > 1.0e-3f ? accBuf[idx] / std::max (nrm, 0.25f) : 0.0f;
 
+            const int64_t di = oi - D;
+            if (di >= 0)
+                wet += noiseBuf[(size_t) (di & kMask)];   // un-pitched breath
+
             if (doTilt)   // source spectral tilt around 1 kHz (wet path only)
             {
                 tiltLp += tiltK * (wet - tiltLp);
@@ -211,7 +277,6 @@ public:
             }
 
             float dry = 0.0f;
-            const int64_t di = oi - D;
             if (di >= 0)
                 dry = inBuf[(size_t) (di & kMask)];
 
@@ -444,7 +509,8 @@ private:
             baseHalf = std::min (baseHalf, std::max (48.0f, 1.25f * Ts));
         const int Hout = (int) std::clamp (baseHalf / f, 32.0f, (float) houtCapCur);
 
-        // pass 1: resample grain into scratch
+        // pass 1: resample grain into scratch (from the harmonic-only buffer;
+        // identical to the input while Air Preserve is off)
         for (int j = -Hout; j <= Hout; ++j)
         {
             const double  ip = c + ((double) j + err) * (double) f;
@@ -453,8 +519,8 @@ private:
             if (i0 >= 0 && i0 + 1 < writePos)
             {
                 const float frac = (float) (ip - (double) i0);
-                s = inBuf[(size_t) (i0 & kMask)] * (1.0f - frac)
-                  + inBuf[(size_t) ((i0 + 1) & kMask)] * frac;
+                s = harmBuf[(size_t) (i0 & kMask)] * (1.0f - frac)
+                  + harmBuf[(size_t) ((i0 + 1) & kMask)] * frac;
             }
             grainScratch[(size_t) (j + Hout)] = s;
         }
@@ -723,6 +789,23 @@ private:
         return (float) ((int32_t) rng) * (1.0f / 2147483648.0f);
     }
 
+    // Catmull-Rom read from inBuf at a fractional position. Linear
+    // interpolation is not enough here: its HF droop at half-sample offsets
+    // stops the comb from cancelling the upper harmonics, leaking them into
+    // the "noise" path (audible as a ghost of the un-shifted pitch).
+    float readCubic (double p) const
+    {
+        const int64_t i1 = (int64_t) std::floor (p);
+        const float t   = (float) (p - (double) i1);
+        const float xm1 = inBuf[(size_t) ((i1 - 1) & kMask)];
+        const float x0  = inBuf[(size_t) ( i1      & kMask)];
+        const float x1  = inBuf[(size_t) ((i1 + 1) & kMask)];
+        const float x2  = inBuf[(size_t) ((i1 + 2) & kMask)];
+        return x0 + 0.5f * t * (x1 - xm1
+                    + t * (2.0f*xm1 - 5.0f*x0 + 4.0f*x1 - x2
+                    + t * (3.0f*(x0 - x1) + x2 - xm1)));
+    }
+
     // ---------------- state ----------------
     static constexpr int kHoldMax = 24;   // ~250 ms of pitch hold (detect every ~512 samples)
     static constexpr int kFFT = 4096;     // spectral-layer FFT size
@@ -733,7 +816,7 @@ private:
     int    effMaxLagCur = 800, houtCapCur = 1200;
     float  capHalfCur = 800.0f, guardFrac = 1.0f;
 
-    std::vector<float>  inBuf, accBuf, normBuf, tmp, tmpD, grainScratch;
+    std::vector<float>  inBuf, harmBuf, noiseBuf, accBuf, normBuf, tmp, tmpD, grainScratch;
     std::vector<float>  fr, fi, mag, env, envSm, pkV;
     std::vector<int>    pkB;
     std::vector<double> dbuf, prefix;
@@ -755,4 +838,11 @@ private:
     float gLow = 1.0f, gHigh = 1.0f, tiltLp = 0.0f, tiltK = 0.12f;
     float mix = 1.0f, robotHz = 120.0f, floorHz = 0.0f;
     bool  robotize = false, lowVoice = false;
+
+    // Air Preserve (harmonic/noise split) state
+    float airAmt = 0.0f;                  // knob value
+    float airG   = 0.0f;                  // smoothed, voicing-gated gain
+    float airP   = 320.0f;                // per-sample smoothed comb period
+    float airLp1 = 0.0f, airLp2 = 0.0f;   // HP filter states (2x one-pole)
+    float airK   = 0.004f, hpAirK = 0.17f;
 };

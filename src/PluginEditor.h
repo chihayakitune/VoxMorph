@@ -104,6 +104,13 @@ public:
         addSliderRow ("jitter", "Natural Jitter",
             tip ("Adds tiny natural pitch fluctuations to reduce the 'machine' feel. Try around 0.1.",
                  "ごく小さな音程の揺らぎを加え、変換の機械っぽさを和らげます。0.1前後から。"));
+        addSliderRow ("air", "Air Preserve",
+            tip ("Separates the natural breath (air) in your voice from the harmonics and passes it "
+                 "through WITHOUT pitch shifting. Fixes the metallic 'buzzy' texture that appears on "
+                 "breathy or whispery vowels when shifting pitch. Try 0.5-0.8. 0 = off.",
+                 "声に含まれる自然な息(気息)成分を倍音成分から分離し、息だけはピッチ変換せずに"
+                 "そのまま通します。息混じりの声をピッチシフトしたときに出る金属的なジャリジャリ感を"
+                 "軽減します。0.5〜0.8が目安。0=オフ(従来どおり)。"));
 
         addSection ("ADVANCED");
         addToggleRow ("lowvoice", "Low Voice Mode",

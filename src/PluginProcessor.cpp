@@ -31,6 +31,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "breath2", 1 }, "Breath",
                 juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "air", 1 }, "Air Preserve",
+                juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "range", 1 }, "Intonation Amount (%)",
                 juce::NormalisableRange<float> (50.0f, 200.0f, 1.0f), 100.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "center", 1 }, "Intonation Pivot (Hz)",
@@ -87,6 +89,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pF3S = apvts.getRawParameterValue ("f3shift");
     pF3G = apvts.getRawParameterValue ("f3gain");
     pBreath2 = apvts.getRawParameterValue ("breath2");
+    pAir     = apvts.getRawParameterValue ("air");
     pRange     = apvts.getRawParameterValue ("range");
     pCenter    = apvts.getRawParameterValue ("center");
     pTilt      = apvts.getRawParameterValue ("tilt");
@@ -132,6 +135,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.pitchRange    = pRange->load() * 0.01f;   // % -> ratio
     p.pitchCenterHz = pCenter->load();
     p.breath        = pBreath2->load();      // spectral (noise-excited envelope)
+    p.airPreserve   = pAir->load();          // mixed harmonic+noise split
     p.tiltDb        = pTilt->load();
     p.f1Shift = pF1S->load();  p.f1Gain = pF1G->load();
     p.f2Shift = pF2S->load();  p.f2Gain = pF2G->load();
