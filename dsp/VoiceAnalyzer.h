@@ -98,8 +98,8 @@ public:
                 mag[(size_t) k] = (double) re[(size_t) k] * re[(size_t) k]
                                 + (double) im[(size_t) k] * im[(size_t) k];
 
-            // envelope: moving average about +-0.6 harmonic spacings wide
-            const int hw = std::max (2, (int) std::lround (f0 * N / fs * 0.6));
+            // envelope: moving average about +-0.8 harmonic spacings wide
+            const int hw = std::max (2, (int) std::lround (f0 * N / fs * 0.8));
             pre[0] = 0.0;
             for (int k = 0; k <= NB; ++k) pre[(size_t) k + 1] = pre[(size_t) k] + mag[(size_t) k];
             for (int k = 0; k <= NB; ++k)
@@ -113,7 +113,10 @@ public:
             float Fi[3], Li[3];
             for (int fi = 0; fi < 3; ++fi)
             {
-                const int a = binOf (loR[fi]), b = binOf (std::min (hiR[fi], fs * 0.45));
+                // keep the F1 search above the fundamental region, otherwise
+                // a strong first harmonic is mistaken for F1 on higher voices
+                const double lo = fi == 0 ? std::max (loR[0], f0 * 1.35) : loR[fi];
+                const int a = binOf (lo), b = binOf (std::min (hiR[fi], fs * 0.45));
                 int pk = a; double pv = env[(size_t) a];
                 for (int k = a + 1; k <= b; ++k)
                     if (env[(size_t) k] > pv) { pv = env[(size_t) k]; pk = k; }

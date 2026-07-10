@@ -133,8 +133,8 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     monoScratch.assign ((size_t) samplesPerBlock, 0.0f);
     setLatencySamples (engine.latencySamples());
 
-    capBuf.assign ((size_t) (sampleRate * 5.0), 0.0f);
-    capLen = 0;  capturing = false;
+    capBuf.assign ((size_t) (sampleRate * 15.0), 0.0f);
+    capLen = 0;  capTarget = 0;  capturing = false;
     prevBuf.assign ((size_t) (sampleRate * 60.0), 0.0f);
     prevLen = 0;  prevPos = -1;
 }
@@ -192,8 +192,8 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     if (capturing.load())          // ANALYZE tab: capture raw input
     {
         const int cl   = capLen.load();
-        const int room = (int) capBuf.size() - cl;
-        const int c    = std::min (n, room);
+        const int room = std::min ((int) capBuf.size(), capTarget.load()) - cl;
+        const int c    = std::max (0, std::min (n, room));
         if (c > 0) std::copy (m, m + c, capBuf.data() + cl);
         capLen.store (cl + c);
         if (c >= room) capturing.store (false);

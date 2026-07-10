@@ -37,11 +37,12 @@ public:
     std::vector<float> vizOut = std::vector<float> ((size_t) kVizLen, 0.0f);
     std::atomic<int>   vizPos { 0 };
 
-    // ANALYZE tab support. capBuf: 5 s mic capture (raw input, pre-engine).
+    // ANALYZE tab support. capBuf: mic capture, up to 15 s (raw input,
+    // pre-engine); capTarget = requested length in samples.
     // prevBuf: target-file preview, pre-allocated in prepareToPlay and only
     // written while prevPos == -1 (stopped), so no locking is needed.
     std::vector<float> capBuf;
-    std::atomic<int>   capLen { 0 };
+    std::atomic<int>   capLen { 0 }, capTarget { 0 };
     std::atomic<bool>  capturing { false };
     std::vector<float> prevBuf;
     std::atomic<int>   prevLen { 0 };

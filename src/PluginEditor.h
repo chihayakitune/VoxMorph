@@ -166,6 +166,10 @@ public:
     {
         for (auto* b : { &recBtn, &loadBtn, &playBtn, &applyBtn })
             addAndMakeVisible (*b);
+        durBox.addItem ("5 s", 5);  durBox.addItem ("10 s", 10);  durBox.addItem ("15 s", 15);
+        durBox.setSelectedId (10, juce::dontSendNotification);
+        durBox.setTooltip (juce::String::fromUTF8 ("Recording length. Longer = more frames = a steadier profile.\n録音時間。長いほど分析フレームが増え、プロファイルが安定します。"));
+        addAndMakeVisible (durBox);
         for (auto* l : { &help, &p1Lbl, &p2Lbl, &outLbl })
         {
             l->setJustificationType (juce::Justification::topLeft);
@@ -173,20 +177,22 @@ public:
             addAndMakeVisible (*l);
         }
         help.setText (juce::String::fromUTF8 (
-            "1) Record your voice   2) Load the target voice file   3) Auto-Set\n"
-            "1) 自分の声を5秒録音(普段の調子で喋り続ける) → 2) 目標の声の音声ファイルを読み込む\n"
-            "→ 3) Auto-Setで2つの声質プロファイルの差からMAINタブのパラメータを自動設定します。"),
+            "1) Load the target voice file   2) Record your voice (listen with Play)   3) Auto-Set\n"
+            "1) 目標の声の音声ファイルを読み込む → 2) Playで聴きながら合わせて自分の声を録音(普段の\n"
+            "調子で喋り続ける・ヘッドホン推奨) → 3) Auto-Setで差分からMAINのパラメータを自動設定。"),
             juce::dontSendNotification);
-        p1Lbl.setText ("Profile 1 (your voice): --", juce::dontSendNotification);
-        p2Lbl.setText ("Profile 2 (target): --",     juce::dontSendNotification);
+        p1Lbl.setText ("Your voice: --", juce::dontSendNotification);
+        p2Lbl.setText ("Target: --",     juce::dontSendNotification);
 
-        recBtn.setTooltip (juce::String::fromUTF8 ("Records 5 s of the microphone input and analyzes it.\nマイク入力を5秒録音して分析します。録音中は普段の調子で喋り続けてください。"));
+        recBtn.setTooltip (juce::String::fromUTF8 ("Records the microphone input and analyzes it.\nマイク入力を録音して分析します。録音中は普段の調子で喋り続けてください(ヘッドホン推奨)。"));
         loadBtn.setTooltip (juce::String::fromUTF8 ("Load a voice file (wav/aiff/mp3/m4a/flac, first 60 s used).\n目標の声の音声ファイルを読み込みます(先頭60秒まで)。"));
         playBtn.setTooltip (juce::String::fromUTF8 ("Preview the loaded file through the plugin output.\n読み込んだファイルを出力から再生します。"));
         applyBtn.setTooltip (juce::String::fromUTF8 ("Writes the derived settings into the MAIN tab parameters.\n分析結果から求めた設定をMAINタブのパラメータに書き込みます。"));
 
         recBtn.onClick = [this]
         {
+            const double sr = proc.getSampleRate() > 0 ? proc.getSampleRate() : 48000.0;
+            proc.capTarget = (int) (sr * durBox.getSelectedId());
             proc.capLen = 0;
             proc.capturing = true;
             waitingCapture = true;
@@ -206,14 +212,15 @@ public:
     {
         auto r = getLocalBounds().reduced (16, 12);
         help.setBounds (r.removeFromTop (58));
-        auto r1 = r.removeFromTop (66);
-        recBtn.setBounds (r1.removeFromLeft (170).withHeight (26));
-        p1Lbl.setBounds (r1.withTrimmedLeft (10));
-        auto r2 = r.removeFromTop (66);
-        loadBtn.setBounds (r2.removeFromLeft (170).withHeight (26));
-        playBtn.setBounds (r2.removeFromLeft (90).withHeight (26).translated (8, 0));
-        p2Lbl.setBounds (r2.withTrimmedLeft (18));
-        applyBtn.setBounds (r.removeFromTop (30).withWidth (220));
+        auto r1 = r.removeFromTop (66);                       // step 1: target file
+        loadBtn.setBounds (r1.removeFromLeft (170).withHeight (26));
+        playBtn.setBounds (r1.removeFromLeft (90).withHeight (26).translated (8, 0));
+        p2Lbl.setBounds (r1.withTrimmedLeft (18));
+        auto r2 = r.removeFromTop (66);                       // step 2: your voice
+        recBtn.setBounds (r2.removeFromLeft (170).withHeight (26));
+        durBox.setBounds (r2.removeFromLeft (70).withHeight (26).translated (8, 0));
+        p1Lbl.setBounds (r2.withTrimmedLeft (18));
+        applyBtn.setBounds (r.removeFromTop (30).withWidth (220));   // step 3
         outLbl.setBounds (r.withTrimmedTop (6));
     }
 
@@ -223,10 +230,10 @@ private:
         if (waitingCapture && ! proc.capturing.load())
         {
             waitingCapture = false;
-            recBtn.setButtonText ("Record My Voice (5s)");
+            recBtn.setButtonText ("Record My Voice");
             prof1 = VoiceAnalyzer::analyze (proc.capBuf.data(), proc.capLen.load(),
                                             proc.getSampleRate() > 0 ? proc.getSampleRate() : 48000.0);
-            p1Lbl.setText ("Profile 1 (your voice):\n" + fmt (prof1), juce::dontSendNotification);
+            p1Lbl.setText ("Your voice:\n" + fmt (prof1), juce::dontSendNotification);
         }
         playBtn.setButtonText (proc.prevPos.load() >= 0 ? "Stop" : "Play");
     }
@@ -283,7 +290,7 @@ private:
             }
             proc.prevLen = nOut;
             prof2 = VoiceAnalyzer::analyze (proc.prevBuf.data(), nOut, sr);
-            p2Lbl.setText ("Profile 2 (" + file.getFileName() + "):\n" + fmt (prof2),
+            p2Lbl.setText ("Target (" + file.getFileName() + "):\n" + fmt (prof2),
                            juce::dontSendNotification);
         });
     }
@@ -315,12 +322,15 @@ private:
 
         setP ("pitch",   pitch);
         setP ("formant", formant);
+        // Per-formant trims stay deliberately small: the global Formant knob
+        // carries the bulk of the shift, and large individual warps sound
+        // dry / electronic. Half the measured difference, tightly clamped.
         const char* sid[3] = { "f1shift", "f2shift", "f3shift" };
         const char* gid[3] = { "f1gain",  "f2gain",  "f3gain"  };
         for (int i = 0; i < 3; ++i)
         {
-            setP (sid[i], juce::jlimit (-6.0f, 6.0f, sh[i] - formant));
-            setP (gid[i], juce::jlimit (-12.0f, 12.0f, 0.7f * (prof2.L[i] - prof1.L[i])));
+            setP (sid[i], juce::jlimit (-3.0f, 3.0f, 0.5f * (sh[i] - formant)));
+            setP (gid[i], juce::jlimit (-8.0f, 8.0f, 0.5f * (prof2.L[i] - prof1.L[i])));
         }
         setP ("tilt", tilt);
         juce::String extra;
@@ -340,8 +350,9 @@ private:
     VoxMorphProcessor& proc;
     VoiceProfile prof1, prof2;
     bool waitingCapture = false;
-    juce::TextButton recBtn { "Record My Voice (5s)" }, loadBtn { "Load Target File..." },
+    juce::TextButton recBtn { "Record My Voice" }, loadBtn { "Load Target File..." },
                      playBtn { "Play" }, applyBtn { "Auto-Set Parameters" };
+    juce::ComboBox durBox;
     juce::Label help, p1Lbl, p2Lbl, outLbl;
     std::unique_ptr<juce::FileChooser> chooser;
 };
