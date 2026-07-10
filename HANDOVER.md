@@ -8,7 +8,7 @@
 - リポジトリ: `github.com/chihayakitune/VoxMorph`(Public)
 - 形態: AU / VST3 プラグイン + スタンドアロンアプリ(macOS/Windows)、JUCE 8 + CMake
 - ビルド: GitHub Actions が push 毎に自動ビルド。Artifacts の `VoxMorph-macOS-Installer`(pkg、ダブルクリックで上書きインストール可)と `VoxMorph-Windows`
-- ユーザー(袴さん)は非プログラマー。**開発ワークフロー: AIが修正ファイルを渡し、ユーザーがGitHub Webへ手動アップロード**(AIによるブラウザ操作はしない約束)
+- ユーザー(袴さん)は非プログラマー。**開発ワークフロー(v0.6.0から): AIがgitコマンドで直接コミット&プッシュ**。`~/bin/gh` に GitHub CLI 導入済み・chihayakitune で認証済み(repo+workflowスコープ、キーチェーン保存)。手順: リポジトリを浅くクローン→変更ファイルをコピー→commit→push。ブラウザ操作はしない約束(トークン浪費のため)。認証が切れていたら `gh auth login` のデバイスコード方式でユーザーに再認証を依頼
 
 ## アーキテクチャ
 
