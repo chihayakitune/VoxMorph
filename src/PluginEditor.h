@@ -161,6 +161,7 @@ public:
     const VoiceProfile* you    = nullptr;   // mint   (same as visualizer input)
     const VoiceProfile* target = nullptr;   // pastel yellow
     const VoiceProfile* conv   = nullptr;   // pink   (same as visualizer output)
+    std::function<float (const char*)> param;   // reads current parameter values
 
     void paint (juce::Graphics& g) override
     {
@@ -186,6 +187,24 @@ public:
         if (you    != nullptr && you->valid())    drawProfile (g, r, *you,    cy);
         if (target != nullptr && target->valid()) drawProfile (g, r, *target, ct);
         if (conv   != nullptr && conv->valid())   drawProfile (g, r, *conv,   cc);
+
+        // current High Range Start / Pitch Floor parameters (dashed markers)
+        if (param)
+        {
+            const float dashes[2] = { 4.0f, 4.0f };
+            auto vline = [&] (float hz, juce::Colour col, const char* name)
+            {
+                if (hz < 51.0f || hz > 7900.0f) return;
+                const float x = xOf (r, hz);
+                g.setColour (col.withAlpha (0.85f));
+                g.drawDashedLine (juce::Line<float> (x, r.getY(), x, r.getBottom()), dashes, 2, 1.2f);
+                g.setFont (juce::Font (juce::FontOptions (9.5f)));
+                g.drawText (name, (int) x + 3, (int) r.getBottom() - 26, 70, 12,
+                            juce::Justification::left);
+            };
+            vline (param ("hifreq"),     juce::Colour (0xff54bda1), "High Range");
+            vline (param ("pitchfloor"), juce::Colour (0xfff08ba5), "Floor");
+        }
 
         g.setFont (juce::Font (juce::FontOptions (11.0f)));
         g.setColour (cy); g.drawText ("You",       (int) r.getRight() - 190, (int) r.getY() + 2, 44, 14, juce::Justification::left);
@@ -242,6 +261,17 @@ private:
         };
         dot (p.f0Hz, 0.0f);
         for (int fi = 0; fi < 3; ++fi) dot (p.F[fi], p.L[fi]);
+
+        // intonation whisker: the measured pitch range (f0 +- spread)
+        if (p.f0SpreadSt > 0.05f && p.f0Hz > 0.0f)
+        {
+            const float y  = r.getY() + r.getHeight() * kTop / (kTop - kFloor);
+            const float x1 = xOf (r, p.f0Hz * std::pow (2.0, -p.f0SpreadSt / 12.0));
+            const float x2 = xOf (r, p.f0Hz * std::pow (2.0,  p.f0SpreadSt / 12.0));
+            g.drawLine (x1, y, x2, y, 1.4f);
+            g.drawLine (x1, y - 3.0f, x1, y + 3.0f, 1.4f);
+            g.drawLine (x2, y - 3.0f, x2, y + 3.0f, 1.4f);
+        }
     }
 };
 
@@ -272,6 +302,11 @@ public:
         initHeading (hConv,   "Re-Analyze MyVoice [Converted]");
         initHeading (hApply,  "Apply Analyzed Settings");
         graph.you = &prof1;  graph.target = &prof2;  graph.conv = &profC;
+        graph.param = [this] (const char* id)
+        {
+            auto* v = proc.apvts.getRawParameterValue (id);
+            return v != nullptr ? v->load() : 0.0f;
+        };
         addAndMakeVisible (graph);
         durBox.addItem ("5 s", 5);  durBox.addItem ("10 s", 10);  durBox.addItem ("15 s", 15);
         durBox.setSelectedId (10, juce::dontSendNotification);
@@ -569,6 +604,7 @@ private:
                         + extra
                         + juce::String::formatted ("\nhigh-range start %.0f Hz   pitch floor %.0f Hz", hifreq, pfloor),
                         juce::dontSendNotification);
+        graph.repaint();
     }
 
     // Refine loop (steps 4/5): record the CONVERTED output, compare with the
