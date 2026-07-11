@@ -29,7 +29,8 @@
 //    PluginProcessor.cpp createLayout().
 //  - Row heights / widths: see the `items.push_back` calls and layoutMainPage().
 //  - Default window height is capped by kMaxInitialHeight below.
-//  - Tabs: MAIN = scrolling parameter list, ANALYZE = AnalyzePanel (below).
+//  - Tabs: MAIN = scrolling parameter list, ANALYZE = AnalyzePanel,
+//    PRESETS = PresetPanel (both defined below in this file).
 //  - All theme colours live in the mainLnf block in the constructor.
 
 // Spectrum visualizer: INPUT (mint) and converted OUTPUT (pink) spectra
@@ -660,6 +661,193 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
 };
 
+// PRESETS tab: file-based parameter snapshots, shared between the
+// standalone app and the DAW plugins. One preset = the full APVTS state
+// saved as XML in <userAppData>/VoxMorph/Presets/<name>.vmpreset.
+// Selecting a preset in the dropdown loads it immediately.
+class PresetPanel : public juce::Component
+{
+public:
+    explicit PresetPanel (VoxMorphProcessor& p) : proc (p)
+    {
+        heading.setText ("PRESETS", juce::dontSendNotification);
+        heading.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
+        heading.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+        addAndMakeVisible (heading);
+
+        help.setJustificationType (juce::Justification::topLeft);
+        help.setFont (juce::Font (juce::FontOptions (12.5f)));
+        help.setText (juce::String::fromUTF8 (
+            "現在の全パラメータをプリセットとして保存・呼び出しできます。プルダウンで選ぶと即座に\n"
+            "読み込まれます。プリセットはファイル保存なのでスタンドアロンとDAWプラグインで共通です。"),
+            juce::dontSendNotification);
+        addAndMakeVisible (help);
+
+        presetBox.setTextWhenNothingSelected (juce::String::fromUTF8 ("-- プリセットを選択 --"));
+        presetBox.onChange = [this] { loadSelected(); };
+        addAndMakeVisible (presetBox);
+
+        deleteBtn.setTooltip (juce::String::fromUTF8 ("選択中のプリセットを削除します(確認あり)。"));
+        deleteBtn.onClick = [this] { deleteSelected(); };
+        addAndMakeVisible (deleteBtn);
+
+        nameEdit.setTextToShowWhenEmpty (juce::String::fromUTF8 ("新しいプリセット名"),
+                                         juce::Colour (0xff9aa5a2));
+        nameEdit.setFont (juce::Font (juce::FontOptions (13.0f)));
+        nameEdit.setColour (juce::TextEditor::textColourId, juce::Colour (0xff2e2e32));
+        nameEdit.setColour (juce::TextEditor::backgroundColourId, juce::Colours::white);
+        nameEdit.setColour (juce::TextEditor::outlineColourId, juce::Colour (0xffdedede));
+        addAndMakeVisible (nameEdit);
+
+        saveBtn.setTooltip (juce::String::fromUTF8 ("現在の設定を上の名前で保存します(同名は上書き)。"
+                                                    "名前が空なら選択中のプリセットに上書きします。"));
+        saveBtn.onClick = [this] { save(); };
+        addAndMakeVisible (saveBtn);
+
+        resetBtn.setTooltip (juce::String::fromUTF8 ("全パラメータを初期値に戻します(プリセットは消えません)。"));
+        resetBtn.onClick = [this] { resetAll(); };
+        addAndMakeVisible (resetBtn);
+
+        status.setJustificationType (juce::Justification::topLeft);
+        status.setFont (juce::Font (juce::FontOptions (12.5f)));
+        addAndMakeVisible (status);
+
+        pathLbl.setJustificationType (juce::Justification::topLeft);
+        pathLbl.setFont (juce::Font (juce::FontOptions (10.5f)));
+        pathLbl.setColour (juce::Label::textColourId, juce::Colour (0xff9aa5a2));
+        pathLbl.setText (juce::String::fromUTF8 ("保存先: ") + presetDir().getFullPathName(),
+                         juce::dontSendNotification);
+        addAndMakeVisible (pathLbl);
+
+        refreshList();
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (16, 12);
+        heading.setBounds (r.removeFromTop (24));
+        help.setBounds (r.removeFromTop (44));
+        auto r1 = r.removeFromTop (36);
+        presetBox.setBounds (r1.removeFromLeft (280).withHeight (26));
+        deleteBtn.setBounds (r1.removeFromLeft (90).withHeight (26).translated (8, 0));
+        auto r2 = r.removeFromTop (36);
+        nameEdit.setBounds (r2.removeFromLeft (280).withHeight (26));
+        saveBtn.setBounds (r2.removeFromLeft (90).withHeight (26).translated (8, 0));
+        r.removeFromTop (10);
+        resetBtn.setBounds (r.removeFromTop (32).withWidth (200).withHeight (26));
+        status.setBounds (r.removeFromTop (40).withTrimmedTop (8));
+        pathLbl.setBounds (r.removeFromTop (18));
+    }
+
+private:
+    static juce::File presetDir()
+    {
+        auto d = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                     .getChildFile ("VoxMorph").getChildFile ("Presets");
+        d.createDirectory();
+        return d;
+    }
+
+    void refreshList (const juce::String& select = {})
+    {
+        files = presetDir().findChildFiles (juce::File::findFiles, false, "*.vmpreset");
+        std::sort (files.begin(), files.end(),
+                   [] (const juce::File& a, const juce::File& b)
+                   { return a.getFileName().compareIgnoreCase (b.getFileName()) < 0; });
+        presetBox.clear (juce::dontSendNotification);
+        int id = 1, selId = 0;
+        for (auto& f : files)
+        {
+            presetBox.addItem (f.getFileNameWithoutExtension(), id);
+            if (f.getFileNameWithoutExtension() == select) selId = id;
+            ++id;
+        }
+        if (selId > 0)
+            presetBox.setSelectedId (selId, juce::dontSendNotification);
+    }
+
+    void loadSelected()
+    {
+        const int idx = presetBox.getSelectedId() - 1;
+        if (idx < 0 || idx >= files.size()) return;
+        if (auto xml = juce::XmlDocument::parse (files.getReference (idx)))
+        {
+            if (xml->hasTagName (proc.apvts.state.getType()))
+            {
+                proc.apvts.replaceState (juce::ValueTree::fromXml (*xml));
+                setStatus (juce::String::fromUTF8 ("読み込みました: ") + presetBox.getText());
+                return;
+            }
+        }
+        setStatus (juce::String::fromUTF8 ("読み込みに失敗しました(壊れたファイル?)"));
+    }
+
+    void save()
+    {
+        juce::String name = nameEdit.getText().trim();
+        if (name.isEmpty()) name = presetBox.getText().trim();
+        if (name.isEmpty())
+        {
+            setStatus (juce::String::fromUTF8 ("プリセット名を入力してください。"));
+            return;
+        }
+        const auto file = presetDir().getChildFile (juce::File::createLegalFileName (name)
+                                                    + ".vmpreset");
+        if (auto xml = proc.apvts.copyState().createXml(); xml != nullptr && xml->writeTo (file))
+        {
+            nameEdit.clear();
+            refreshList (file.getFileNameWithoutExtension());
+            setStatus (juce::String::fromUTF8 ("保存しました: ") + name);
+        }
+        else
+            setStatus (juce::String::fromUTF8 ("保存に失敗しました。"));
+    }
+
+    void deleteSelected()
+    {
+        const int idx = presetBox.getSelectedId() - 1;
+        if (idx < 0 || idx >= files.size())
+        {
+            setStatus (juce::String::fromUTF8 ("削除するプリセットを選択してください。"));
+            return;
+        }
+        const auto file = files.getReference (idx);
+        juce::NativeMessageBox::showOkCancelBox (juce::MessageBoxIconType::QuestionIcon,
+            "Delete preset",
+            juce::String::fromUTF8 ("プリセットを削除しますか?\n") + file.getFileNameWithoutExtension(),
+            this, juce::ModalCallbackFunction::create ([this, file] (int result)
+            {
+                if (result != 1) return;
+                const auto name = file.getFileNameWithoutExtension();
+                file.deleteFile();
+                refreshList();
+                setStatus (juce::String::fromUTF8 ("削除しました: ") + name);
+            }));
+    }
+
+    void resetAll()
+    {
+        for (auto* p : proc.getParameters())
+            if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
+            {
+                rp->beginChangeGesture();
+                rp->setValueNotifyingHost (rp->getDefaultValue());
+                rp->endChangeGesture();
+            }
+        setStatus (juce::String::fromUTF8 ("全パラメータを初期値に戻しました。"));
+    }
+
+    void setStatus (const juce::String& s) { status.setText (s, juce::dontSendNotification); }
+
+    VoxMorphProcessor& proc;
+    juce::Array<juce::File> files;
+    juce::Label heading, help, status, pathLbl;
+    juce::ComboBox presetBox;
+    juce::TextEditor nameEdit;
+    juce::TextButton saveBtn { "Save" }, deleteBtn { "Delete" },
+                     resetBtn { "Reset All to Defaults" };
+};
+
 // simple component that forwards resized() to a lambda (used for tab pages)
 struct FnComponent : public juce::Component
 {
@@ -701,6 +889,7 @@ public:
         tabs.setColour (juce::TabbedButtonBar::frontTextColourId, juce::Colour (0xff45bda5));
         tabs.addTab ("MAIN",    juce::Colour (0xfffcf9f9), &mainPage,     false);
         tabs.addTab ("ANALYZE", juce::Colour (0xfffcf9f9), &analyzePanel, false);
+        tabs.addTab ("PRESETS", juce::Colour (0xfffcf9f9), &presetPanel,  false);
         mainPage.fn = [this] { layoutMainPage(); };
 
         // all rows are children of `content`, which scrolls inside `viewport`
@@ -1121,6 +1310,7 @@ private:
     juce::Component content;     // holds every row; taller than the window
     SpectrumView    spectrum { proc };
     AnalyzePanel    analyzePanel { proc };
+    PresetPanel     presetPanel { proc };
     FnComponent     mainPage;    // MAIN tab page (declared before tabs!)
     juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
     int contentHeight = 0;
