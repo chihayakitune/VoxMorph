@@ -151,6 +151,100 @@ private:
     std::vector<float> re, im, smIn, smOut;
 };
 
+// Static "imagined voice spectrum" for the ANALYZE tab: unfilled line
+// curves rebuilt from the measured profiles (F0 bump + F1-F3 bumps whose
+// heights are the measured relative levels, -9 dB/oct rolloff above F3),
+// on a 50 Hz - 8 kHz log axis. Redrawn after each measurement — not live.
+class ProfileGraph : public juce::Component
+{
+public:
+    const VoiceProfile* you    = nullptr;   // mint   (same as visualizer input)
+    const VoiceProfile* target = nullptr;   // pastel yellow
+    const VoiceProfile* conv   = nullptr;   // pink   (same as visualizer output)
+
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced (2.0f);
+        g.setColour (juce::Colours::white);
+        g.fillRoundedRectangle (b, 8.0f);
+        g.setColour (juce::Colour (0xffe9d8dd));
+        g.drawRoundedRectangle (b, 8.0f, 1.0f);
+        auto r = b.reduced (10.0f, 10.0f);
+
+        g.setFont (juce::Font (juce::FontOptions (10.0f)));
+        for (double f : { 100.0, 1000.0 })
+        {
+            const float x = xOf (r, f);
+            g.setColour (juce::Colour (0x12000000));
+            g.drawVerticalLine ((int) x, r.getY(), r.getBottom());
+            g.setColour (juce::Colour (0x66000000));
+            g.drawText (f >= 1000.0 ? "1k" : "100",
+                        (int) x + 3, (int) r.getBottom() - 13, 30, 12, juce::Justification::left);
+        }
+
+        const juce::Colour cy (0xff54bda1), ct (0xffdfb545), cc (0xfff08ba5);
+        if (you    != nullptr && you->valid())    drawProfile (g, r, *you,    cy);
+        if (target != nullptr && target->valid()) drawProfile (g, r, *target, ct);
+        if (conv   != nullptr && conv->valid())   drawProfile (g, r, *conv,   cc);
+
+        g.setFont (juce::Font (juce::FontOptions (11.0f)));
+        g.setColour (cy); g.drawText ("You",       (int) r.getRight() - 190, (int) r.getY() + 2, 44, 14, juce::Justification::left);
+        g.setColour (ct); g.drawText ("Target",    (int) r.getRight() - 140, (int) r.getY() + 2, 54, 14, juce::Justification::left);
+        g.setColour (cc); g.drawText ("Converted", (int) r.getRight() - 80,  (int) r.getY() + 2, 78, 14, juce::Justification::left);
+        if ((you == nullptr || ! you->valid()) && (target == nullptr || ! target->valid())
+            && (conv == nullptr || ! conv->valid()))
+        {
+            g.setColour (juce::Colour (0x66000000));
+            g.drawText (juce::String::fromUTF8 ("測定するとここに声のイメージが表示されます"),
+                        getLocalBounds(), juce::Justification::centred);
+        }
+    }
+
+private:
+    static float xOf (juce::Rectangle<float> r, double f)
+    {
+        return r.getX() + r.getWidth() * (float) (std::log (f / 50.0) / std::log (8000.0 / 50.0));
+    }
+
+    static void drawProfile (juce::Graphics& g, juce::Rectangle<float> r,
+                             const VoiceProfile& p, juce::Colour col)
+    {
+        constexpr float kTop = 6.0f, kFloor = -42.0f;
+        juce::Path path;
+        const int NP = 220;
+        for (int i = 0; i < NP; ++i)
+        {
+            const double f = 50.0 * std::pow (8000.0 / 50.0, (double) i / (NP - 1));
+            double db = -38.0;                                    // floor
+            auto bump = [&] (double fc, double h, double sigmaOct)
+            {
+                if (fc <= 0.0) return;
+                const double z = std::log2 (f / fc) / sigmaOct;
+                db = std::max (db, h - 12.0 * z * z);
+            };
+            bump (p.f0Hz, 0.0, 0.12);                             // fundamental
+            for (int fi = 0; fi < 3; ++fi)
+                bump (p.F[fi], p.L[fi], 0.22);                    // formants
+            if (f > p.F[2] && p.F[2] > 0)                         // HF rolloff
+                db = std::min (db, p.L[2] - 9.0 * std::log2 (f / p.F[2]));
+
+            const float x = r.getX() + r.getWidth() * (float) i / (float) (NP - 1);
+            const float y = r.getY() + r.getHeight() * (kTop - (float) db) / (kTop - kFloor);
+            if (i == 0) path.startNewSubPath (x, y); else path.lineTo (x, y);
+        }
+        g.setColour (col);
+        g.strokePath (path, juce::PathStrokeType (1.8f));
+        auto dot = [&] (double fc, float h)
+        {
+            if (fc <= 0.0) return;
+            const float y = r.getY() + r.getHeight() * (kTop - h) / (kTop - kFloor);
+            g.fillEllipse (xOf (r, fc) - 2.5f, y - 2.5f, 5.0f, 5.0f);
+        };
+        dot (p.f0Hz, 0.0f);
+        for (int fi = 0; fi < 3; ++fi) dot (p.F[fi], p.L[fi]);
+    }
+};
+
 // ANALYZE tab: 1) record your own voice -> Profile 1, 2) load a target
 // voice file -> Profile 2 (and preview it through the plugin output),
 // 3) Auto-Set derives conversion parameters from the two profiles:
@@ -166,6 +260,8 @@ public:
     {
         for (auto* b : { &recBtn, &loadBtn, &playBtn, &applyBtn, &refineBtn })
             addAndMakeVisible (*b);
+        graph.you = &prof1;  graph.target = &prof2;  graph.conv = &profC;
+        addAndMakeVisible (graph);
         durBox.addItem ("5 s", 5);  durBox.addItem ("10 s", 10);  durBox.addItem ("15 s", 15);
         durBox.setSelectedId (10, juce::dontSendNotification);
         durBox.setTooltip (juce::String::fromUTF8 ("Recording length. Longer = more frames = a steadier profile.\n録音時間。長いほど分析フレームが増え、プロファイルが安定します。"));
@@ -236,6 +332,7 @@ public:
         auto r3 = r.removeFromTop (34);                       // steps 3 + 4/5
         applyBtn.setBounds (r3.removeFromLeft (190).withHeight (28));
         refineBtn.setBounds (r3.removeFromLeft (230).withHeight (28).translated (10, 0));
+        graph.setBounds (r.removeFromTop (juce::jmax (120, r.getHeight() - 96)));
         outLbl.setBounds (r.withTrimmedTop (6));
     }
 
@@ -264,12 +361,15 @@ private:
             recBtn.setButtonText ("Record My Voice");
             prof1 = analyzeCapture();
             p1Lbl.setText ("Your voice:\n" + fmt (prof1), juce::dontSendNotification);
+            graph.repaint();
         }
         if (waitingRefine && ! proc.capturing.load())
         {
             waitingRefine = false;
             refineBtn.setButtonText ("Record Converted + Refine");
-            refine (analyzeCapture());
+            profC = analyzeCapture();
+            refine (profC);
+            graph.repaint();
         }
         playBtn.setButtonText (proc.prevPos.load() >= 0 ? "Stop" : "Play");
     }
@@ -328,6 +428,7 @@ private:
             prof2 = VoiceAnalyzer::analyze (proc.prevBuf.data(), nOut, sr);
             p2Lbl.setText ("Target (" + file.getFileName() + "):\n" + fmt (prof2),
                            juce::dontSendNotification);
+            graph.repaint();
         });
     }
 
@@ -426,7 +527,8 @@ private:
     }
 
     VoxMorphProcessor& proc;
-    VoiceProfile prof1, prof2;
+    VoiceProfile prof1, prof2, profC;
+    ProfileGraph graph;
     bool waitingCapture = false, waitingRefine = false;
     juce::TextButton recBtn { "Record My Voice" }, loadBtn { "Load Target File..." },
                      playBtn { "Play" }, applyBtn { "Auto-Set Parameters" },

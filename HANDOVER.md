@@ -1,6 +1,6 @@
 # VoxMorph 開発引き継ぎ書 (AIセッション用)
 
-最終更新: v0.11.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+最終更新: v0.11.1 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
 
 ## プロジェクト概要
 
@@ -24,7 +24,7 @@
 - `src/PluginProcessor.{h,cpp}` — JUCEラッパ、パラメータ(APVTS)、ハウリング自動ミュート(時間基準、RMS>0.70が1.5秒で3秒ミュート)
 - `src/PluginEditor.h` — 英語UI+英日バイリンガルツールチップ、セクション: PITCH/HIGH RANGE/FORMANT/INTONATION/VOICE QUALITY/ADVANCED/OUTPUT。Cmd+S保存(スタンドアロン)。**v0.8.0からViewportでスクロール+リサイズ可能**。行の追加はコンストラクタに addSliderRow/addToggleRow を1行書くだけで、レイアウト・スクロール・ウィンドウサイズは自動調整(ファイル冒頭に保守手順コメントあり。UI調整は高度AIでなくても可能な構造)。**v0.9.0: SpectrumView**(最上段、入力ミント/出力ピンクの重ねスペクトラム 20Hz-20kHz対数軸、30Hzタイマー、FFTはエンジンのfftForViz流用=依存追加なし。データはProcessorのvizIn/vizOut/vizPosリングから)+全体をパステル配色(色は mainLnf 設定の1箇所に集約。v0.9.1でユーザー指定のミント基調=見出し/スライダー/つまみ/リセット矢印がミント、本文と数値が濃グレー、背景ほぼ白に確定。グラフ配色は入力ミント/出力ピンクのまま)。ユーザー保有のUI完成イメージ(サイドバー+カード式のかわいい系デザイン)への本格スキン化は未着手。**v0.10.0でMAIN/ANALYZEの2タブ構成**(TabbedComponent、ページはFnComponent。数値欄の白文字問題はsendLookAndFeelChange()で解決=スライダーのテキストボックスはLnF適用前に生成されるため必須)
 - `dsp/VoiceAnalyzer.h` — **声質プロファイル分析(v0.10.0、依存ゼロ)**。2048フレーム/hop1024、4xデシメYIN f0+FFT包絡→F1-F3・相対レベル・tilt・抑揚spread(p10-p90/2、MADは二峰性で破綻するため不可)。全て中央値でロバスト化。ANALYZEタブと offline_test で共用
-- `src/PluginEditor.h` 内 AnalyzePanel — **ANALYZEタブ(v0.10.0)**: ①Record 5s(processorのcapBufに音声スレッドで録音)→Profile1 ②Load Target File(wav/mp3等、60秒まで、線形リサンプルでprevBufへ、Playで出力にミックス再生)→Profile2 ③Auto-Set=差分からpitch/formant/F1-3 shift&gain/range/center/tilt(0.25倍)を自動設定。v0.10.1: 手順をファイル→録音の順に変更、録音時間5/10/15sプルダウン(capTarget)、**個別フォルマントは控えめ設定**(shift=差×0.5・±3st、gain=差×0.5・±8dB。振り切ると乾いた電子音になるため)。分析側もF1探索下限=max(250, 1.35×f0)で基音の誤検出を防止(実例: F0 185Hzの声でF1=246と誤検出→F1 Shift+6に振り切れた)。**v0.11.0: Refineループ(手順④⑤)**=Record Converted + Refineで変換後出力を録音(capFromOutput=trueで最終段g*mをキャプチャ、ファイル再生音は混入しない)→目標との残差×減衰係数(pitch0.8/formant0.7/トリム0.4/tilt0.25/range比0.75-1.35クランプ)を現在値に加算。繰り返しで収束する設計
+- `src/PluginEditor.h` 内 AnalyzePanel — **ANALYZEタブ(v0.10.0)**: ①Record 5s(processorのcapBufに音声スレッドで録音)→Profile1 ②Load Target File(wav/mp3等、60秒まで、線形リサンプルでprevBufへ、Playで出力にミックス再生)→Profile2 ③Auto-Set=差分からpitch/formant/F1-3 shift&gain/range/center/tilt(0.25倍)を自動設定。v0.10.1: 手順をファイル→録音の順に変更、録音時間5/10/15sプルダウン(capTarget)、**個別フォルマントは控えめ設定**(shift=差×0.5・±3st、gain=差×0.5・±8dB。振り切ると乾いた電子音になるため)。分析側もF1探索下限=max(250, 1.35×f0)で基音の誤検出を防止(実例: F0 185Hzの声でF1=246と誤検出→F1 Shift+6に振り切れた)。**v0.11.0: Refineループ(手順④⑤)**=Record Converted + Refineで変換後出力を録音(capFromOutput=trueで最終段g*mをキャプチャ、ファイル再生音は混入しない)→目標との残差×減衰係数(pitch0.8/formant0.7/トリム0.4/tilt0.25/range比0.75-1.35クランプ)を現在値に加算。繰り返しで収束する設計。v0.11.1: ProfileGraph=測定プロファイルから逆算した想定スペクトル線グラフ(F0+F1-F3の山、高さ=相対レベル、F3以上-9dB/oct、50Hz-8kHz対数軸、塗りなし。You=ミント/Target=パステルイエロー/Converted=ピンク、測定完了時に静的更新)
 - `test/offline_test.cpp` + `analyze.py` — 合成母音での数値検証(Linux g++でコンパイル可、JUCE不要)。**エンジン変更時は必ず実行**: f0/フォルマント独立性、抑揚、子音シフト、フライ声、VoiceAnalyzer、回帰一式
 
 ## 主要パラメータ(内部ID)
