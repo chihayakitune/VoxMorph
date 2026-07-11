@@ -258,8 +258,19 @@ class AnalyzePanel : public juce::Component, private juce::Timer
 public:
     explicit AnalyzePanel (VoxMorphProcessor& p) : proc (p)
     {
-        for (auto* b : { &recBtn, &loadBtn, &playBtn, &applyBtn, &refineBtn })
+        for (auto* b : { &recBtn, &recPlayBtn, &loadBtn, &playBtn, &applyBtn, &refineBtn, &refPlayBtn })
             addAndMakeVisible (*b);
+        auto initHeading = [this] (juce::Label& l, const char* t)
+        {
+            l.setText (t, juce::dontSendNotification);
+            l.setFont (juce::Font (juce::FontOptions (13.5f, juce::Font::bold)));
+            l.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+            addAndMakeVisible (l);
+        };
+        initHeading (hTarget, "Target");
+        initHeading (hVoice,  "Analyze MyVoice");
+        initHeading (hConv,   "Re-Analyze MyVoice [Converted]");
+        initHeading (hApply,  "Apply Analyzed Settings");
         graph.you = &prof1;  graph.target = &prof2;  graph.conv = &profC;
         addAndMakeVisible (graph);
         durBox.addItem ("5 s", 5);  durBox.addItem ("10 s", 10);  durBox.addItem ("15 s", 15);
@@ -273,9 +284,9 @@ public:
             addAndMakeVisible (*l);
         }
         help.setText (juce::String::fromUTF8 (
-            "1) 目標の声の音声ファイルを読み込む → 2) Playで聴きながら合わせて自分の声を録音(普段の\n"
-            "調子で喋り続ける・ヘッドホン推奨) → 3) Auto-Setで差分からMAINのパラメータを自動設定。\n"
-            "4) Refine=変換後の声を録音して目標との残差でパラメータを再調整 → 繰り返すほど目標に接近。"),
+            "1) Targetの音声ファイルを読み込む → 2) 自分の声を録音(with Play=再生と同時録音・ヘッドホン\n"
+            "推奨) → 3) Auto-Setで自動設定 → 4) 変換後の声をRecord Converted+Refineで録音すると\n"
+            "目標との残差で自動再調整。4)を繰り返すほど目標の声に近づきます。"),
             juce::dontSendNotification);
         p1Lbl.setText ("Your voice: --", juce::dontSendNotification);
         p2Lbl.setText ("Target: --",     juce::dontSendNotification);
@@ -291,21 +302,36 @@ public:
             "変換後の出力音声を録音し、目標と比較して残差分だけパラメータを再調整します。"
             "何度でも繰り返せて、繰り返すほど目標に近づきます。現在の設定のまま喋ってください。"));
 
+        recPlayBtn.setTooltip (juce::String::fromUTF8 (
+            "Plays the target file AND records your voice at the same time - speak along with it. "
+            "Headphones recommended.\nターゲットの再生と自分の声の録音を同時に行います。"
+            "再生に合わせて喋ってください(ヘッドホン推奨)。"));
+        refPlayBtn.setTooltip (juce::String::fromUTF8 (
+            "Plays the target file AND records the converted output at the same time, then refines.\n"
+            "ターゲットの再生と変換後の声の録音を同時に行い、残差で再調整します(ヘッドホン推奨)。"));
+
         recBtn.onClick = [this]
         {
             proc.capFromOutput = false;
             startCapture (recBtn, waitingCapture);
         };
+        recPlayBtn.onClick = [this]
+        {
+            if (! startPlayForCapture()) return;
+            proc.capFromOutput = false;
+            startCapture (recPlayBtn, waitingCapture);
+        };
         refineBtn.onClick = [this]
         {
-            if (! prof2.valid())
-            {
-                outLbl.setText (juce::String::fromUTF8 ("先に目標ファイルを読み込んでください。"),
-                                juce::dontSendNotification);
-                return;
-            }
+            if (! requireTarget()) return;
             proc.capFromOutput = true;
             startCapture (refineBtn, waitingRefine);
+        };
+        refPlayBtn.onClick = [this]
+        {
+            if (! requireTarget() || ! startPlayForCapture()) return;
+            proc.capFromOutput = true;
+            startCapture (refPlayBtn, waitingRefine);
         };
         loadBtn.onClick  = [this] { loadFile(); };
         playBtn.onClick  = [this]
@@ -319,21 +345,32 @@ public:
 
     void resized() override
     {
-        auto r = getLocalBounds().reduced (16, 12);
-        help.setBounds (r.removeFromTop (58));
-        auto r1 = r.removeFromTop (66);                       // step 1: target file
+        auto r = getLocalBounds().reduced (16, 10);
+        help.setBounds (r.removeFromTop (56));
+
+        hTarget.setBounds (r.removeFromTop (20));             // -- Target --
+        auto r1 = r.removeFromTop (48);
         loadBtn.setBounds (r1.removeFromLeft (170).withHeight (26));
         playBtn.setBounds (r1.removeFromLeft (90).withHeight (26).translated (8, 0));
         p2Lbl.setBounds (r1.withTrimmedLeft (18));
-        auto r2 = r.removeFromTop (66);                       // step 2: your voice
-        recBtn.setBounds (r2.removeFromLeft (170).withHeight (26));
-        durBox.setBounds (r2.removeFromLeft (70).withHeight (26).translated (8, 0));
-        p1Lbl.setBounds (r2.withTrimmedLeft (18));
-        auto r3 = r.removeFromTop (34);                       // steps 3 + 4/5
-        applyBtn.setBounds (r3.removeFromLeft (190).withHeight (28));
-        refineBtn.setBounds (r3.removeFromLeft (230).withHeight (28).translated (10, 0));
-        graph.setBounds (r.removeFromTop (juce::jmax (120, r.getHeight() - 96)));
-        outLbl.setBounds (r.withTrimmedTop (6));
+
+        hVoice.setBounds (r.removeFromTop (20));              // -- Analyze MyVoice --
+        auto r2 = r.removeFromTop (48);
+        recBtn.setBounds (r2.removeFromLeft (150).withHeight (26));
+        recPlayBtn.setBounds (r2.removeFromLeft (200).withHeight (26).translated (8, 0));
+        durBox.setBounds (r2.removeFromLeft (78).withHeight (26).translated (16, 0));
+        p1Lbl.setBounds (r2.withTrimmedLeft (24));
+
+        hConv.setBounds (r.removeFromTop (20));               // -- Re-Analyze [Converted] --
+        auto r3 = r.removeFromTop (32);
+        refineBtn.setBounds (r3.removeFromLeft (210).withHeight (26));
+        refPlayBtn.setBounds (r3.removeFromLeft (210).withHeight (26).translated (8, 0));
+
+        hApply.setBounds (r.removeFromTop (20));              // -- Apply Analyzed Settings --
+        applyBtn.setBounds (r.removeFromTop (32).withWidth (210).withHeight (26));
+
+        graph.setBounds (r.removeFromTop (juce::jmax (110, r.getHeight() - 92)));
+        outLbl.setBounds (r.withTrimmedTop (4));
     }
 
 private:
@@ -347,6 +384,27 @@ private:
         b.setButtonText ("Recording... speak!");
     }
 
+    bool requireTarget()
+    {
+        if (prof2.valid()) return true;
+        outLbl.setText (juce::String::fromUTF8 ("先に目標ファイルを読み込んでください。"),
+                        juce::dontSendNotification);
+        return false;
+    }
+
+    bool startPlayForCapture()      // start target playback for a "with Play" recording
+    {
+        if (proc.prevLen.load() <= 0)
+        {
+            outLbl.setText (juce::String::fromUTF8 ("先に目標ファイルを読み込んでください。"),
+                            juce::dontSendNotification);
+            return false;
+        }
+        proc.prevPos = 0;
+        playStartedByCapture = true;
+        return true;
+    }
+
     VoiceProfile analyzeCapture() const
     {
         return VoiceAnalyzer::analyze (proc.capBuf.data(), proc.capLen.load(),
@@ -358,7 +416,9 @@ private:
         if (waitingCapture && ! proc.capturing.load())
         {
             waitingCapture = false;
+            stopPlayIfStartedByCapture();
             recBtn.setButtonText ("Record My Voice");
+            recPlayBtn.setButtonText ("Record My Voice with Play");
             prof1 = analyzeCapture();
             p1Lbl.setText ("Your voice:\n" + fmt (prof1), juce::dontSendNotification);
             graph.repaint();
@@ -366,12 +426,19 @@ private:
         if (waitingRefine && ! proc.capturing.load())
         {
             waitingRefine = false;
+            stopPlayIfStartedByCapture();
             refineBtn.setButtonText ("Record Converted + Refine");
+            refPlayBtn.setButtonText ("Record Converted with Play");
             profC = analyzeCapture();
             refine (profC);
             graph.repaint();
         }
         playBtn.setButtonText (proc.prevPos.load() >= 0 ? "Stop" : "Play");
+    }
+
+    void stopPlayIfStartedByCapture()
+    {
+        if (playStartedByCapture) { proc.prevPos = -1; playStartedByCapture = false; }
     }
 
     static juce::String fmt (const VoiceProfile& pr)
@@ -529,12 +596,14 @@ private:
     VoxMorphProcessor& proc;
     VoiceProfile prof1, prof2, profC;
     ProfileGraph graph;
-    bool waitingCapture = false, waitingRefine = false;
+    bool waitingCapture = false, waitingRefine = false, playStartedByCapture = false;
     juce::TextButton recBtn { "Record My Voice" }, loadBtn { "Load Target File..." },
                      playBtn { "Play" }, applyBtn { "Auto-Set Parameters" },
-                     refineBtn { "Record Converted + Refine" };
+                     refineBtn { "Record Converted + Refine" },
+                     recPlayBtn { "Record My Voice with Play" },
+                     refPlayBtn { "Record Converted with Play" };
     juce::ComboBox durBox;
-    juce::Label help, p1Lbl, p2Lbl, outLbl;
+    juce::Label help, p1Lbl, p2Lbl, outLbl, hTarget, hVoice, hConv, hApply;
     std::unique_ptr<juce::FileChooser> chooser;
 };
 
