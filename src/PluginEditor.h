@@ -152,6 +152,37 @@ private:
     std::vector<float> re, im, smIn, smOut;
 };
 
+// VoiceProfile <-> XML (.vmprofile files, saved next to the presets)
+inline std::unique_ptr<juce::XmlElement> profileToXml (const VoiceProfile& p)
+{
+    auto x = std::make_unique<juce::XmlElement> ("VMPROFILE");
+    x->setAttribute ("f0", p.f0Hz);
+    x->setAttribute ("spread", p.f0SpreadSt);
+    x->setAttribute ("tilt", p.tiltDb);
+    x->setAttribute ("frames", p.voicedFrames);
+    for (int i = 0; i < 3; ++i)
+    {
+        x->setAttribute ("f" + juce::String (i + 1), p.F[i]);
+        x->setAttribute ("l" + juce::String (i + 1), p.L[i]);
+    }
+    return x;
+}
+
+inline bool profileFromXml (const juce::XmlElement& x, VoiceProfile& p)
+{
+    if (! x.hasTagName ("VMPROFILE")) return false;
+    p.f0Hz         = (float) x.getDoubleAttribute ("f0");
+    p.f0SpreadSt   = (float) x.getDoubleAttribute ("spread");
+    p.tiltDb       = (float) x.getDoubleAttribute ("tilt");
+    p.voicedFrames = x.getIntAttribute ("frames");
+    for (int i = 0; i < 3; ++i)
+    {
+        p.F[i] = (float) x.getDoubleAttribute ("f" + juce::String (i + 1));
+        p.L[i] = (float) x.getDoubleAttribute ("l" + juce::String (i + 1));
+    }
+    return p.valid();
+}
+
 // Static "imagined voice spectrum" for the ANALYZE tab: unfilled line
 // curves rebuilt from the measured profiles (F0 bump + F1-F3 bumps whose
 // heights are the measured relative levels, -9 dB/oct rolloff above F3),
@@ -448,6 +479,7 @@ private:
             stopPlayIfStartedByCapture();
             recBtn.setButtonText ("Record My Voice");
             prof1 = analyzeCapture();
+            proc.lastMyVoice = prof1;
             p1Lbl.setText (juce::String::fromUTF8 ("MyVoiceプロファイル:\n") + fmt (prof1),
                            juce::dontSendNotification);
             graph.repaint();
@@ -483,8 +515,8 @@ private:
 
     void loadFile()
     {
-        chooser = std::make_unique<juce::FileChooser> ("Select the target voice file",
-                      juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg");
+        chooser = std::make_unique<juce::FileChooser> ("Select the target voice file or profile",
+                      juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg;*.vmprofile");
         chooser->launchAsync (juce::FileBrowserComponent::openMode
                             | juce::FileBrowserComponent::canSelectFiles,
             [this] (const juce::FileChooser& fc)
@@ -492,6 +524,27 @@ private:
             const auto file = fc.getResult();
             if (file == juce::File()) return;
             proc.prevPos = -1;                              // stop before writing
+
+            if (file.hasFileExtension ("vmprofile"))        // saved profile: no audio
+            {
+                VoiceProfile p;
+                if (auto xml = juce::XmlDocument::parse (file); xml != nullptr
+                    && profileFromXml (*xml, p))
+                {
+                    prof2 = p;
+                    proc.lastTarget = p;
+                    proc.prevLen = 0;                        // nothing to Play
+                    p2Lbl.setText (juce::String::fromUTF8 ("ターゲット(")
+                                   + file.getFileNameWithoutExtension()
+                                   + juce::String::fromUTF8 (")プロファイル [Play不可]:\n") + fmt (prof2),
+                                   juce::dontSendNotification);
+                    graph.repaint();
+                }
+                else
+                    p2Lbl.setText (juce::String::fromUTF8 ("プロファイルを読み込めませんでした: ")
+                                   + file.getFileName(), juce::dontSendNotification);
+                return;
+            }
             juce::AudioFormatManager fm;
             fm.registerBasicFormats();
             std::unique_ptr<juce::AudioFormatReader> rd (fm.createReaderFor (file));
@@ -523,6 +576,7 @@ private:
             }
             proc.prevLen = nOut;
             prof2 = VoiceAnalyzer::analyze (proc.prevBuf.data(), nOut, sr);
+            proc.lastTarget = prof2;
             p2Lbl.setText (juce::String::fromUTF8 ("ターゲット(") + file.getFileName()
                            + juce::String::fromUTF8 (")プロファイル:\n") + fmt (prof2),
                            juce::dontSendNotification);
@@ -684,12 +738,56 @@ public:
         addAndMakeVisible (help);
 
         presetBox.setTextWhenNothingSelected (juce::String::fromUTF8 ("-- プリセットを選択 --"));
-        presetBox.onChange = [this] { loadSelected(); };
+        presetBox.onChange = [this] { previewSelected(); };
         addAndMakeVisible (presetBox);
+
+        loadBtn.setTooltip (juce::String::fromUTF8 ("選択中のプリセットを実際に読み込んで適用します。"));
+        loadBtn.onClick = [this] { loadSelected(); };
+        addAndMakeVisible (loadBtn);
 
         deleteBtn.setTooltip (juce::String::fromUTF8 ("選択中のプリセットを削除します(確認あり)。"));
         deleteBtn.onClick = [this] { deleteSelected(); };
         addAndMakeVisible (deleteBtn);
+
+        // preview graph: a standard reference voice (mint) vs how this
+        // preset's settings would transform it (pink) — input-independent
+        pGraph.you  = &pvBase;
+        pGraph.conv = &pvConv;
+        pGraph.param = [this] (const char* id)
+        {
+            return juce::String (id) == "hifreq" ? pvHifreq
+                 : juce::String (id) == "pitchfloor" ? pvFloor : 0.0f;
+        };
+        addAndMakeVisible (pGraph);
+        pvLbl.setJustificationType (juce::Justification::topLeft);
+        pvLbl.setFont (juce::Font (juce::FontOptions (11.0f)));
+        pvLbl.setColour (juce::Label::textColourId, juce::Colour (0xff9aa5a2));
+        pvLbl.setText (juce::String::fromUTF8 (
+            "プレビュー: 標準的な声(ミント)がこのプリセットでどう変わるか(ピンク)のイメージ。"),
+            juce::dontSendNotification);
+        addAndMakeVisible (pvLbl);
+
+        hProfiles.setText ("PROFILES", juce::dontSendNotification);
+        hProfiles.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
+        hProfiles.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+        addAndMakeVisible (hProfiles);
+
+        pNameEdit.setTextToShowWhenEmpty (juce::String::fromUTF8 ("プロファイル名"),
+                                          juce::Colour (0xff9aa5a2));
+        pNameEdit.setFont (juce::Font (juce::FontOptions (13.0f)));
+        pNameEdit.setColour (juce::TextEditor::textColourId, juce::Colour (0xff2e2e32));
+        pNameEdit.setColour (juce::TextEditor::backgroundColourId, juce::Colours::white);
+        pNameEdit.setColour (juce::TextEditor::outlineColourId, juce::Colour (0xffdedede));
+        addAndMakeVisible (pNameEdit);
+
+        saveMyBtn.setTooltip (juce::String::fromUTF8 ("ANALYZEタブで測定したMyVoiceプロファイルを"
+            "ファイル保存します。ANALYZEのLoad Target File...で読み込めます。"));
+        saveMyBtn.onClick  = [this] { saveProfile (proc.lastMyVoice, "MyVoice"); };
+        addAndMakeVisible (saveMyBtn);
+        saveTgtBtn.setTooltip (juce::String::fromUTF8 ("ANALYZEタブのターゲットプロファイルを"
+            "ファイル保存します。以後は音声ファイルなしでターゲットとして使えます(Play不可)。"));
+        saveTgtBtn.onClick = [this] { saveProfile (proc.lastTarget, "Target"); };
+        addAndMakeVisible (saveTgtBtn);
 
         nameEdit.setTextToShowWhenEmpty (juce::String::fromUTF8 ("新しいプリセット名"),
                                          juce::Colour (0xff9aa5a2));
@@ -726,16 +824,24 @@ public:
     {
         auto r = getLocalBounds().reduced (16, 12);
         heading.setBounds (r.removeFromTop (24));
-        help.setBounds (r.removeFromTop (44));
-        auto r1 = r.removeFromTop (36);
-        presetBox.setBounds (r1.removeFromLeft (280).withHeight (26));
-        deleteBtn.setBounds (r1.removeFromLeft (90).withHeight (26).translated (8, 0));
-        auto r2 = r.removeFromTop (36);
-        nameEdit.setBounds (r2.removeFromLeft (280).withHeight (26));
-        saveBtn.setBounds (r2.removeFromLeft (90).withHeight (26).translated (8, 0));
-        r.removeFromTop (10);
-        resetBtn.setBounds (r.removeFromTop (32).withWidth (200).withHeight (26));
-        status.setBounds (r.removeFromTop (40).withTrimmedTop (8));
+        help.setBounds (r.removeFromTop (40));
+        auto r1 = r.removeFromTop (34);
+        presetBox.setBounds (r1.removeFromLeft (250).withHeight (26));
+        loadBtn.setBounds   (r1.removeFromLeft (80).withHeight (26).translated (8, 0));
+        deleteBtn.setBounds (r1.removeFromLeft (80).withHeight (26).translated (16, 0));
+        auto r2 = r.removeFromTop (34);
+        nameEdit.setBounds (r2.removeFromLeft (250).withHeight (26));
+        saveBtn.setBounds  (r2.removeFromLeft (80).withHeight (26).translated (8, 0));
+        resetBtn.setBounds (r2.removeFromLeft (170).withHeight (26).translated (16, 0));
+        pGraph.setBounds (r.removeFromTop (juce::jmax (120, r.getHeight() - 190)));
+        pvLbl.setBounds (r.removeFromTop (18));
+        r.removeFromTop (6);
+        hProfiles.setBounds (r.removeFromTop (22));
+        auto r3 = r.removeFromTop (34);
+        pNameEdit.setBounds  (r3.removeFromLeft (200).withHeight (26));
+        saveMyBtn.setBounds  (r3.removeFromLeft (160).withHeight (26).translated (8, 0));
+        saveTgtBtn.setBounds (r3.removeFromLeft (160).withHeight (26).translated (16, 0));
+        status.setBounds (r.removeFromTop (36).withTrimmedTop (6));
         pathLbl.setBounds (r.removeFromTop (18));
     }
 
@@ -769,7 +875,11 @@ private:
     void loadSelected()
     {
         const int idx = presetBox.getSelectedId() - 1;
-        if (idx < 0 || idx >= files.size()) return;
+        if (idx < 0 || idx >= files.size())
+        {
+            setStatus (juce::String::fromUTF8 ("プリセットを選択してください。"));
+            return;
+        }
         if (auto xml = juce::XmlDocument::parse (files.getReference (idx)))
         {
             if (xml->hasTagName (proc.apvts.state.getType()))
@@ -780,6 +890,77 @@ private:
             }
         }
         setStatus (juce::String::fromUTF8 ("読み込みに失敗しました(壊れたファイル?)"));
+    }
+
+    // preview: apply the preset's key settings to a standard reference voice
+    void previewSelected()
+    {
+        const int idx = presetBox.getSelectedId() - 1;
+        if (idx < 0 || idx >= files.size()) return;
+        auto xml = juce::XmlDocument::parse (files.getReference (idx));
+        if (xml == nullptr) return;
+
+        auto defVal = [this] (const char* id)
+        {
+            auto* rp = proc.apvts.getParameter (id);
+            return rp != nullptr ? rp->convertFrom0to1 (rp->getDefaultValue()) : 0.0f;
+        };
+        auto val = [&] (const char* id)
+        {
+            if (auto* e = xml->getChildByAttribute ("id", id))
+                return (float) e->getDoubleAttribute ("value", defVal (id));
+            return defVal (id);
+        };
+
+        pvBase = VoiceProfile();
+        pvBase.f0Hz = 140.0f;  pvBase.f0SpreadSt = 2.0f;
+        pvBase.F[0] = 500.0f;  pvBase.F[1] = 1500.0f;  pvBase.F[2] = 2500.0f;
+        pvBase.L[0] = 0.0f;    pvBase.L[1] = -6.0f;    pvBase.L[2] = -12.0f;
+        pvBase.voicedFrames = 99;
+
+        pvConv = pvBase;
+        pvConv.f0Hz       = pvBase.f0Hz * std::pow (2.0f, val ("pitch") / 12.0f);
+        pvConv.f0SpreadSt = pvBase.f0SpreadSt * val ("range") * 0.01f;
+        const char* sid[3] = { "f1shift", "f2shift", "f3shift" };
+        const char* gid[3] = { "f1gain",  "f2gain",  "f3gain"  };
+        float lmax = -1.0e9f;
+        for (int i = 0; i < 3; ++i)
+        {
+            pvConv.F[i] = pvBase.F[i] * std::pow (2.0f, (val ("formant") + val (sid[i])) / 12.0f);
+            pvConv.L[i] = pvBase.L[i] + val (gid[i]);
+            lmax = std::max (lmax, pvConv.L[i]);
+        }
+        for (int i = 0; i < 3; ++i) pvConv.L[i] -= lmax;
+        pvHifreq = val ("hifreq");
+        pvFloor  = val ("pitchfloor");
+        pGraph.repaint();
+        setStatus (juce::String::fromUTF8 ("プレビュー表示中(Loadで適用): ") + presetBox.getText());
+    }
+
+    void saveProfile (const VoiceProfile& p, const char* kind)
+    {
+        if (! p.valid())
+        {
+            setStatus (juce::String::fromUTF8 ("先にANALYZEタブで測定してください: ")
+                       + juce::String (kind));
+            return;
+        }
+        const juce::String name = pNameEdit.getText().trim();
+        if (name.isEmpty())
+        {
+            setStatus (juce::String::fromUTF8 ("プロファイル名を入力してください。"));
+            return;
+        }
+        const auto file = presetDir().getChildFile (juce::File::createLegalFileName (name)
+                                                    + ".vmprofile");
+        if (profileToXml (p)->writeTo (file))
+        {
+            pNameEdit.clear();
+            setStatus (juce::String::fromUTF8 ("プロファイルを保存しました: ") + name
+                       + " (" + juce::String (kind) + ")");
+        }
+        else
+            setStatus (juce::String::fromUTF8 ("保存に失敗しました。"));
     }
 
     void save()
@@ -841,11 +1022,165 @@ private:
 
     VoxMorphProcessor& proc;
     juce::Array<juce::File> files;
-    juce::Label heading, help, status, pathLbl;
+    juce::Label heading, help, status, pathLbl, pvLbl, hProfiles;
     juce::ComboBox presetBox;
-    juce::TextEditor nameEdit;
-    juce::TextButton saveBtn { "Save" }, deleteBtn { "Delete" },
-                     resetBtn { "Reset All to Defaults" };
+    juce::TextEditor nameEdit, pNameEdit;
+    juce::TextButton saveBtn { "Save" }, loadBtn { "Load" }, deleteBtn { "Delete" },
+                     resetBtn { "Reset All to Defaults" },
+                     saveMyBtn { "Save MyVoice Profile" }, saveTgtBtn { "Save Target Profile" };
+    ProfileGraph pGraph;
+    VoiceProfile pvBase, pvConv;
+    float pvHifreq = 0.0f, pvFloor = 0.0f;
+};
+
+// ASMR tab: pseudo-3D positioning. A sonar-style circular pad with a
+// draggable dot; the dot's X gives constant-power L/R panning and the
+// distance from the centre attenuates the volume ("further away").
+// Centre = exactly unity (no effect). Drives the asmrx/asmry parameters.
+class SonarPad : public juce::Component, private juce::Timer
+{
+public:
+    explicit SonarPad (VoxMorphProcessor& p) : proc (p)
+    {
+        px = proc.apvts.getParameter ("asmrx");
+        py = proc.apvts.getParameter ("asmry");
+        startTimerHz (30);
+    }
+
+private:
+    void timerCallback() override { if (isShowing()) repaint(); }
+
+    juce::Rectangle<float> circleBounds() const
+    {
+        auto b = getLocalBounds().toFloat().reduced (14.0f);
+        const float s = std::min (b.getWidth(), b.getHeight());
+        return b.withSizeKeepingCentre (s, s);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced (2.0f);
+        g.setColour (juce::Colours::white);
+        g.fillRoundedRectangle (b, 8.0f);
+        g.setColour (juce::Colour (0xffe9d8dd));
+        g.drawRoundedRectangle (b, 8.0f, 1.0f);
+
+        const auto c = circleBounds();
+        const auto ctr = c.getCentre();
+        g.setColour (juce::Colour (0xffeef7f4));
+        g.fillEllipse (c);
+        g.setColour (juce::Colour (0xff9ed9c9));
+        for (float f : { 1.0f, 2.0f / 3.0f, 1.0f / 3.0f })
+            g.drawEllipse (c.withSizeKeepingCentre (c.getWidth() * f, c.getHeight() * f), 1.0f);
+        g.setColour (juce::Colour (0x3354bda1));
+        g.drawLine (c.getX(), ctr.y, c.getRight(), ctr.y, 1.0f);
+        g.drawLine (ctr.x, c.getY(), ctr.x, c.getBottom(), 1.0f);
+
+        g.setColour (juce::Colour (0xff9aa5a2));
+        g.setFont (juce::Font (juce::FontOptions (10.5f)));
+        g.drawText ("FRONT", (int) ctr.x - 24, (int) c.getY() - 13, 48, 12, juce::Justification::centred);
+        g.drawText ("BACK",  (int) ctr.x - 24, (int) c.getBottom() + 1, 48, 12, juce::Justification::centred);
+        g.drawText ("L", (int) c.getX() - 12,     (int) ctr.y - 6, 10, 12, juce::Justification::centred);
+        g.drawText ("R", (int) c.getRight() + 3,  (int) ctr.y - 6, 10, 12, juce::Justification::centred);
+
+        const float x = getX01 (px), y = getX01 (py);
+        const float dx = ctr.x + x * c.getWidth() * 0.5f;
+        const float dy = ctr.y - y * c.getHeight() * 0.5f;
+        g.setColour (juce::Colour (0x33f08ba5));
+        g.fillEllipse (dx - 11.0f, dy - 11.0f, 22.0f, 22.0f);
+        g.setColour (juce::Colour (0xfff08ba5));
+        g.fillEllipse (dx - 6.0f, dy - 6.0f, 12.0f, 12.0f);
+    }
+
+    static float getX01 (juce::RangedAudioParameter* p)
+    {
+        return p != nullptr ? p->convertFrom0to1 (p->getValue()) : 0.0f;
+    }
+
+    void setFromMouse (const juce::MouseEvent& e)
+    {
+        const auto c = circleBounds();
+        float nx = (e.position.x - c.getCentreX()) / (c.getWidth()  * 0.5f);
+        float ny = (c.getCentreY() - e.position.y) / (c.getHeight() * 0.5f);
+        const float len = std::sqrt (nx * nx + ny * ny);
+        if (len > 1.0f) { nx /= len; ny /= len; }
+        if (px != nullptr) px->setValueNotifyingHost (px->convertTo0to1 (nx));
+        if (py != nullptr) py->setValueNotifyingHost (py->convertTo0to1 (ny));
+        repaint();
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (px) px->beginChangeGesture();
+        if (py) py->beginChangeGesture();
+        setFromMouse (e);
+    }
+    void mouseDrag (const juce::MouseEvent& e) override { setFromMouse (e); }
+    void mouseUp   (const juce::MouseEvent&)   override
+    {
+        if (px) px->endChangeGesture();
+        if (py) py->endChangeGesture();
+    }
+    void mouseDoubleClick (const juce::MouseEvent&) override   // back to centre
+    {
+        if (px) px->setValueNotifyingHost (px->convertTo0to1 (0.0f));
+        if (py) py->setValueNotifyingHost (py->convertTo0to1 (0.0f));
+    }
+
+    VoxMorphProcessor& proc;
+    juce::RangedAudioParameter *px = nullptr, *py = nullptr;
+};
+
+class AsmrPanel : public juce::Component
+{
+public:
+    explicit AsmrPanel (VoxMorphProcessor& p) : proc (p), pad (p)
+    {
+        heading.setText ("ASMR POSITION", juce::dontSendNotification);
+        heading.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
+        heading.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+        addAndMakeVisible (heading);
+
+        help.setJustificationType (juce::Justification::topLeft);
+        help.setFont (juce::Font (juce::FontOptions (12.5f)));
+        help.setText (juce::String::fromUTF8 (
+            "擬似立体音響: 円の中の点をドラッグすると声の聞こえる方向と距離を調整できます。\n"
+            "上=正面 / 左右=耳元 / 中心から離れるほど遠く(小さく)。ダブルクリックで中央に戻り\n"
+            "ます(中央=効果なし)。ステレオ出力時のみ左右に振れます(モノラル時は距離のみ)。"),
+            juce::dontSendNotification);
+        addAndMakeVisible (help);
+
+        resetBtn.setTooltip (juce::String::fromUTF8 ("点を中央(効果なし)に戻します。"));
+        resetBtn.onClick = [this]
+        {
+            for (auto* id : { "asmrx", "asmry" })
+                if (auto* rp = proc.apvts.getParameter (id))
+                {
+                    rp->beginChangeGesture();
+                    rp->setValueNotifyingHost (rp->convertTo0to1 (0.0f));
+                    rp->endChangeGesture();
+                }
+        };
+        addAndMakeVisible (resetBtn);
+        addAndMakeVisible (pad);
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (16, 12);
+        heading.setBounds (r.removeFromTop (24));
+        help.setBounds (r.removeFromTop (56));
+        resetBtn.setBounds (r.removeFromTop (30).withWidth (150).withHeight (26));
+        r.removeFromTop (6);
+        const int s = std::min (r.getWidth(), r.getHeight());
+        pad.setBounds (r.withSizeKeepingCentre (s, s));
+    }
+
+private:
+    VoxMorphProcessor& proc;
+    juce::Label heading, help;
+    juce::TextButton resetBtn { "Center (Off)" };
+    SonarPad pad;
 };
 
 // simple component that forwards resized() to a lambda (used for tab pages)
@@ -890,6 +1225,7 @@ public:
         tabs.addTab ("MAIN",    juce::Colour (0xfffcf9f9), &mainPage,     false);
         tabs.addTab ("ANALYZE", juce::Colour (0xfffcf9f9), &analyzePanel, false);
         tabs.addTab ("PRESETS", juce::Colour (0xfffcf9f9), &presetPanel,  false);
+        tabs.addTab ("ASMR",    juce::Colour (0xfffcf9f9), &asmrPanel,    false);
         mainPage.fn = [this] { layoutMainPage(); };
 
         // all rows are children of `content`, which scrolls inside `viewport`
@@ -1056,6 +1392,12 @@ public:
                  "スタンドアロン用。スピーカー→マイクのハウリングが暴走して出力が1秒以上"
                  "大音量で鳴り続けた場合、自動で3秒間ミュートして回路を切ります。"
                  "DAWプラグインとして使用中は動作しません。"));
+        addSliderRow ("gate", "Noise Gate (dB)",
+            tip ("Mutes the input while it stays below this level - removes fan / room noise "
+                 "between phrases. -80 = off. Set it just above your noise floor (try -55 to -45).",
+                 "入力がこのレベルを下回っている間ミュートし、話していない間のファンノイズや"
+                 "環境音を消します。-80=オフ。ノイズの音量より少し上に設定してください"
+                 "(目安 -55〜-45)。"));
         addSliderRow ("breath2", "Breath (Beta)",
             tip ("EXPERIMENTAL. Replaces the upper harmonics with aspiration noise shaped by your "
                  "vocal tract (harmonic+noise model). Small amounts (0.1-0.2) add air; the quality "
@@ -1311,6 +1653,7 @@ private:
     SpectrumView    spectrum { proc };
     AnalyzePanel    analyzePanel { proc };
     PresetPanel     presetPanel { proc };
+    AsmrPanel       asmrPanel { proc };
     FnComponent     mainPage;    // MAIN tab page (declared before tabs!)
     juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
     int contentHeight = 0;

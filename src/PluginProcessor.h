@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "PsolaEngine.h"
+#include "VoiceAnalyzer.h"
 
 class VoxMorphProcessor : public juce::AudioProcessor
 {
@@ -49,6 +50,10 @@ public:
     std::atomic<int>   prevLen { 0 };
     std::atomic<int>   prevPos { -1 };                 // -1 = stopped
 
+    // latest measured profiles (message thread only; the PRESETS tab saves
+    // these to .vmprofile files, ANALYZE can load such files as targets)
+    VoiceProfile lastMyVoice, lastTarget;
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
 
@@ -80,6 +85,11 @@ private:
 
     // feedback-runaway protection state
     float rmsSm = 0.0f, loudSec = 0.0f, muteSec = 0.0f, muteGain = 1.0f;
+    // noise gate + ASMR pan state
+    float gateEnv = 0.0f, gateGain = 1.0f, panL = 1.0f, panR = 1.0f;
+    std::atomic<float>* pGate  = nullptr;
+    std::atomic<float>* pAsmrX = nullptr;
+    std::atomic<float>* pAsmrY = nullptr;
     std::atomic<float>* pRobotHz   = nullptr;
     std::atomic<float>* pMix       = nullptr;
     std::atomic<float>* pGain      = nullptr;

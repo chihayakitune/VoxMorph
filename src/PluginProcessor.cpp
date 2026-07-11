@@ -63,6 +63,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 50.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "hiformant", 1 }, "High Formant Amount (%)",
                 juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 100.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "gate", 1 }, "Noise Gate (dB)",
+                juce::NormalisableRange<float> (-80.0f, -20.0f, 1.0f), -80.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "asmrx", 1 }, "ASMR X",
+                juce::NormalisableRange<float> (-1.0f, 1.0f, 0.001f), 0.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "asmry", 1 }, "ASMR Y",
+                juce::NormalisableRange<float> (-1.0f, 1.0f, 0.001f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "mix", 1 }, "Mix",
                 juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 1.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "gain", 1 }, "Output Gain (dB)",
@@ -117,6 +123,9 @@ VoxMorphProcessor::VoxMorphProcessor()
     pRobotHz   = apvts.getRawParameterValue ("robotHz");
     pMix       = apvts.getRawParameterValue ("mix");
     pGain      = apvts.getRawParameterValue ("gain");
+    pGate      = apvts.getRawParameterValue ("gate");
+    pAsmrX     = apvts.getRawParameterValue ("asmrx");
+    pAsmrY     = apvts.getRawParameterValue ("asmry");
 }
 
 bool VoxMorphProcessor::isBusesLayoutSupported (const BusesLayout& l) const
@@ -185,6 +194,22 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         for (int i = 0; i < n; ++i) m[i] = 0.5f * (L[i] + R[i]);
     }
 
+    // Noise gate: while the input stays below the threshold, fade it out.
+    // Fast open (~1 ms), slow close (~25 ms) so word onsets are kept.
+    const float gateThr = pGate->load();
+    if (gateThr > -79.5f)
+    {
+        const float lt = juce::Decibels::decibelsToGain (gateThr);
+        for (int i = 0; i < n; ++i)
+        {
+            const float a = std::abs (m[i]);
+            gateEnv  += (a > gateEnv ? 0.30f : 0.0015f) * (a - gateEnv);
+            const float t = gateEnv > lt ? 1.0f : 0.0f;
+            gateGain += (t > gateGain ? 0.02f : 0.0008f) * (t - gateGain);
+            m[i] *= gateGain;
+        }
+    }
+
     const int vp = vizPos.load (std::memory_order_relaxed);
     for (int i = 0; i < n; ++i)
         vizIn[(size_t) ((vp + i) & (kVizLen - 1))] = m[i];
@@ -238,10 +263,26 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
 
     const float g = juce::Decibels::decibelsToGain (pGain->load());
+
+    // ASMR pseudo-position: constant-power pan (X) + distance attenuation,
+    // normalised so the centre position is exactly unity (no effect)
+    const float ax = juce::jlimit (-1.0f, 1.0f, pAsmrX->load());
+    const float ay = juce::jlimit (-1.0f, 1.0f, pAsmrY->load());
+    const float dist = std::min (1.0f, std::sqrt (ax * ax + ay * ay));
+    const float dg = 1.0f - 0.6f * dist;
+    const float pp = (ax + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
+    const float tL = dg * std::cos (pp) * juce::MathConstants<float>::sqrt2;
+    const float tR = dg * std::sin (pp) * juce::MathConstants<float>::sqrt2;
     for (int c = 0; c < ch; ++c)
     {
         float* d = buffer.getWritePointer (c);
-        for (int i = 0; i < n; ++i) d[i] = g * m[i];
+        const float t = ch == 1 ? dg : (c == 0 ? tL : tR);
+        float& sm = c == 0 ? panL : panR;
+        for (int i = 0; i < n; ++i)
+        {
+            sm += 0.002f * (t - sm);
+            d[i] = g * sm * m[i];
+        }
     }
 
     for (int i = 0; i < n; ++i)
