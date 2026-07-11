@@ -518,7 +518,11 @@ private:
             return;
         }
         auto st = [] (float a, float b) { return 12.0f * std::log2 (a / b); };
-        const float pitch = juce::jlimit (-24.0f, 24.0f, st (prof2.f0Hz, prof1.f0Hz));
+        // Pitch deliberately sits kPitchBias below the plain F0 difference and
+        // the intonation gets boosted instead: speech carries its perceived
+        // height in the peaks, so a full median match sounds overshot (user
+        // feedback). The Refine loop applies the same bias so they agree.
+        const float pitch = juce::jlimit (-24.0f, 24.0f, st (prof2.f0Hz, prof1.f0Hz) - kPitchBias);
         float sh[3];
         for (int i = 0; i < 3; ++i) sh[i] = st (prof2.F[i], prof1.F[i]);
         const float formant = juce::jlimit (-24.0f, 24.0f, (sh[0] + sh[1] + sh[2]) / 3.0f);
@@ -541,14 +545,30 @@ private:
         if (prof1.f0SpreadSt > 0.3f && prof2.f0SpreadSt > 0.3f)
         {
             const float range = juce::jlimit (50.0f, 200.0f,
-                                              100.0f * prof2.f0SpreadSt / prof1.f0SpreadSt);
+                                              kRangeBoost * 100.0f * prof2.f0SpreadSt / prof1.f0SpreadSt);
             setP ("range",  range);
             setP ("center", juce::jlimit (80.0f, 400.0f, prof2.f0Hz));
             extra = juce::String::formatted ("  range %.0f%%  center %.0f Hz", range, prof2.f0Hz);
         }
+
+        // High Range guard: engage just above YOUR normal speaking range so
+        // laughs get tamed but plain talking is unaffected. Pitch Floor: the
+        // lower edge of the TARGET's range keeps the converted voice from
+        // dropping out of character.
+        const float hifreq = juce::jlimit (150.0f, 600.0f,
+                                 prof1.f0Hz * std::pow (2.0f, (prof1.f0SpreadSt + 2.0f) / 12.0f));
+        setP ("hifreq",    hifreq);
+        setP ("hipitch",   50.0f);
+        setP ("hiformant", 100.0f);
+        const float pfloor = juce::jlimit (0.0f, 300.0f,
+                                 prof2.f0Hz * std::pow (2.0f, -(prof2.f0SpreadSt + 1.0f) / 12.0f));
+        setP ("pitchfloor", pfloor);
+
         outLbl.setText (juce::String::fromUTF8 ("設定しました → MAINタブで確認・微調整してください。\n")
                         + juce::String::formatted ("pitch %+.1f st   formant %+.1f st   tilt %+.1f dB", pitch, formant, tilt)
-                        + extra, juce::dontSendNotification);
+                        + extra
+                        + juce::String::formatted ("\nhigh-range start %.0f Hz   pitch floor %.0f Hz", hifreq, pfloor),
+                        juce::dontSendNotification);
     }
 
     // Refine loop (steps 4/5): record the CONVERTED output, compare with the
@@ -565,7 +585,7 @@ private:
         auto cur = [this] (const char* id) { return proc.apvts.getRawParameterValue (id)->load(); };
         auto st  = [] (float a, float b)   { return 12.0f * std::log2 (a / b); };
 
-        const float dPitch = juce::jlimit (-6.0f, 6.0f, st (prof2.f0Hz, pc.f0Hz));
+        const float dPitch = juce::jlimit (-6.0f, 6.0f, st (prof2.f0Hz, pc.f0Hz) - kPitchBias);
         setP ("pitch", juce::jlimit (-24.0f, 24.0f, cur ("pitch") + 0.8f * dPitch));
 
         float sh[3];
@@ -584,7 +604,8 @@ private:
         setP ("tilt", juce::jlimit (-6.0f, 6.0f, cur ("tilt") + juce::jlimit (-1.5f, 1.5f, dTilt)));
         if (prof2.f0SpreadSt > 0.3f && pc.f0SpreadSt > 0.3f)
             setP ("range", juce::jlimit (50.0f, 200.0f,
-                     cur ("range") * juce::jlimit (0.75f, 1.35f, prof2.f0SpreadSt / pc.f0SpreadSt)));
+                     cur ("range") * juce::jlimit (0.75f, 1.35f,
+                                                   kRangeBoost * prof2.f0SpreadSt / pc.f0SpreadSt)));
 
         outLbl.setText (juce::String::fromUTF8 ("再調整しました(残差が小さくなるまで④を繰り返せます)。\n")
                         + "converted now: " + fmt (pc).replace ("\n", "   ")
@@ -592,6 +613,9 @@ private:
                                                    dPitch, dFmt, prof2.tiltDb - pc.tiltDb),
                         juce::dontSendNotification);
     }
+
+    static constexpr float kPitchBias  = 1.0f;    // st below the plain F0 match
+    static constexpr float kRangeBoost = 1.15f;   // intonation compensation
 
     VoxMorphProcessor& proc;
     VoiceProfile prof1, prof2, profC;
