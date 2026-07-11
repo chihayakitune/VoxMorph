@@ -270,9 +270,9 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const float ay = juce::jlimit (-1.0f, 1.0f, pAsmrY->load());
     const float dist = std::min (1.0f, std::sqrt (ax * ax + ay * ay));
     const float dg = 1.0f - 0.6f * dist;
-    const float pp = (ax + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
-    const float tL = dg * std::cos (pp) * juce::MathConstants<float>::sqrt2;
-    const float tR = dg * std::sin (pp) * juce::MathConstants<float>::sqrt2;
+    const float panPhase = (ax + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
+    const float tL = dg * std::cos (panPhase) * juce::MathConstants<float>::sqrt2;
+    const float tR = dg * std::sin (panPhase) * juce::MathConstants<float>::sqrt2;
     for (int c = 0; c < ch; ++c)
     {
         float* d = buffer.getWritePointer (c);
