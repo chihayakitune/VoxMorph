@@ -781,7 +781,7 @@ public:
         addAndMakeVisible (pNameEdit);
 
         saveMyBtn.setTooltip (juce::String::fromUTF8 ("ANALYZEタブで測定したMyVoiceプロファイルを"
-            "ファイル保存します。ANALYZEのLoad Target File...で読み込めます。"));
+            "ファイル保存します(保存先を選択)。ANALYZEのLoad Target File...で読み込めます。"));
         saveMyBtn.onClick  = [this] { saveProfile (proc.lastMyVoice, "MyVoice"); };
         addAndMakeVisible (saveMyBtn);
         saveTgtBtn.setTooltip (juce::String::fromUTF8 ("ANALYZEタブのターゲットプロファイルを"
@@ -945,22 +945,32 @@ private:
                        + juce::String (kind));
             return;
         }
-        const juce::String name = pNameEdit.getText().trim();
-        if (name.isEmpty())
-        {
-            setStatus (juce::String::fromUTF8 ("プロファイル名を入力してください。"));
-            return;
-        }
-        const auto file = presetDir().getChildFile (juce::File::createLegalFileName (name)
-                                                    + ".vmprofile");
-        if (profileToXml (p)->writeTo (file))
-        {
-            pNameEdit.clear();
-            setStatus (juce::String::fromUTF8 ("プロファイルを保存しました: ") + name
-                       + " (" + juce::String (kind) + ")");
-        }
-        else
-            setStatus (juce::String::fromUTF8 ("保存に失敗しました。"));
+        // native save dialog: pick the folder and name freely; the preset
+        // folder with the name field (or a default) is offered as a start
+        juce::String name = pNameEdit.getText().trim();
+        if (name.isEmpty()) name = juce::String (kind) + " Profile";
+        const auto initial = presetDir().getChildFile (juce::File::createLegalFileName (name)
+                                                       + ".vmprofile");
+        profChooser = std::make_unique<juce::FileChooser> (
+            juce::String::fromUTF8 ("プロファイルの保存先を選択"), initial, "*.vmprofile");
+        profChooser->launchAsync (juce::FileBrowserComponent::saveMode
+                                | juce::FileBrowserComponent::canSelectFiles
+                                | juce::FileBrowserComponent::warnAboutOverwriting,
+            [this, p] (const juce::FileChooser& fc)
+            {
+                auto file = fc.getResult();
+                if (file == juce::File()) return;
+                if (! file.hasFileExtension ("vmprofile"))
+                    file = file.withFileExtension ("vmprofile");
+                if (profileToXml (p)->writeTo (file))
+                {
+                    pNameEdit.clear();
+                    setStatus (juce::String::fromUTF8 ("プロファイルを保存しました: ")
+                               + file.getFullPathName());
+                }
+                else
+                    setStatus (juce::String::fromUTF8 ("保存に失敗しました。"));
+            });
     }
 
     void save()
@@ -1031,6 +1041,7 @@ private:
     ProfileGraph pGraph;
     VoiceProfile pvBase, pvConv;
     float pvHifreq = 0.0f, pvFloor = 0.0f;
+    std::unique_ptr<juce::FileChooser> profChooser;
 };
 
 // ASMR tab: pseudo-3D positioning. A sonar-style circular pad with a
