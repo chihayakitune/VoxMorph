@@ -1640,6 +1640,15 @@ public:
                  "変換遅延を半分(43ms→約21ms)にします。配信やモニタリング向け。"
                  "代わりにピッチ検出の下限が約90Hzに上がるため、非常に低い声では追跡が"
                  "落ちる場合があります。Low Voice Modeがオンの間は無効です。"));
+        addToggleRow ("stereo", "Stereo Input (Binaural)",
+            tip ("For binaural / ASMR stereo microphones: the left and right inputs run through "
+                 "two independent conversion engines in parallel, keeping the stereo image. "
+                 "Latency is unchanged, CPU roughly doubles. If the sides occasionally drift "
+                 "apart on tricky voices, switch it off. Off = classic mono (inputs summed).",
+                 "バイノーラル/ASMR用ステレオマイク向け。左右の入力を2つの独立した変換エンジンで"
+                 "並列処理し、立体感を保ったまま変換します。遅延は変わりません(CPUは約2倍)。"
+                 "声によってはまれに左右の解釈が割れて広がって聞こえる場合があり、その時はオフに。"
+                 "オフ=従来どおりモノラル(左右を合成)。"));
         addToggleRow ("automute", "Auto-Mute on Feedback",
             tip ("Standalone app: if the output stays extremely loud for over a second "
                  "(a runaway feedback loop between speakers and mic), the output is muted "

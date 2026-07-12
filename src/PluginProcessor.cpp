@@ -53,6 +53,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::ParameterID { "automute", 1 }, "Auto-Mute on Feedback", true));
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "lowlat", 1 }, "Low Latency Mode", false));
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "stereo", 1 }, "Stereo Input (Binaural)", false));
     layout.add (std::make_unique<P> (juce::ParameterID { "pitchfloor", 1 }, "Pitch Floor (Hz)",
                 juce::NormalisableRange<float> (0.0f, 300.0f, 1.0f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "robotHz", 1 }, "Robot Pitch (Hz)",
@@ -128,6 +130,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pGate      = apvts.getRawParameterValue ("gate");
     pAsmrX     = apvts.getRawParameterValue ("asmrx");
     pAsmrY     = apvts.getRawParameterValue ("asmry");
+    pStereo    = apvts.getRawParameterValue ("stereo");
 
     loadFxChains();   // standalone: restore the saved Pre/Post FX setup
 }
@@ -143,7 +146,10 @@ bool VoxMorphProcessor::isBusesLayoutSupported (const BusesLayout& l) const
 void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     engine.prepare (sampleRate);
+    engineR.prepare (sampleRate);
     monoScratch.assign ((size_t) samplesPerBlock, 0.0f);
+    scratchL.assign ((size_t) samplesPerBlock, 0.0f);
+    scratchR.assign ((size_t) samplesPerBlock, 0.0f);
     setLatencySamples (engine.latencySamples());
 
     capBuf.assign ((size_t) (sampleRate * 15.0), 0.0f);
@@ -321,7 +327,22 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.mix           = pMix->load();
     engine.setParams (p);
 
-    // mono-sum the input (voice sources are mono; stereo inputs are averaged)
+    // Stereo Input mode (binaural/ASMR mics): L and R run through two
+    // independent conversion engines in PARALLEL, so the latency is the
+    // same as mono. m stays the mono sum and keeps feeding every analysis
+    // tap (visualizer, ANALYZE captures, auto-mute) exactly as before.
+    const bool stereoMode = ch >= 2 && pStereo->load() > 0.5f;
+    if ((int) scratchL.size() < n) { scratchL.assign ((size_t) n, 0.0f); scratchR.assign ((size_t) n, 0.0f); }
+    float* sL = scratchL.data();
+    float* sR = scratchR.data();
+    if (stereoMode)
+    {
+        engineR.setParams (p);
+        std::copy (buffer.getReadPointer (0), buffer.getReadPointer (0) + n, sL);
+        std::copy (buffer.getReadPointer (1), buffer.getReadPointer (1) + n, sR);
+    }
+
+    // mono-sum the input (mono path input; analysis taps in stereo mode)
     float* m = monoScratch.data();
     if (ch == 1)
         std::copy (buffer.getReadPointer (0), buffer.getReadPointer (0) + n, m);
@@ -338,22 +359,44 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         if (tl.isLocked())
             for (auto* s : preChain)
                 if (s->enabled.load() && s->plugin != nullptr)
-                    applyFxMono (*s->plugin, m, n);
+                {
+                    if (stereoMode)      // true stereo through the FX
+                    {
+                        if (fxScratch.getNumSamples() >= n)
+                        {
+                            fxScratch.copyFrom (0, 0, sL, n);
+                            fxScratch.copyFrom (1, 0, sR, n);
+                            juce::AudioBuffer<float> sub (fxScratch.getArrayOfWritePointers(), 2, 0, n);
+                            juce::MidiBuffer midi;
+                            s->plugin->processBlock (sub, midi);
+                            std::copy (sub.getReadPointer (0), sub.getReadPointer (0) + n, sL);
+                            std::copy (sub.getReadPointer (1), sub.getReadPointer (1) + n, sR);
+                        }
+                    }
+                    else
+                        applyFxMono (*s->plugin, m, n);
+                }
+        if (stereoMode)
+            for (int i = 0; i < n; ++i) m[i] = 0.5f * (sL[i] + sR[i]);
     }
 
     // Noise gate: while the input stays below the threshold, fade it out.
     // Fast open (~1 ms), slow close (~25 ms) so word onsets are kept.
+    // Stereo mode: one shared gain (driven by the louder channel) so the
+    // image never lurches sideways.
     const float gateThr = pGate->load();
     if (gateThr > -79.5f)
     {
         const float lt = juce::Decibels::decibelsToGain (gateThr);
         for (int i = 0; i < n; ++i)
         {
-            const float a = std::abs (m[i]);
+            const float a = stereoMode ? std::max (std::abs (sL[i]), std::abs (sR[i]))
+                                       : std::abs (m[i]);
             gateEnv  += (a > gateEnv ? 0.30f : 0.0015f) * (a - gateEnv);
             const float t = gateEnv > lt ? 1.0f : 0.0f;
             gateGain += (t > gateGain ? 0.02f : 0.0008f) * (t - gateGain);
             m[i] *= gateGain;
+            if (stereoMode) { sL[i] *= gateGain; sR[i] *= gateGain; }
         }
     }
 
@@ -371,7 +414,14 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         if (c >= room) capturing.store (false);
     }
 
-    engine.process (m, m, n);
+    if (stereoMode)
+    {
+        engine.process  (sL, sL, n);
+        engineR.process (sR, sR, n);
+        for (int i = 0; i < n; ++i) m[i] = 0.5f * (sL[i] + sR[i]);   // analysis taps
+    }
+    else
+        engine.process (m, m, n);
 
     if (getLatencySamples() != engine.latencySamples())
         setLatencySamples (engine.latencySamples());
@@ -406,6 +456,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             {
                 muteGain += 0.002f * (target - muteGain);
                 m[i] *= muteGain;
+                if (stereoMode) { sL[i] *= muteGain; sR[i] *= muteGain; }
             }
     }
 
@@ -425,10 +476,11 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         float* d = buffer.getWritePointer (c);
         const float t = ch == 1 ? dg : (c == 0 ? tL : tR);
         float& sm = c == 0 ? panL : panR;
+        const float* src = stereoMode ? (c == 0 ? sL : sR) : m;
         for (int i = 0; i < n; ++i)
         {
             sm += 0.002f * (t - sm);
-            d[i] = g * sm * m[i];
+            d[i] = g * sm * src[i];
         }
     }
 

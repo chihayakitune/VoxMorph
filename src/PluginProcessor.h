@@ -83,8 +83,9 @@ public:
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
 
-    PsolaEngine engine;
-    std::vector<float> monoScratch;
+    PsolaEngine engine;              // mono path / LEFT channel in stereo mode
+    PsolaEngine engineR;             // RIGHT channel (stereo input mode only)
+    std::vector<float> monoScratch, scratchL, scratchR;
 
     std::atomic<float>* pPitch     = nullptr;
     std::atomic<float>* pFormant   = nullptr;
@@ -116,6 +117,7 @@ private:
     std::atomic<float>* pGate  = nullptr;
     std::atomic<float>* pAsmrX = nullptr;
     std::atomic<float>* pAsmrY = nullptr;
+    std::atomic<float>* pStereo = nullptr;
 
     // external FX hosting state
     void applyFxMono (juce::AudioPluginInstance&, float* m, int n);
