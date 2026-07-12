@@ -54,6 +54,14 @@ public:
     // these to .vmprofile files, ANALYZE can load such files as targets)
     VoiceProfile lastMyVoice, lastTarget;
 
+    // External FX hosting (standalone): pre = on the mic input before the
+    // conversion, post = on the converted output. Message-thread API; the
+    // audio thread takes fxLock with a try-lock and skips the FX for one
+    // block while a swap is in progress.
+    juce::String loadFx (bool post, const juce::File& vst3);   // "" = success
+    void clearFx (bool post);
+    juce::AudioPluginInstance* getFx (bool post) { return post ? postFx.get() : preFx.get(); }
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
 
@@ -90,6 +98,15 @@ private:
     std::atomic<float>* pGate  = nullptr;
     std::atomic<float>* pAsmrX = nullptr;
     std::atomic<float>* pAsmrY = nullptr;
+
+    // external FX hosting state
+    void applyFxMono (juce::AudioPluginInstance&, float* m, int n);
+    juce::AudioPluginFormatManager fxFormats;
+    std::unique_ptr<juce::AudioPluginInstance> preFx, postFx;
+    juce::CriticalSection fxLock;
+    juce::AudioBuffer<float> fxScratch;
+    double fxSr = 48000.0;
+    int    fxBlk = 512;
     std::atomic<float>* pRobotHz   = nullptr;
     std::atomic<float>* pMix       = nullptr;
     std::atomic<float>* pGain      = nullptr;

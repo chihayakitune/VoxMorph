@@ -95,6 +95,8 @@ VoxMorphProcessor::VoxMorphProcessor()
             false));
     }
 
+    fxFormats.addFormat (new juce::VST3PluginFormat());
+
     pPitch     = apvts.getRawParameterValue ("pitch");
     pFormant   = apvts.getRawParameterValue ("formant");
     pConsonant = apvts.getRawParameterValue ("consonant");
@@ -146,6 +148,67 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     capLen = 0;  capTarget = 0;  capturing = false;
     prevBuf.assign ((size_t) (sampleRate * 60.0), 0.0f);
     prevLen = 0;  prevPos = -1;
+
+    fxSr = sampleRate;  fxBlk = samplesPerBlock;
+    fxScratch.setSize (2, samplesPerBlock);
+    {
+        const juce::ScopedLock sl (fxLock);
+        for (auto* fx : { preFx.get(), postFx.get() })
+            if (fx != nullptr)
+            {
+                fx->setPlayConfigDetails (2, 2, fxSr, fxBlk);
+                fx->prepareToPlay (fxSr, fxBlk);
+            }
+    }
+}
+
+juce::String VoxMorphProcessor::loadFx (bool post, const juce::File& vst3)
+{
+    juce::OwnedArray<juce::PluginDescription> types;
+    for (auto* fmt : fxFormats.getFormats())
+        fmt->findAllTypesForFile (types, vst3.getFullPathName());
+    if (types.isEmpty())
+        return "VST3として認識できませんでした";
+
+    juce::String err;
+    auto inst = fxFormats.createPluginInstance (*types[0], fxSr, fxBlk, err);
+    if (inst == nullptr)
+        return err.isNotEmpty() ? err : juce::String ("読み込みに失敗しました");
+
+    inst->setPlayConfigDetails (2, 2, fxSr, fxBlk);
+    inst->prepareToPlay (fxSr, fxBlk);
+    std::unique_ptr<juce::AudioPluginInstance> old;
+    {
+        const juce::ScopedLock sl (fxLock);
+        auto& slot = post ? postFx : preFx;
+        old = std::move (slot);
+        slot = std::move (inst);
+    }
+    return {};
+}
+
+void VoxMorphProcessor::clearFx (bool post)
+{
+    std::unique_ptr<juce::AudioPluginInstance> old;
+    {
+        const juce::ScopedLock sl (fxLock);
+        old = std::move (post ? postFx : preFx);
+    }
+}
+
+// run a mono signal through a (2-in/2-out prepared) plugin: duplicate to
+// stereo, process, average back
+void VoxMorphProcessor::applyFxMono (juce::AudioPluginInstance& fx, float* m, int n)
+{
+    if (fxScratch.getNumSamples() < n) return;
+    fxScratch.copyFrom (0, 0, m, n);
+    fxScratch.copyFrom (1, 0, m, n);
+    juce::AudioBuffer<float> sub (fxScratch.getArrayOfWritePointers(), 2, 0, n);
+    juce::MidiBuffer midi;
+    fx.processBlock (sub, midi);
+    const float* L = sub.getReadPointer (0);
+    const float* R = sub.getReadPointer (1);
+    for (int i = 0; i < n; ++i) m[i] = 0.5f * (L[i] + R[i]);
 }
 
 void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -192,6 +255,13 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         const float* L = buffer.getReadPointer (0);
         const float* R = buffer.getReadPointer (1);
         for (int i = 0; i < n; ++i) m[i] = 0.5f * (L[i] + R[i]);
+    }
+
+    // Pre FX (standalone external plugin, e.g. a de-noiser) on the mic input
+    {
+        const juce::ScopedTryLock tl (fxLock);
+        if (tl.isLocked() && preFx != nullptr)
+            applyFxMono (*preFx, m, n);
     }
 
     // Noise gate: while the input stays below the threshold, fade it out.
@@ -282,6 +352,22 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         {
             sm += 0.002f * (t - sm);
             d[i] = g * sm * m[i];
+        }
+    }
+
+    // Post FX (standalone external plugin) on the converted output;
+    // the target-file preview below stays unfiltered
+    {
+        const juce::ScopedTryLock tl (fxLock);
+        if (tl.isLocked() && postFx != nullptr)
+        {
+            if (ch >= 2)
+            {
+                juce::MidiBuffer midi;
+                postFx->processBlock (buffer, midi);
+            }
+            else
+                applyFxMono (*postFx, buffer.getWritePointer (0), n);
         }
     }
 

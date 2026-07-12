@@ -1194,6 +1194,127 @@ private:
     SonarPad pad;
 };
 
+// window that shows a hosted FX plugin's own editor (falls back to a
+// generic parameter list when the plugin has no UI)
+class FxWindow : public juce::DocumentWindow
+{
+public:
+    explicit FxWindow (juce::AudioPluginInstance& fx)
+        : juce::DocumentWindow (fx.getName(), juce::Colour (0xff3c3d42),
+                                juce::DocumentWindow::closeButton)
+    {
+        setUsingNativeTitleBar (true);
+        if (auto* ed = fx.createEditorIfNeeded())
+            setContentOwned (ed, true);
+        else
+            setContentOwned (new juce::GenericAudioProcessorEditor (fx), true);
+        centreWithSize (juce::jmax (300, getWidth()), juce::jmax (200, getHeight()));
+        setVisible (true);
+    }
+    void closeButtonPressed() override { setVisible (false); }
+};
+
+// FX bar (STANDALONE ONLY, shown above the tabs): loads external VST3
+// plugins as a pre-filter (mic input, e.g. a de-noiser) and a post-filter
+// (converted output). Note: their extra latency is not compensated, and
+// they must be re-loaded after restarting the app.
+class FxBar : public juce::Component
+{
+public:
+    explicit FxBar (VoxMorphProcessor& p) : proc (p)
+    {
+        auto setupSlot = [this] (bool post, juce::Label& tag, juce::Label& name,
+                                 juce::TextButton& lb, juce::TextButton& ub, juce::TextButton& cb)
+        {
+            tag.setText (post ? "Post FX" : "Pre FX", juce::dontSendNotification);
+            tag.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
+            tag.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+            tag.setTooltip (juce::String::fromUTF8 (post
+                ? "変換後の声に掛かる外部VST3(スタンドアロン専用)。"
+                : "変換前のマイク入力に掛かる外部VST3(ノイズ除去などに。スタンドアロン専用)。"));
+            name.setText ("-", juce::dontSendNotification);
+            name.setFont (juce::Font (juce::FontOptions (12.0f)));
+            addAndMakeVisible (tag);
+            addAndMakeVisible (name);
+            lb.onClick = [this, post] { load (post); };
+            ub.setTooltip (juce::String::fromUTF8 ("プラグインの画面を開きます。"));
+            ub.onClick = [this, post]
+            {
+                if (auto* fx = proc.getFx (post))
+                    (post ? postWin : preWin) = std::make_unique<FxWindow> (*fx);
+            };
+            cb.setTooltip (juce::String::fromUTF8 ("プラグインを外します。"));
+            cb.onClick = [this, post]
+            {
+                (post ? postWin : preWin).reset();
+                proc.clearFx (post);
+                (post ? postName : preName).setText ("-", juce::dontSendNotification);
+            };
+            for (auto* b : { &lb, &ub, &cb }) addAndMakeVisible (*b);
+        };
+        setupSlot (false, preTag,  preName,  preLoad,  preUi,  preClear);
+        setupSlot (true,  postTag, postName, postLoad, postUi, postClear);
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (8, 3);
+        auto lay = [&r] (juce::Label& tag, juce::Label& name,
+                         juce::TextButton& lb, juce::TextButton& ub, juce::TextButton& cb)
+        {
+            tag.setBounds (r.removeFromLeft (52));
+            name.setBounds (r.removeFromLeft (108));
+            lb.setBounds (r.removeFromLeft (56).reduced (0, 2));
+            ub.setBounds (r.removeFromLeft (32).reduced (2, 2));
+            cb.setBounds (r.removeFromLeft (24).reduced (2, 2));
+        };
+        lay (preTag, preName, preLoad, preUi, preClear);
+        r.removeFromLeft (12);
+        lay (postTag, postName, postLoad, postUi, postClear);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (juce::Colour (0xfff3eef0));
+        g.setColour (juce::Colour (0xffe4dadd));
+        g.drawLine (0.0f, (float) getHeight() - 0.5f, (float) getWidth(),
+                    (float) getHeight() - 0.5f, 1.0f);
+    }
+
+private:
+    void load (bool post)
+    {
+       #if JUCE_MAC
+        juce::File init ("/Library/Audio/Plug-Ins/VST3");
+       #else
+        juce::File init ("C:\\Program Files\\Common Files\\VST3");
+       #endif
+        chooser = std::make_unique<juce::FileChooser> (
+            juce::String::fromUTF8 ("VST3プラグインを選択"), init, "*.vst3");
+        chooser->launchAsync (juce::FileBrowserComponent::openMode
+                            | juce::FileBrowserComponent::canSelectFiles,
+            [this, post] (const juce::FileChooser& fc)
+        {
+            const auto f = fc.getResult();
+            if (f == juce::File()) return;
+            (post ? postWin : preWin).reset();     // close old UI before swap
+            const auto err = proc.loadFx (post, f);
+            auto& name = post ? postName : preName;
+            if (err.isEmpty() && proc.getFx (post) != nullptr)
+                name.setText (proc.getFx (post)->getName(), juce::dontSendNotification);
+            else
+                name.setText ("Error: " + err, juce::dontSendNotification);
+        });
+    }
+
+    VoxMorphProcessor& proc;
+    juce::Label preTag, preName, postTag, postName;
+    juce::TextButton preLoad  { "Load..." }, preUi  { "UI" }, preClear  { "X" },
+                     postLoad { "Load..." }, postUi { "UI" }, postClear { "X" };
+    std::unique_ptr<FxWindow> preWin, postWin;
+    std::unique_ptr<juce::FileChooser> chooser;
+};
+
 // simple component that forwards resized() to a lambda (used for tab pages)
 struct FnComponent : public juce::Component
 {
@@ -1225,6 +1346,10 @@ public:
         mainLnf.setColour (juce::TextButton::buttonColourId,        juce::Colours::white);
         mainLnf.setColour (juce::TextButton::textColourOffId,       juce::Colour (0xff54c0aa)); // reset arrows
         setLookAndFeel (&mainLnf);
+
+        // FX bar: standalone-only external plugin slots above the tabs
+        if (proc.wrapperType == juce::AudioProcessor::wrapperType_Standalone)
+            addAndMakeVisible (fxBar);
 
         // MAIN / ANALYZE tabs. The MAIN page holds the scrolling parameter
         // list (viewport -> content); ANALYZE holds the profile tools.
@@ -1492,7 +1617,10 @@ public:
 
     void resized() override
     {
-        tabs.setBounds (getLocalBounds());
+        auto r = getLocalBounds();
+        if (fxBar.isVisible())
+            fxBar.setBounds (r.removeFromTop (30));
+        tabs.setBounds (r);
     }
 
     void layoutMainPage()
@@ -1665,6 +1793,7 @@ private:
     AnalyzePanel    analyzePanel { proc };
     PresetPanel     presetPanel { proc };
     AsmrPanel       asmrPanel { proc };
+    FxBar           fxBar { proc };
     FnComponent     mainPage;    // MAIN tab page (declared before tabs!)
     juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
     int contentHeight = 0;
