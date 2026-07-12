@@ -1269,8 +1269,7 @@ public:
                     r->name.setText (s->plugin->getName(), juce::dontSendNotification);
                     r->on.onClick = [this, r]
                     {
-                        if (auto* sl = proc.getFxSlot (r->post, r->index))
-                            sl->enabled = r->on.getToggleState();
+                        proc.setFxEnabled (r->post, r->index, r->on.getToggleState());
                     };
                     r->ui.onClick = [this, r]
                     {

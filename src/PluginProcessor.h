@@ -7,6 +7,7 @@ class VoxMorphProcessor : public juce::AudioProcessor
 {
 public:
     VoxMorphProcessor();
+    ~VoxMorphProcessor() override;   // saves the FX chain setup (standalone)
 
     // -- AudioProcessor --
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
@@ -62,15 +63,22 @@ public:
     {
         std::unique_ptr<juce::AudioPluginInstance> plugin;
         std::atomic<bool> enabled { true };
+        juce::String path;                       // .vst3 location, for persistence
     };
     juce::String addFx (bool post, const juce::File& vst3);   // "" = success
     void removeFx (bool post, int index);
+    void setFxEnabled (bool post, int i, bool on);
     int  getNumFx (bool post) const { return (post ? postChain : preChain).size(); }
     FxSlot* getFxSlot (bool post, int i)
     {
         auto& c = post ? postChain : preChain;
         return juce::isPositiveAndBelow (i, c.size()) ? c[i] : nullptr;
     }
+    // persistence: chains (paths + enabled + each plugin's internal state)
+    // save to <userAppData>/VoxMorph/fxchains.xml on edits and on quit,
+    // and reload automatically at startup (standalone only)
+    void saveFxChains();
+    void loadFxChains();
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
@@ -117,6 +125,7 @@ private:
     juce::AudioBuffer<float> fxScratch;
     double fxSr = 48000.0;
     int    fxBlk = 512;
+    bool   fxLoading = false;   // suppress saves while restoring at startup
     std::atomic<float>* pRobotHz   = nullptr;
     std::atomic<float>* pMix       = nullptr;
     std::atomic<float>* pGain      = nullptr;

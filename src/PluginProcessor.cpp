@@ -128,6 +128,8 @@ VoxMorphProcessor::VoxMorphProcessor()
     pGate      = apvts.getRawParameterValue ("gate");
     pAsmrX     = apvts.getRawParameterValue ("asmrx");
     pAsmrY     = apvts.getRawParameterValue ("asmry");
+
+    loadFxChains();   // standalone: restore the saved Pre/Post FX setup
 }
 
 bool VoxMorphProcessor::isBusesLayoutSupported (const BusesLayout& l) const
@@ -180,10 +182,12 @@ juce::String VoxMorphProcessor::addFx (bool post, const juce::File& vst3)
     inst->prepareToPlay (fxSr, fxBlk);
     auto slot = std::make_unique<FxSlot>();
     slot->plugin = std::move (inst);
+    slot->path   = vst3.getFullPathName();
     {
         const juce::ScopedLock sl (fxLock);
         (post ? postChain : preChain).add (slot.release());
     }
+    saveFxChains();
     return {};
 }
 
@@ -196,6 +200,75 @@ void VoxMorphProcessor::removeFx (bool post, int index)
         if (juce::isPositiveAndBelow (index, c.size()))
             old.reset (c.removeAndReturn (index));
     }
+    saveFxChains();
+}
+
+void VoxMorphProcessor::setFxEnabled (bool post, int i, bool on)
+{
+    if (auto* s = getFxSlot (post, i))
+    {
+        s->enabled = on;
+        saveFxChains();
+    }
+}
+
+static juce::File fxChainFile()
+{
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+               .getChildFile ("VoxMorph").getChildFile ("fxchains.xml");
+}
+
+void VoxMorphProcessor::saveFxChains()
+{
+    if (wrapperType != wrapperType_Standalone || fxLoading)
+        return;
+    juce::XmlElement root ("VMFXCHAINS");
+    for (int post = 0; post <= 1; ++post)
+        for (auto* s : (post != 0 ? postChain : preChain))
+            if (s->plugin != nullptr)
+            {
+                auto* e = root.createNewChildElement ("FX");
+                e->setAttribute ("post", post);
+                e->setAttribute ("path", s->path);
+                e->setAttribute ("enabled", s->enabled.load() ? 1 : 0);
+                juce::MemoryBlock mb;
+                s->plugin->getStateInformation (mb);
+                e->setAttribute ("state", mb.toBase64Encoding());
+            }
+    auto f = fxChainFile();
+    f.getParentDirectory().createDirectory();
+    root.writeTo (f);
+}
+
+void VoxMorphProcessor::loadFxChains()
+{
+    if (wrapperType != wrapperType_Standalone)
+        return;
+    auto xml = juce::XmlDocument::parse (fxChainFile());
+    if (xml == nullptr || ! xml->hasTagName ("VMFXCHAINS"))
+        return;
+    fxLoading = true;
+    for (auto* e : xml->getChildIterator())
+    {
+        const bool post = e->getIntAttribute ("post") != 0;
+        const juce::File f (e->getStringAttribute ("path"));
+        if (! f.exists() || addFx (post, f).isNotEmpty())
+            continue;                                    // moved/uninstalled: skip
+        auto& c = post ? postChain : preChain;
+        if (auto* s = c.getLast())
+        {
+            s->enabled = e->getIntAttribute ("enabled", 1) != 0;
+            juce::MemoryBlock mb;
+            if (mb.fromBase64Encoding (e->getStringAttribute ("state")) && mb.getSize() > 0)
+                s->plugin->setStateInformation (mb.getData(), (int) mb.getSize());
+        }
+    }
+    fxLoading = false;
+}
+
+VoxMorphProcessor::~VoxMorphProcessor()
+{
+    saveFxChains();   // capture the plugins' latest internal states on quit
 }
 
 // run a mono signal through a (2-in/2-out prepared) plugin: duplicate to
