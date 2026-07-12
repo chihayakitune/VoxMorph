@@ -153,16 +153,17 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     fxScratch.setSize (2, samplesPerBlock);
     {
         const juce::ScopedLock sl (fxLock);
-        for (auto* fx : { preFx.get(), postFx.get() })
-            if (fx != nullptr)
-            {
-                fx->setPlayConfigDetails (2, 2, fxSr, fxBlk);
-                fx->prepareToPlay (fxSr, fxBlk);
-            }
+        for (auto* chain : { &preChain, &postChain })
+            for (auto* s : *chain)
+                if (s->plugin != nullptr)
+                {
+                    s->plugin->setPlayConfigDetails (2, 2, fxSr, fxBlk);
+                    s->plugin->prepareToPlay (fxSr, fxBlk);
+                }
     }
 }
 
-juce::String VoxMorphProcessor::loadFx (bool post, const juce::File& vst3)
+juce::String VoxMorphProcessor::addFx (bool post, const juce::File& vst3)
 {
     juce::OwnedArray<juce::PluginDescription> types;
     for (auto* fmt : fxFormats.getFormats())
@@ -177,22 +178,23 @@ juce::String VoxMorphProcessor::loadFx (bool post, const juce::File& vst3)
 
     inst->setPlayConfigDetails (2, 2, fxSr, fxBlk);
     inst->prepareToPlay (fxSr, fxBlk);
-    std::unique_ptr<juce::AudioPluginInstance> old;
+    auto slot = std::make_unique<FxSlot>();
+    slot->plugin = std::move (inst);
     {
         const juce::ScopedLock sl (fxLock);
-        auto& slot = post ? postFx : preFx;
-        old = std::move (slot);
-        slot = std::move (inst);
+        (post ? postChain : preChain).add (slot.release());
     }
     return {};
 }
 
-void VoxMorphProcessor::clearFx (bool post)
+void VoxMorphProcessor::removeFx (bool post, int index)
 {
-    std::unique_ptr<juce::AudioPluginInstance> old;
+    std::unique_ptr<FxSlot> old;
     {
         const juce::ScopedLock sl (fxLock);
-        old = std::move (post ? postFx : preFx);
+        auto& c = post ? postChain : preChain;
+        if (juce::isPositiveAndBelow (index, c.size()))
+            old.reset (c.removeAndReturn (index));
     }
 }
 
@@ -257,11 +259,13 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         for (int i = 0; i < n; ++i) m[i] = 0.5f * (L[i] + R[i]);
     }
 
-    // Pre FX (standalone external plugin, e.g. a de-noiser) on the mic input
+    // Pre FX chain (standalone external plugins, e.g. a de-noiser)
     {
         const juce::ScopedTryLock tl (fxLock);
-        if (tl.isLocked() && preFx != nullptr)
-            applyFxMono (*preFx, m, n);
+        if (tl.isLocked())
+            for (auto* s : preChain)
+                if (s->enabled.load() && s->plugin != nullptr)
+                    applyFxMono (*s->plugin, m, n);
     }
 
     // Noise gate: while the input stays below the threshold, fade it out.
@@ -355,20 +359,22 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         }
     }
 
-    // Post FX (standalone external plugin) on the converted output;
+    // Post FX chain (standalone external plugins) on the converted output;
     // the target-file preview below stays unfiltered
     {
         const juce::ScopedTryLock tl (fxLock);
-        if (tl.isLocked() && postFx != nullptr)
-        {
-            if (ch >= 2)
-            {
-                juce::MidiBuffer midi;
-                postFx->processBlock (buffer, midi);
-            }
-            else
-                applyFxMono (*postFx, buffer.getWritePointer (0), n);
-        }
+        if (tl.isLocked())
+            for (auto* s : postChain)
+                if (s->enabled.load() && s->plugin != nullptr)
+                {
+                    if (ch >= 2)
+                    {
+                        juce::MidiBuffer midi;
+                        s->plugin->processBlock (buffer, midi);
+                    }
+                    else
+                        applyFxMono (*s->plugin, buffer.getWritePointer (0), n);
+                }
     }
 
     for (int i = 0; i < n; ++i)

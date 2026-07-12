@@ -1214,75 +1214,127 @@ public:
     void closeButtonPressed() override { setVisible (false); }
 };
 
-// FX bar (STANDALONE ONLY, shown above the tabs): loads external VST3
-// plugins as a pre-filter (mic input, e.g. a de-noiser) and a post-filter
-// (converted output). Note: their extra latency is not compensated, and
-// they must be re-loaded after restarting the app.
-class FxBar : public juce::Component
+// FX chain editor panel (lives in its own window): two sections, Pre FX
+// (mic input before conversion) and Post FX (converted output), each a
+// list of VST3s processed top-to-bottom with On/Off, UI and remove per
+// row plus an add button. Rebuilt from the processor state after edits.
+class FxChainPanel : public juce::Component
 {
 public:
-    explicit FxBar (VoxMorphProcessor& p) : proc (p)
+    explicit FxChainPanel (VoxMorphProcessor& p) : proc (p)
     {
-        auto setupSlot = [this] (bool post, juce::Label& tag, juce::Label& name,
-                                 juce::TextButton& lb, juce::TextButton& ub, juce::TextButton& cb)
+        lnf.setColour (juce::Label::textColourId,        juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::ToggleButton::textColourId, juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::ToggleButton::tickColourId, juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::TextButton::buttonColourId, juce::Colours::white);
+        lnf.setColour (juce::TextButton::textColourOffId, juce::Colour (0xff54c0aa));
+        setLookAndFeel (&lnf);
+
+        auto initHead = [this] (juce::Label& l, const char* en, const char* jp)
         {
-            tag.setText (post ? "Post FX" : "Pre FX", juce::dontSendNotification);
-            tag.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
-            tag.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
-            tag.setTooltip (juce::String::fromUTF8 (post
-                ? "変換後の声に掛かる外部VST3(スタンドアロン専用)。"
-                : "変換前のマイク入力に掛かる外部VST3(ノイズ除去などに。スタンドアロン専用)。"));
-            name.setText ("-", juce::dontSendNotification);
-            name.setFont (juce::Font (juce::FontOptions (12.0f)));
-            addAndMakeVisible (tag);
-            addAndMakeVisible (name);
-            lb.onClick = [this, post] { load (post); };
-            ub.setTooltip (juce::String::fromUTF8 ("プラグインの画面を開きます。"));
-            ub.onClick = [this, post]
-            {
-                if (auto* fx = proc.getFx (post))
-                    (post ? postWin : preWin) = std::make_unique<FxWindow> (*fx);
-            };
-            cb.setTooltip (juce::String::fromUTF8 ("プラグインを外します。"));
-            cb.onClick = [this, post]
-            {
-                (post ? postWin : preWin).reset();
-                proc.clearFx (post);
-                (post ? postName : preName).setText ("-", juce::dontSendNotification);
-            };
-            for (auto* b : { &lb, &ub, &cb }) addAndMakeVisible (*b);
+            l.setText (juce::String (en) + "   " + juce::String::fromUTF8 (jp),
+                       juce::dontSendNotification);
+            l.setFont (juce::Font (juce::FontOptions (13.5f, juce::Font::bold)));
+            l.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+            addAndMakeVisible (l);
         };
-        setupSlot (false, preTag,  preName,  preLoad,  preUi,  preClear);
-        setupSlot (true,  postTag, postName, postLoad, postUi, postClear);
+        initHead (preHead,  "Pre FX",  "(変換前・マイク入力に掛かる)");
+        initHead (postHead, "Post FX", "(変換後・出力に掛かる)");
+        preAdd.onClick  = [this] { add (false); };
+        postAdd.onClick = [this] { add (true);  };
+        addAndMakeVisible (preAdd);
+        addAndMakeVisible (postAdd);
+        note.setFont (juce::Font (juce::FontOptions (11.0f)));
+        note.setColour (juce::Label::textColourId, juce::Colour (0xff9aa5a2));
+        note.setText (juce::String::fromUTF8 ("上から順に処理されます。FXの遅延は補正されません。"
+                                              "アプリ再起動後は再読み込みが必要です。"),
+                      juce::dontSendNotification);
+        addAndMakeVisible (note);
+        rebuild();
+    }
+
+    ~FxChainPanel() override { setLookAndFeel (nullptr); }
+
+    void rebuild()
+    {
+        wins.clear();
+        rows.clear();
+        for (int post = 0; post <= 1; ++post)
+            for (int i = 0; i < proc.getNumFx (post != 0); ++i)
+                if (auto* s = proc.getFxSlot (post != 0, i); s != nullptr && s->plugin != nullptr)
+                {
+                    auto* r = rows.add (new Row());
+                    r->post = post != 0;  r->index = i;
+                    r->on.setToggleState (s->enabled.load(), juce::dontSendNotification);
+                    r->name.setText (s->plugin->getName(), juce::dontSendNotification);
+                    r->on.onClick = [this, r]
+                    {
+                        if (auto* sl = proc.getFxSlot (r->post, r->index))
+                            sl->enabled = r->on.getToggleState();
+                    };
+                    r->ui.onClick = [this, r]
+                    {
+                        if (auto* sl = proc.getFxSlot (r->post, r->index))
+                            if (sl->plugin != nullptr)
+                                wins.add (new FxWindow (*sl->plugin));
+                    };
+                    r->del.onClick = [this, post2 = r->post, idx = r->index]
+                    {
+                        juce::Component::SafePointer<FxChainPanel> sp (this);
+                        juce::MessageManager::callAsync ([sp, post2, idx]
+                        {
+                            if (sp == nullptr) return;
+                            sp->proc.removeFx (post2, idx);
+                            sp->rebuild();
+                        });
+                    };
+                    addAndMakeVisible (r);
+                }
+        const int nPre  = proc.getNumFx (false);
+        const int nPost = proc.getNumFx (true);
+        setSize (460, 20 + 24 + nPre * 30 + 30 + 16 + 24 + nPost * 30 + 30 + 26 + 14);
+        resized();
+        repaint();
     }
 
     void resized() override
     {
-        auto r = getLocalBounds().reduced (8, 3);
-        auto lay = [&r] (juce::Label& tag, juce::Label& name,
-                         juce::TextButton& lb, juce::TextButton& ub, juce::TextButton& cb)
-        {
-            tag.setBounds (r.removeFromLeft (52));
-            name.setBounds (r.removeFromLeft (108));
-            lb.setBounds (r.removeFromLeft (56).reduced (0, 2));
-            ub.setBounds (r.removeFromLeft (32).reduced (2, 2));
-            cb.setBounds (r.removeFromLeft (24).reduced (2, 2));
-        };
-        lay (preTag, preName, preLoad, preUi, preClear);
-        r.removeFromLeft (12);
-        lay (postTag, postName, postLoad, postUi, postClear);
+        auto r = getLocalBounds().reduced (14, 10);
+        preHead.setBounds (r.removeFromTop (24));
+        for (auto* row : rows) if (! row->post) row->setBounds (r.removeFromTop (30).reduced (0, 2));
+        preAdd.setBounds (r.removeFromTop (30).withWidth (150).reduced (0, 2));
+        r.removeFromTop (16);
+        postHead.setBounds (r.removeFromTop (24));
+        for (auto* row : rows) if (row->post) row->setBounds (r.removeFromTop (30).reduced (0, 2));
+        postAdd.setBounds (r.removeFromTop (30).withWidth (150).reduced (0, 2));
+        note.setBounds (r.removeFromTop (26));
     }
 
-    void paint (juce::Graphics& g) override
-    {
-        g.fillAll (juce::Colour (0xfff3eef0));
-        g.setColour (juce::Colour (0xffe4dadd));
-        g.drawLine (0.0f, (float) getHeight() - 0.5f, (float) getWidth(),
-                    (float) getHeight() - 0.5f, 1.0f);
-    }
+    void paint (juce::Graphics& g) override { g.fillAll (juce::Colour (0xfffcf9f9)); }
 
 private:
-    void load (bool post)
+    struct Row : public juce::Component
+    {
+        bool post = false; int index = 0;
+        juce::ToggleButton on;
+        juce::Label name;
+        juce::TextButton ui { "UI" }, del { "X" };
+        Row()
+        {
+            for (auto* c : std::initializer_list<juce::Component*> { &on, &name, &ui, &del })
+                addAndMakeVisible (*c);
+        }
+        void resized() override
+        {
+            auto r = getLocalBounds();
+            on.setBounds (r.removeFromLeft (28));
+            del.setBounds (r.removeFromRight (28).reduced (2));
+            ui.setBounds (r.removeFromRight (40).reduced (2));
+            name.setBounds (r);
+        }
+    };
+
+    void add (bool post)
     {
        #if JUCE_MAC
         juce::File init ("/Library/Audio/Plug-Ins/VST3");
@@ -1297,22 +1349,90 @@ private:
         {
             const auto f = fc.getResult();
             if (f == juce::File()) return;
-            (post ? postWin : preWin).reset();     // close old UI before swap
-            const auto err = proc.loadFx (post, f);
-            auto& name = post ? postName : preName;
-            if (err.isEmpty() && proc.getFx (post) != nullptr)
-                name.setText (proc.getFx (post)->getName(), juce::dontSendNotification);
-            else
-                name.setText ("Error: " + err, juce::dontSendNotification);
+            const auto err = proc.addFx (post, f);
+            if (err.isNotEmpty())
+                note.setText ("Error: " + err, juce::dontSendNotification);
+            rebuild();
         });
     }
 
     VoxMorphProcessor& proc;
-    juce::Label preTag, preName, postTag, postName;
-    juce::TextButton preLoad  { "Load..." }, preUi  { "UI" }, preClear  { "X" },
-                     postLoad { "Load..." }, postUi { "UI" }, postClear { "X" };
-    std::unique_ptr<FxWindow> preWin, postWin;
+    juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
+    juce::Label preHead, postHead, note;
+    juce::TextButton preAdd { "+ Add VST3..." }, postAdd { "+ Add VST3..." };
+    juce::OwnedArray<Row> rows;
+    juce::OwnedArray<FxWindow> wins;
     std::unique_ptr<juce::FileChooser> chooser;
+};
+
+class FxChainWindow : public juce::DocumentWindow
+{
+public:
+    explicit FxChainWindow (VoxMorphProcessor& p)
+        : juce::DocumentWindow (juce::String::fromUTF8 ("Plugins — Pre / Post FX"),
+                                juce::Colour (0xfffcf9f9), juce::DocumentWindow::closeButton)
+    {
+        setUsingNativeTitleBar (true);
+        setContentOwned (new FxChainPanel (p), true);
+        centreWithSize (getWidth(), getHeight());
+        setVisible (true);
+    }
+    void closeButtonPressed() override { setVisible (false); }
+};
+
+// Standalone options bar (shown above the tabs, STANDALONE ONLY): controls
+// that only make sense for the app — external FX chains and the audio
+// device settings (the old title-bar Options button moved here).
+class FxBar : public juce::Component
+{
+public:
+    explicit FxBar (VoxMorphProcessor& p) : proc (p)
+    {
+        plugBtn.setTooltip (juce::String::fromUTF8 (
+            "外部VST3プラグイン(Pre/Post FX)の管理ウィンドウを開きます。"));
+        plugBtn.onClick = [this]
+        {
+            if (fxWin == nullptr)
+                fxWin = std::make_unique<FxChainWindow> (proc);
+            else
+            {
+                fxWin->setVisible (true);
+                fxWin->toFront (true);
+            }
+        };
+        audioBtn.setTooltip (juce::String::fromUTF8 (
+            "オーディオ入出力デバイス・サンプルレート・バッファの設定を開きます。"));
+        audioBtn.onClick = []
+        {
+           #if VOXMORPH_HAS_STANDALONE_HOLDER
+            if (auto* h = juce::StandalonePluginHolder::getInstance())
+                h->showAudioSettingsDialog();
+           #endif
+        };
+        addAndMakeVisible (plugBtn);
+        addAndMakeVisible (audioBtn);
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (8, 3);
+        plugBtn.setBounds (r.removeFromLeft (110));
+        r.removeFromLeft (8);
+        audioBtn.setBounds (r.removeFromLeft (130));
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (juce::Colour (0xfff3eef0));
+        g.setColour (juce::Colour (0xffe4dadd));
+        g.drawLine (0.0f, (float) getHeight() - 0.5f, (float) getWidth(),
+                    (float) getHeight() - 0.5f, 1.0f);
+    }
+
+private:
+    VoxMorphProcessor& proc;
+    juce::TextButton plugBtn { "Plugins..." }, audioBtn { "Audio Settings..." };
+    std::unique_ptr<FxChainWindow> fxWin;
 };
 
 // simple component that forwards resized() to a lambda (used for tab pages)
@@ -1621,6 +1741,24 @@ public:
         if (fxBar.isVisible())
             fxBar.setBounds (r.removeFromTop (30));
         tabs.setBounds (r);
+    }
+
+    // Standalone: switch the app window to the OS-native title bar (like
+    // most apps) and hide JUCE's in-titlebar "Options" button — its
+    // functions moved into the options bar (Audio Settings...).
+    void parentHierarchyChanged() override
+    {
+        if (proc.wrapperType != juce::AudioProcessor::wrapperType_Standalone)
+            return;
+        if (auto* dw = dynamic_cast<juce::DocumentWindow*> (getTopLevelComponent()))
+        {
+            if (! dw->isUsingNativeTitleBar())
+                dw->setUsingNativeTitleBar (true);
+            for (int i = dw->getNumChildComponents(); --i >= 0;)
+                if (auto* b = dynamic_cast<juce::Button*> (dw->getChildComponent (i)))
+                    if (b->getButtonText() == "Options")
+                        b->setVisible (false);
+        }
     }
 
     void layoutMainPage()
