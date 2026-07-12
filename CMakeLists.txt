@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(VoxMorph VERSION 0.14.0)
+project(VoxMorph VERSION 0.14.1)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -44,7 +44,7 @@ target_compile_definitions(VoxMorph PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
-    JUCE_PLUGIN_HOST_VST3=1   # スタンドアロンのPre/Post FXホスティング用
+    JUCE_PLUGINHOST_VST3=1   # スタンドアロンのPre/Post FXホスティング用
 )
 
 target_link_libraries(VoxMorph
