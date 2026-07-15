@@ -32,6 +32,12 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
+    // STATUS row (UI): estimated internal latency in samples, updated on the
+    // audio thread. uiLatencySamples = engine lookahead + enabled hosted FX;
+    // uiFxLatSamples = the hosted-FX share of that (for the breakdown text).
+    // Device/host buffers are added on the editor side (standalone only).
+    std::atomic<int> uiLatencySamples { 0 }, uiFxLatSamples { 0 };
+
     // Visualizer taps: mono input (pre-conversion) and output (as heard),
     // written on the audio thread, read by the editor's SpectrumView.
     static constexpr int kVizLen = 16384;              // power of two
@@ -109,6 +115,13 @@ private:
     std::atomic<float>* pFloor     = nullptr;
     std::atomic<float>* pAutoMute  = nullptr;
     std::atomic<float>* pLowLat    = nullptr;
+
+    // latency bookkeeping: last hosted-FX latency sum (audio thread) and the
+    // debounce state for host PDC notifications (frequent setLatencySamples
+    // calls can make hosts rebuild their graph = audible interruption)
+    int   fxLatSamples  = 0;
+    int   pendingLat    = -1;
+    float pendingLatSec = 0.0f;
 
     // feedback-runaway protection state
     float rmsSm = 0.0f, loudSec = 0.0f, muteSec = 0.0f, muteGain = 1.0f;

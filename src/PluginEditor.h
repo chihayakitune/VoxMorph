@@ -152,6 +152,93 @@ private:
     std::vector<float> re, im, smIn, smOut;
 };
 
+// Realtime status row under the visualizer. Shows the estimated internal
+// latency (engine lookahead + enabled hosted FX; the standalone app also
+// adds the audio device buffers) as "Latency: xx.x ms" with a LOW/MID/HIGH
+// badge and a breakdown on the right. Estimate only — delays outside the
+// app (OS mixer, OBS, Discord, ...) are NOT included.
+class StatusView : public juce::Component, public juce::SettableTooltipClient,
+                   private juce::Timer
+{
+public:
+    explicit StatusView (VoxMorphProcessor& p) : proc (p)
+    {
+        setTooltip (juce::String::fromUTF8 (
+            "Estimated delay inside VoxMorph: engine lookahead (43 ms; half in Low Latency "
+            "Mode) + enabled external FX plugins; the standalone app also adds the audio "
+            "device buffers. Pitch / Formant / Voice Quality / Breath run inside one shared "
+            "pipeline and add no delay of their own. Delays outside the app (OS, OBS, "
+            "Discord, audio interface driver) are NOT included. "
+            "LOW < 35 ms, MID 35-70 ms, HIGH > 70 ms.")
+            + "\n\n" + juce::String::fromUTF8 (
+            "VoxMorph内部の推定遅延です。エンジンの先読み(43ms、Low Latency Mode時は約半分)+"
+            "有効な外部FXプラグインの合計で、スタンドアロン版はオーディオバッファ分も加算します。"
+            "Pitch/Formant/Voice Quality/Breathは同一パイプライン内の処理のため追加遅延は"
+            "ありません。OS・OBS・Discord・オーディオインターフェースのドライバなど、アプリ外の"
+            "遅延は含みません。LOW<35ms / MID 35〜70ms / HIGH>70ms。"));
+        startTimerHz (4);
+    }
+
+private:
+    void timerCallback() override
+    {
+        if (! isShowing()) return;
+        const double fs = proc.getSampleRate() > 0 ? proc.getSampleRate() : 48000.0;
+        const int eng = proc.uiLatencySamples.load (std::memory_order_relaxed)
+                      - proc.uiFxLatSamples.load (std::memory_order_relaxed);
+        const int fx  = proc.uiFxLatSamples.load (std::memory_order_relaxed);
+        const int buf = proc.wrapperType == juce::AudioProcessor::wrapperType_Standalone
+                          ? 2 * proc.getBlockSize() : 0;   // in + out device buffers
+        engMs = (float) (eng * 1000.0 / fs);
+        fxMs  = (float) (fx  * 1000.0 / fs);
+        bufMs = (float) (buf * 1000.0 / fs);
+        known = eng > 0;                       // no audio prepared yet -> "--"
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced (2.0f, 1.0f);
+        g.setColour (juce::Colours::white);
+        g.fillRoundedRectangle (b, 6.0f);
+        g.setColour (juce::Colour (0xffe9d8dd));
+        g.drawRoundedRectangle (b, 6.0f, 1.0f);
+
+        auto r = b.reduced (10.0f, 0.0f).toNearestInt();
+        g.setColour (juce::Colour (0xff2e2e32));
+        g.setFont (juce::Font (juce::FontOptions (12.5f)));
+        const float ms = engMs + fxMs + bufMs;
+        g.drawText ("Latency: " + (known ? juce::String (ms, 1) + " ms" : juce::String ("--")),
+                    r, juce::Justification::centredLeft);
+
+        if (known)
+        {
+            const bool low = ms < 35.0f, mid = ms < 70.0f;    // badge
+            g.setColour (low ? juce::Colour (0xff54c0aa)
+                       : mid ? juce::Colour (0xffe3a63c)
+                             : juce::Colour (0xfff08ba5));
+            const juce::Rectangle<float> chip ((float) r.getX() + 132.0f,
+                                               b.getCentreY() - 8.0f, 44.0f, 16.0f);
+            g.fillRoundedRectangle (chip, 8.0f);
+            g.setColour (juce::Colours::white);
+            g.setFont (juce::Font (juce::FontOptions (10.5f, juce::Font::bold)));
+            g.drawText (low ? "LOW" : mid ? "MID" : "HIGH",
+                        chip.toNearestInt(), juce::Justification::centred);
+
+            g.setColour (juce::Colour (0xff9aa5a2));           // breakdown
+            g.setFont (juce::Font (juce::FontOptions (11.0f)));
+            juce::String d = "engine " + juce::String (engMs, 1)
+                           + " + FX " + juce::String (fxMs, 1);
+            if (bufMs > 0.0f) d += " + buffer " + juce::String (bufMs, 1);
+            g.drawText (d + " ms", r, juce::Justification::centredRight);
+        }
+    }
+
+    VoxMorphProcessor& proc;
+    float engMs = 0.0f, fxMs = 0.0f, bufMs = 0.0f;
+    bool  known = false;
+};
+
 // VoiceProfile <-> XML (.vmprofile files, saved next to the presets)
 inline std::unique_ptr<juce::XmlElement> profileToXml (const VoiceProfile& p)
 {
@@ -1492,6 +1579,8 @@ public:
         addSection ("VISUALIZER");
         content.addAndMakeVisible (spectrum);
         items.push_back ({ &spectrum, 168 });
+        content.addAndMakeVisible (status);    // realtime status (latency)
+        items.push_back ({ &status, 26 });
 
         addSection ("PITCH");
         addSliderRow ("pitch", "Pitch (semitones)",
@@ -1936,6 +2025,7 @@ private:
     juce::Viewport  viewport;    // scroll container
     juce::Component content;     // holds every row; taller than the window
     SpectrumView    spectrum { proc };
+    StatusView      status { proc };
     AnalyzePanel    analyzePanel { proc };
     PresetPanel     presetPanel { proc };
     AsmrPanel       asmrPanel { proc };

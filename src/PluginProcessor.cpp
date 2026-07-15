@@ -150,7 +150,6 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     monoScratch.assign ((size_t) samplesPerBlock, 0.0f);
     scratchL.assign ((size_t) samplesPerBlock, 0.0f);
     scratchR.assign ((size_t) samplesPerBlock, 0.0f);
-    setLatencySamples (engine.latencySamples());
 
     capBuf.assign ((size_t) (sampleRate * 15.0), 0.0f);
     capLen = 0;  capTarget = 0;  capturing = false;
@@ -167,14 +166,24 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     fxScratch.setSize (2, samplesPerBlock);
     {
         const juce::ScopedLock sl (fxLock);
+        int fx = 0;
         for (auto* chain : { &preChain, &postChain })
             for (auto* s : *chain)
                 if (s->plugin != nullptr)
                 {
                     s->plugin->setPlayConfigDetails (2, 2, fxSr, fxBlk);
                     s->plugin->prepareToPlay (fxSr, fxBlk);
+                    if (s->enabled.load())
+                        fx += s->plugin->getLatencySamples();
                 }
+        fxLatSamples = fx;
     }
+
+    // initial latency report: engine lookahead + enabled hosted FX
+    uiFxLatSamples.store (fxLatSamples, std::memory_order_relaxed);
+    uiLatencySamples.store (engine.latencySamples() + fxLatSamples, std::memory_order_relaxed);
+    setLatencySamples (engine.latencySamples() + fxLatSamples);
+    pendingLat = -1;  pendingLatSec = 0.0f;
 }
 
 void VoxMorphProcessor::releaseResources()
@@ -463,8 +472,41 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     else
         engine.process (m, m, n);
 
-    if (getLatencySamples() != engine.latencySamples())
-        setLatencySamples (engine.latencySamples());
+    // Latency estimate = engine lookahead (changes with Low Latency Mode)
+    // + enabled hosted FX plugins. Pitch/Formant/Voice Quality/Breath run
+    // inside the same grain pipeline and add no delay of their own. The UI
+    // reads uiLatencySamples; the host is only (re)notified after the value
+    // has been stable for 0.5 s, because each setLatencySamples() call can
+    // make a DAW rebuild its delay compensation (audible interruption).
+    {
+        {
+            const juce::ScopedTryLock tl (fxLock);
+            if (tl.isLocked())
+            {
+                int fx = 0;
+                for (auto* chain : { &preChain, &postChain })
+                    for (auto* s : *chain)
+                        if (s->enabled.load() && s->plugin != nullptr)
+                            fx += s->plugin->getLatencySamples();
+                fxLatSamples = fx;
+            }
+        }
+        const int totalLat = engine.latencySamples() + fxLatSamples;
+        uiFxLatSamples.store (fxLatSamples, std::memory_order_relaxed);
+        uiLatencySamples.store (totalLat, std::memory_order_relaxed);
+
+        if (totalLat != getLatencySamples())
+        {
+            if (totalLat != pendingLat) { pendingLat = totalLat; pendingLatSec = 0.0f; }
+            pendingLatSec += (float) n / (float) std::max (1.0, getSampleRate());
+            if (pendingLatSec >= 0.5f)
+                setLatencySamples (totalLat);
+        }
+        else
+        {
+            pendingLat = -1;  pendingLatSec = 0.0f;
+        }
+    }
 
     // Feedback-runaway protection (standalone): if the output stays very
     // loud continuously (screaming feedback loop), mute for 3 s. The loop
