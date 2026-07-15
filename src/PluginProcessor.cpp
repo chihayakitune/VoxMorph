@@ -157,6 +157,12 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     prevBuf.assign ((size_t) (sampleRate * 60.0), 0.0f);
     prevLen = 0;  prevPos = -1;
 
+    // reset the per-run smoothing states so a device restart (or host
+    // transport re-prepare) never resumes from a stale mute/gate fade
+    rmsSm = 0.0f;  loudSec = 0.0f;  muteSec = 0.0f;  muteGain = 1.0f;
+    gateEnv = 0.0f;  gateGain = 1.0f;  panL = 1.0f;  panR = 1.0f;
+    gainSm = juce::Decibels::decibelsToGain (pGain->load());
+
     fxSr = sampleRate;  fxBlk = samplesPerBlock;
     fxScratch.setSize (2, samplesPerBlock);
     {
@@ -169,6 +175,15 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
                     s->plugin->prepareToPlay (fxSr, fxBlk);
                 }
     }
+}
+
+void VoxMorphProcessor::releaseResources()
+{
+    const juce::ScopedLock sl (fxLock);
+    for (auto* chain : { &preChain, &postChain })
+        for (auto* s : *chain)
+            if (s->plugin != nullptr)
+                s->plugin->releaseResources();
 }
 
 juce::String VoxMorphProcessor::addFx (bool post, const juce::File& vst3)
@@ -206,6 +221,8 @@ void VoxMorphProcessor::removeFx (bool post, int index)
         if (juce::isPositiveAndBelow (index, c.size()))
             old.reset (c.removeAndReturn (index));
     }
+    if (old != nullptr && old->plugin != nullptr)
+        old->plugin->releaseResources();   // audio thread can no longer see it
     saveFxChains();
 }
 
@@ -277,19 +294,33 @@ VoxMorphProcessor::~VoxMorphProcessor()
     saveFxChains();   // capture the plugins' latest internal states on quit
 }
 
+// external plugins can emit NaN/Inf; replace with silence so it never
+// poisons the engine's filter states or reaches the speakers
+static void sanitizeFx (float* d, int n)
+{
+    for (int i = 0; i < n; ++i)
+        if (! std::isfinite (d[i])) d[i] = 0.0f;
+}
+
 // run a mono signal through a (2-in/2-out prepared) plugin: duplicate to
-// stereo, process, average back
+// stereo, process, average back. Processed in chunks no larger than the
+// prepared block size, so an oversized host buffer is never fed to the FX
 void VoxMorphProcessor::applyFxMono (juce::AudioPluginInstance& fx, float* m, int n)
 {
-    if (fxScratch.getNumSamples() < n) return;
-    fxScratch.copyFrom (0, 0, m, n);
-    fxScratch.copyFrom (1, 0, m, n);
-    juce::AudioBuffer<float> sub (fxScratch.getArrayOfWritePointers(), 2, 0, n);
-    juce::MidiBuffer midi;
-    fx.processBlock (sub, midi);
-    const float* L = sub.getReadPointer (0);
-    const float* R = sub.getReadPointer (1);
-    for (int i = 0; i < n; ++i) m[i] = 0.5f * (L[i] + R[i]);
+    const int maxN = std::min (fxScratch.getNumSamples(), fxBlk);
+    if (maxN <= 0) return;
+    for (int off = 0; off < n; off += maxN)
+    {
+        const int c = std::min (maxN, n - off);
+        fxScratch.copyFrom (0, 0, m + off, c);
+        fxScratch.copyFrom (1, 0, m + off, c);
+        juce::AudioBuffer<float> sub (fxScratch.getArrayOfWritePointers(), 2, 0, c);
+        juce::MidiBuffer midi;
+        fx.processBlock (sub, midi);
+        const float* L = sub.getReadPointer (0);
+        const float* R = sub.getReadPointer (1);
+        for (int i = 0; i < c; ++i) m[off + i] = 0.5f * (L[i] + R[i]);
+    }
 }
 
 void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -355,27 +386,36 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 
     // Pre FX chain (standalone external plugins, e.g. a de-noiser)
     {
+        bool ranPre = false;
         const juce::ScopedTryLock tl (fxLock);
         if (tl.isLocked())
             for (auto* s : preChain)
                 if (s->enabled.load() && s->plugin != nullptr)
                 {
-                    if (stereoMode)      // true stereo through the FX
+                    if (stereoMode)      // true stereo through the FX, chunked
                     {
-                        if (fxScratch.getNumSamples() >= n)
+                        const int maxN = std::min (fxScratch.getNumSamples(), fxBlk);
+                        for (int off = 0; maxN > 0 && off < n; off += maxN)
                         {
-                            fxScratch.copyFrom (0, 0, sL, n);
-                            fxScratch.copyFrom (1, 0, sR, n);
-                            juce::AudioBuffer<float> sub (fxScratch.getArrayOfWritePointers(), 2, 0, n);
+                            const int c = std::min (maxN, n - off);
+                            fxScratch.copyFrom (0, 0, sL + off, c);
+                            fxScratch.copyFrom (1, 0, sR + off, c);
+                            juce::AudioBuffer<float> sub (fxScratch.getArrayOfWritePointers(), 2, 0, c);
                             juce::MidiBuffer midi;
                             s->plugin->processBlock (sub, midi);
-                            std::copy (sub.getReadPointer (0), sub.getReadPointer (0) + n, sL);
-                            std::copy (sub.getReadPointer (1), sub.getReadPointer (1) + n, sR);
+                            std::copy (sub.getReadPointer (0), sub.getReadPointer (0) + c, sL + off);
+                            std::copy (sub.getReadPointer (1), sub.getReadPointer (1) + c, sR + off);
                         }
                     }
                     else
                         applyFxMono (*s->plugin, m, n);
+                    ranPre = true;
                 }
+        if (ranPre)          // NaN/Inf guard before anything downstream
+        {
+            sanitizeFx (m, n);
+            if (stereoMode) { sanitizeFx (sL, n); sanitizeFx (sR, n); }
+        }
         if (stereoMode)
             for (int i = 0; i < n; ++i) m[i] = 0.5f * (sL[i] + sR[i]);
     }
@@ -460,7 +500,18 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             }
     }
 
-    const float g = juce::Decibels::decibelsToGain (pGain->load());
+    // Output gain, smoothed per sample (no zipper noise when the slider
+    // moves), baked into m / sL / sR so the visualizer and the Refine
+    // capture below see the exact same level as the speakers
+    {
+        const float gT = juce::Decibels::decibelsToGain (pGain->load());
+        for (int i = 0; i < n; ++i)
+        {
+            gainSm += 0.002f * (gT - gainSm);
+            m[i] *= gainSm;
+            if (stereoMode) { sL[i] *= gainSm; sR[i] *= gainSm; }
+        }
+    }
 
     // ASMR pseudo-position: constant-power pan (X) + distance attenuation,
     // normalised so the centre position is exactly unity (no effect)
@@ -480,30 +531,40 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         for (int i = 0; i < n; ++i)
         {
             sm += 0.002f * (t - sm);
-            d[i] = g * sm * src[i];
+            d[i] = sm * src[i];
         }
     }
 
     // Post FX chain (standalone external plugins) on the converted output;
     // the target-file preview below stays unfiltered
     {
+        bool ranPost = false;
         const juce::ScopedTryLock tl (fxLock);
         if (tl.isLocked())
             for (auto* s : postChain)
                 if (s->enabled.load() && s->plugin != nullptr)
                 {
-                    if (ch >= 2)
+                    if (ch >= 2)         // chunked to the prepared block size
                     {
-                        juce::MidiBuffer midi;
-                        s->plugin->processBlock (buffer, midi);
+                        for (int off = 0; fxBlk > 0 && off < n; off += fxBlk)
+                        {
+                            const int c = std::min (fxBlk, n - off);
+                            juce::AudioBuffer<float> sub (buffer.getArrayOfWritePointers(), ch, off, c);
+                            juce::MidiBuffer midi;
+                            s->plugin->processBlock (sub, midi);
+                        }
                     }
                     else
                         applyFxMono (*s->plugin, buffer.getWritePointer (0), n);
+                    ranPost = true;
                 }
+        if (ranPost)         // NaN/Inf guard before the speakers
+            for (int c = 0; c < ch; ++c)
+                sanitizeFx (buffer.getWritePointer (c), n);
     }
 
     for (int i = 0; i < n; ++i)
-        vizOut[(size_t) ((vp + i) & (kVizLen - 1))] = g * m[i];
+        vizOut[(size_t) ((vp + i) & (kVizLen - 1))] = m[i];
     vizPos.store (vp + n, std::memory_order_release);
 
     if (capturing.load() && capFromOutput.load())     // ANALYZE: capture converted
@@ -511,7 +572,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         const int cl   = capLen.load();
         const int room = std::min ((int) capBuf.size(), capTarget.load()) - cl;
         const int c    = std::max (0, std::min (n, room));
-        for (int i = 0; i < c; ++i) capBuf[(size_t) (cl + i)] = g * m[i];
+        for (int i = 0; i < c; ++i) capBuf[(size_t) (cl + i)] = m[i];
         capLen.store (cl + c);
         if (c >= room) capturing.store (false);
     }

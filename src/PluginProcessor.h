@@ -11,7 +11,7 @@ public:
 
     // -- AudioProcessor --
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
-    void releaseResources() override {}
+    void releaseResources() override;   // forwards to the hosted FX plugins
     bool isBusesLayoutSupported (const BusesLayout&) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
@@ -112,8 +112,9 @@ private:
 
     // feedback-runaway protection state
     float rmsSm = 0.0f, loudSec = 0.0f, muteSec = 0.0f, muteGain = 1.0f;
-    // noise gate + ASMR pan state
+    // noise gate + ASMR pan + output gain smoothing state
     float gateEnv = 0.0f, gateGain = 1.0f, panL = 1.0f, panR = 1.0f;
+    float gainSm = 1.0f;
     std::atomic<float>* pGate  = nullptr;
     std::atomic<float>* pAsmrX = nullptr;
     std::atomic<float>* pAsmrY = nullptr;
