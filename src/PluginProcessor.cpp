@@ -133,6 +133,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pStereo    = apvts.getRawParameterValue ("stereo");
 
     loadFxChains();   // standalone: restore the saved Pre/Post FX setup
+    history.init (*this);
 }
 
 bool VoxMorphProcessor::isBusesLayoutSupported (const BusesLayout& l) const
@@ -636,13 +637,19 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 void VoxMorphProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     if (auto xml = apvts.copyState().createXml())
+    {
+        xml->setAttribute ("lockMask", (int) lockMask);   // section locks
         copyXmlToBinary (*xml, dest);
+    }
 }
 
 void VoxMorphProcessor::setStateInformation (const void* data, int size)
 {
     if (auto xml = getXmlFromBinary (data, size))
+    {
+        lockMask = (uint32_t) xml->getIntAttribute ("lockMask", 0);
         apvts.replaceState (juce::ValueTree::fromXml (*xml));
+    }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

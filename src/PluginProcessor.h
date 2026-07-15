@@ -32,6 +32,144 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
+    // ---- Section locks + snapshot undo/redo (MESSAGE THREAD ONLY) --------
+    // The audio thread never reads any of this: locks are enforced purely on
+    // the parameter-writing (UI) side and the history only stores/sets
+    // parameter values, so the realtime path is unaffected.
+
+    // Lockable UI sections and the parameter ids they protect. The order
+    // defines the lockMask bit for each section and must match the section
+    // order on the editor's MAIN tab.
+    struct LockSection { const char* label; std::vector<juce::String> ids; };
+    static const std::vector<LockSection>& lockSections()
+    {
+        static const std::vector<LockSection> s = {
+            { "PITCH",         { "pitch", "robot", "robotHz" } },
+            { "HIGH RANGE",    { "hifreq", "hipitch", "hiformant" } },
+            { "FORMANT",       { "formant", "consonant", "f1shift", "f1gain",
+                                 "f2shift", "f2gain", "f3shift", "f3gain" } },
+            { "INTONATION",    { "range", "center" } },
+            { "VOICE QUALITY", { "tilt", "jitter", "air", "airband" } },
+            { "ADVANCED",      { "gci", "lowvoice", "lowlat", "stereo",
+                                 "automute", "gate", "breath2", "pitchfloor" } },
+            { "OUTPUT",        { "mix", "gain" } },
+        };
+        return s;
+    }
+    uint32_t lockMask = 0;     // bit i = lockSections()[i] is locked
+    bool isParamLocked (const juce::String& id) const
+    {
+        const auto& secs = lockSections();
+        for (size_t i = 0; i < secs.size(); ++i)
+            if ((lockMask & (1u << i)) != 0)
+                for (const auto& pid : secs[i].ids)
+                    if (pid == id) return true;
+        return false;
+    }
+
+    // Snapshot-based undo/redo for sound-changing operations. Manual knob
+    // movements are coalesced by poll() (driven by the editor's timer) into
+    // one step per burst once the values settle; grouped operations (preset
+    // load, Reset All, Auto-Set, Refine) wrap their writes in group() so
+    // ten parameter changes undo as a single step. Lock/unlock itself is
+    // deliberately NOT undoable (spec). Host automation while the editor is
+    // open also lands in the history; that is accepted for now.
+    struct ParamHistory
+    {
+        void init (juce::AudioProcessor& p) { proc = &p; committed = snap(); }
+
+        std::vector<float> snap() const
+        {
+            std::vector<float> v;
+            for (auto* p : proc->getParameters())
+                v.push_back (p->getValue());
+            return v;
+        }
+
+        // editor timer (~3 Hz): commit a settled burst of manual edits
+        void poll()
+        {
+            auto cur = snap();
+            if (cur == committed) { pendingActive = false; return; }
+            if (pendingActive && cur == pending)
+            {
+                push (undoStack, committed);
+                committed = std::move (cur);
+                redoStack.clear();
+                pendingActive = false;
+            }
+            else { pending = std::move (cur); pendingActive = true; }
+        }
+
+        template <typename Fn>
+        void group (Fn&& applyChanges)
+        {
+            commitPending();       // manual edits first, as their own step
+            applyChanges();
+            commitPending();       // then the whole group as ONE step
+        }
+
+        bool canUndo() const { return ! undoStack.empty(); }
+        bool canRedo() const { return ! redoStack.empty(); }
+
+        bool undo()
+        {
+            commitPending();
+            if (undoStack.empty()) return false;
+            redoStack.push_back (committed);
+            committed = undoStack.back();  undoStack.pop_back();
+            restore (committed);
+            return true;
+        }
+
+        bool redo()
+        {
+            commitPending();
+            if (redoStack.empty()) return false;
+            undoStack.push_back (committed);
+            committed = redoStack.back();  redoStack.pop_back();
+            restore (committed);
+            return true;
+        }
+
+    private:
+        void commitPending()
+        {
+            auto cur = snap();
+            if (cur != committed)
+            {
+                push (undoStack, committed);
+                committed = std::move (cur);
+                redoStack.clear();
+            }
+            pendingActive = false;
+        }
+
+        void restore (const std::vector<float>& s)
+        {
+            const auto& ps = proc->getParameters();
+            for (int i = 0; i < ps.size() && i < (int) s.size(); ++i)
+                if (ps[i]->getValue() != s[(size_t) i])
+                {
+                    ps[i]->beginChangeGesture();
+                    ps[i]->setValueNotifyingHost (s[(size_t) i]);
+                    ps[i]->endChangeGesture();
+                }
+        }
+
+        static void push (std::vector<std::vector<float>>& st, std::vector<float> s)
+        {
+            st.push_back (std::move (s));
+            if (st.size() > 64) st.erase (st.begin());   // history depth cap
+        }
+
+        juce::AudioProcessor* proc = nullptr;
+        std::vector<float> committed, pending;
+        std::vector<std::vector<float>> undoStack, redoStack;
+        bool pendingActive = false;
+    };
+    ParamHistory history;
+
     // STATUS row (UI): estimated internal latency in samples, updated on the
     // audio thread. uiLatencySamples = engine lookahead + enabled hosted FX;
     // uiFxLatSamples = the hosted-FX share of that (for the breakdown text).

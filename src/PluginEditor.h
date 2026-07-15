@@ -671,14 +671,28 @@ private:
         });
     }
 
+    // writes one parameter, skipping locked sections (nSet / nLocked feed
+    // the "N updated, M locked" line under Auto-Set / Refine)
     void setP (const char* id, float v)
     {
         if (auto* p = proc.apvts.getParameter (id))
         {
+            if (proc.isParamLocked (id)) { ++nLocked; return; }
+            ++nSet;
             p->beginChangeGesture();
             p->setValueNotifyingHost (p->convertTo0to1 (v));
             p->endChangeGesture();
         }
+    }
+
+    juce::String setSummary() const
+    {
+        auto s = juce::String::fromUTF8 ("自動設定: ") + juce::String (nSet)
+               + juce::String::fromUTF8 ("項目を更新");
+        if (nLocked > 0)
+            s += juce::String::fromUTF8 ("、") + juce::String (nLocked)
+               + juce::String::fromUTF8 ("項目はロック保持");
+        return s;
     }
 
     void apply()
@@ -700,46 +714,52 @@ private:
         const float formant = juce::jlimit (-24.0f, 24.0f, (sh[0] + sh[1] + sh[2]) / 3.0f);
         const float tilt = juce::jlimit (-4.0f, 4.0f, 0.25f * (prof2.tiltDb - prof1.tiltDb));
 
-        setP ("pitch",   pitch);
-        setP ("formant", formant);
-        // Per-formant trims stay deliberately small: the global Formant knob
-        // carries the bulk of the shift, and large individual warps sound
-        // dry / electronic. Half the measured difference, tightly clamped.
-        const char* sid[3] = { "f1shift", "f2shift", "f3shift" };
-        const char* gid[3] = { "f1gain",  "f2gain",  "f3gain"  };
-        for (int i = 0; i < 3; ++i)
-        {
-            setP (sid[i], juce::jlimit (-3.0f, 3.0f, 0.5f * (sh[i] - formant)));
-            setP (gid[i], juce::jlimit (-8.0f, 8.0f, 0.5f * (prof2.L[i] - prof1.L[i])));
-        }
-        setP ("tilt", tilt);
-        juce::String extra;
-        if (prof1.f0SpreadSt > 0.3f && prof2.f0SpreadSt > 0.3f)
-        {
-            const float range = juce::jlimit (50.0f, 200.0f,
-                                              kRangeBoost * 100.0f * prof2.f0SpreadSt / prof1.f0SpreadSt);
-            setP ("range",  range);
-            setP ("center", juce::jlimit (80.0f, 400.0f, prof2.f0Hz));
-            extra = juce::String::formatted ("  range %.0f%%  center %.0f Hz", range, prof2.f0Hz);
-        }
-
         // High Range guard: engage just above YOUR normal speaking range so
         // laughs get tamed but plain talking is unaffected. Pitch Floor: the
         // lower edge of the TARGET's range keeps the converted voice from
         // dropping out of character.
         const float hifreq = juce::jlimit (150.0f, 600.0f,
                                  prof1.f0Hz * std::pow (2.0f, (prof1.f0SpreadSt + 2.0f) / 12.0f));
-        setP ("hifreq",    hifreq);
-        setP ("hipitch",   50.0f);
-        setP ("hiformant", 100.0f);
         const float pfloor = juce::jlimit (0.0f, 300.0f,
                                  prof2.f0Hz * std::pow (2.0f, -(prof2.f0SpreadSt + 1.0f) / 12.0f));
-        setP ("pitchfloor", pfloor);
+
+        // all writes as ONE undo step; locked sections are kept (setP skips)
+        juce::String extra;
+        nSet = nLocked = 0;
+        proc.history.group ([&]
+        {
+            setP ("pitch",   pitch);
+            setP ("formant", formant);
+            // Per-formant trims stay deliberately small: the global Formant knob
+            // carries the bulk of the shift, and large individual warps sound
+            // dry / electronic. Half the measured difference, tightly clamped.
+            const char* sid[3] = { "f1shift", "f2shift", "f3shift" };
+            const char* gid[3] = { "f1gain",  "f2gain",  "f3gain"  };
+            for (int i = 0; i < 3; ++i)
+            {
+                setP (sid[i], juce::jlimit (-3.0f, 3.0f, 0.5f * (sh[i] - formant)));
+                setP (gid[i], juce::jlimit (-8.0f, 8.0f, 0.5f * (prof2.L[i] - prof1.L[i])));
+            }
+            setP ("tilt", tilt);
+            if (prof1.f0SpreadSt > 0.3f && prof2.f0SpreadSt > 0.3f)
+            {
+                const float range = juce::jlimit (50.0f, 200.0f,
+                                                  kRangeBoost * 100.0f * prof2.f0SpreadSt / prof1.f0SpreadSt);
+                setP ("range",  range);
+                setP ("center", juce::jlimit (80.0f, 400.0f, prof2.f0Hz));
+                extra = juce::String::formatted ("  range %.0f%%  center %.0f Hz", range, prof2.f0Hz);
+            }
+            setP ("hifreq",    hifreq);
+            setP ("hipitch",   50.0f);
+            setP ("hiformant", 100.0f);
+            setP ("pitchfloor", pfloor);
+        });
 
         outLbl.setText (juce::String::fromUTF8 ("設定しました → MAINタブで確認・微調整してください。\n")
                         + juce::String::formatted ("pitch %+.1f st   formant %+.1f st   tilt %+.1f dB", pitch, formant, tilt)
                         + extra
-                        + juce::String::formatted ("\nhigh-range start %.0f Hz   pitch floor %.0f Hz", hifreq, pfloor),
+                        + juce::String::formatted ("\nhigh-range start %.0f Hz   pitch floor %.0f Hz", hifreq, pfloor)
+                        + "\n" + setSummary(),
                         juce::dontSendNotification);
         graph.repaint();
     }
@@ -758,31 +778,38 @@ private:
         auto cur = [this] (const char* id) { return proc.apvts.getRawParameterValue (id)->load(); };
         auto st  = [] (float a, float b)   { return 12.0f * std::log2 (a / b); };
 
-        const float dPitch = juce::jlimit (-6.0f, 6.0f, st (prof2.f0Hz, pc.f0Hz) - kPitchBias);
-        setP ("pitch", juce::jlimit (-24.0f, 24.0f, cur ("pitch") + 0.8f * dPitch));
-
-        float sh[3];
-        for (int i = 0; i < 3; ++i) sh[i] = st (prof2.F[i], pc.F[i]);
-        const float dFmt = juce::jlimit (-6.0f, 6.0f, (sh[0] + sh[1] + sh[2]) / 3.0f);
-        setP ("formant", juce::jlimit (-24.0f, 24.0f, cur ("formant") + 0.7f * dFmt));
-
-        const char* sid[3] = { "f1shift", "f2shift", "f3shift" };
-        const char* gid[3] = { "f1gain",  "f2gain",  "f3gain"  };
-        for (int i = 0; i < 3; ++i)
+        // all writes as ONE undo step; locked sections are kept (setP skips)
+        float dPitch = 0.0f, dFmt = 0.0f;
+        nSet = nLocked = 0;
+        proc.history.group ([&]
         {
-            setP (sid[i], juce::jlimit (-3.0f, 3.0f, cur (sid[i]) + 0.4f * (sh[i] - dFmt)));
-            setP (gid[i], juce::jlimit (-8.0f, 8.0f, cur (gid[i]) + 0.4f * (prof2.L[i] - pc.L[i])));
-        }
-        const float dTilt = 0.25f * (prof2.tiltDb - pc.tiltDb);
-        setP ("tilt", juce::jlimit (-6.0f, 6.0f, cur ("tilt") + juce::jlimit (-1.5f, 1.5f, dTilt)));
-        if (prof2.f0SpreadSt > 0.3f && pc.f0SpreadSt > 0.3f)
-            setP ("range", juce::jlimit (50.0f, 200.0f,
-                     cur ("range") * juce::jlimit (0.75f, 1.35f,
-                                                   kRangeBoost * prof2.f0SpreadSt / pc.f0SpreadSt)));
+            dPitch = juce::jlimit (-6.0f, 6.0f, st (prof2.f0Hz, pc.f0Hz) - kPitchBias);
+            setP ("pitch", juce::jlimit (-24.0f, 24.0f, cur ("pitch") + 0.8f * dPitch));
+
+            float sh[3];
+            for (int i = 0; i < 3; ++i) sh[i] = st (prof2.F[i], pc.F[i]);
+            dFmt = juce::jlimit (-6.0f, 6.0f, (sh[0] + sh[1] + sh[2]) / 3.0f);
+            setP ("formant", juce::jlimit (-24.0f, 24.0f, cur ("formant") + 0.7f * dFmt));
+
+            const char* sid[3] = { "f1shift", "f2shift", "f3shift" };
+            const char* gid[3] = { "f1gain",  "f2gain",  "f3gain"  };
+            for (int i = 0; i < 3; ++i)
+            {
+                setP (sid[i], juce::jlimit (-3.0f, 3.0f, cur (sid[i]) + 0.4f * (sh[i] - dFmt)));
+                setP (gid[i], juce::jlimit (-8.0f, 8.0f, cur (gid[i]) + 0.4f * (prof2.L[i] - pc.L[i])));
+            }
+            const float dTilt = 0.25f * (prof2.tiltDb - pc.tiltDb);
+            setP ("tilt", juce::jlimit (-6.0f, 6.0f, cur ("tilt") + juce::jlimit (-1.5f, 1.5f, dTilt)));
+            if (prof2.f0SpreadSt > 0.3f && pc.f0SpreadSt > 0.3f)
+                setP ("range", juce::jlimit (50.0f, 200.0f,
+                         cur ("range") * juce::jlimit (0.75f, 1.35f,
+                                                       kRangeBoost * prof2.f0SpreadSt / pc.f0SpreadSt)));
+        });
 
         outLbl.setText (juce::String::fromUTF8 ("再調整しました(残差が小さくなるまで繰り返せます)。\n")
                         + juce::String::formatted ("residual: pitch %+.1f st  formant %+.1f st  tilt %+.1f dB",
-                                                   dPitch, dFmt, prof2.tiltDb - pc.tiltDb),
+                                                   dPitch, dFmt, prof2.tiltDb - pc.tiltDb)
+                        + "\n" + setSummary(),
                         juce::dontSendNotification);
     }
 
@@ -791,6 +818,7 @@ private:
 
     VoxMorphProcessor& proc;
     VoiceProfile prof1, prof2, profC;
+    int nSet = 0, nLocked = 0;      // last Auto-Set / Refine write counters
     ProfileGraph graph;
     bool waitingCapture = false, waitingRefine = false, playStartedByCapture = false;
     juce::TextButton recBtn { "Record My Voice" }, loadBtn { "Load Target File..." },
@@ -967,16 +995,47 @@ private:
             setStatus (juce::String::fromUTF8 ("プリセットを選択してください。"));
             return;
         }
-        if (auto xml = juce::XmlDocument::parse (files.getReference (idx)))
+        auto xml = juce::XmlDocument::parse (files.getReference (idx));
+        if (xml == nullptr || ! xml->hasTagName (proc.apvts.state.getType()))
         {
-            if (xml->hasTagName (proc.apvts.state.getType()))
-            {
-                proc.apvts.replaceState (juce::ValueTree::fromXml (*xml));
-                setStatus (juce::String::fromUTF8 ("読み込みました: ") + presetBox.getText());
-                return;
-            }
+            setStatus (juce::String::fromUTF8 ("読み込みに失敗しました(壊れたファイル?)"));
+            return;
         }
-        setStatus (juce::String::fromUTF8 ("読み込みに失敗しました(壊れたファイル?)"));
+
+        // Apply per parameter instead of replaceState: locked sections keep
+        // their current values, and the whole load is ONE undo step.
+        // Parameters missing from the file fall back to their defaults
+        // (matching the old full-state replace for complete presets).
+        int applied = 0, lockedKept = 0;
+        proc.history.group ([&]
+        {
+            for (auto* p : proc.getParameters())
+                if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
+                {
+                    float norm = rp->getDefaultValue();
+                    if (auto* e = xml->getChildByAttribute ("id", rp->paramID))
+                        norm = rp->convertTo0to1 ((float) e->getDoubleAttribute ("value"));
+                    if (proc.isParamLocked (rp->paramID))
+                    {
+                        if (std::abs (norm - rp->getValue()) > 1.0e-4f) ++lockedKept;
+                        continue;
+                    }
+                    if (norm != rp->getValue())
+                    {
+                        rp->beginChangeGesture();
+                        rp->setValueNotifyingHost (norm);
+                        rp->endChangeGesture();
+                        ++applied;
+                    }
+                }
+        });
+        auto msg = juce::String::fromUTF8 ("読み込みました: ") + presetBox.getText()
+                 + juce::String::fromUTF8 (" (") + juce::String (applied)
+                 + juce::String::fromUTF8 ("項目を更新");
+        if (lockedKept > 0)
+            msg += juce::String::fromUTF8 ("、") + juce::String (lockedKept)
+                 + juce::String::fromUTF8 ("項目はロック保持");
+        setStatus (msg + juce::String::fromUTF8 (")。Undoで戻せます。"));
     }
 
     // preview: apply the preset's key settings to a standard reference voice
@@ -1105,14 +1164,24 @@ private:
 
     void resetAll()
     {
-        for (auto* p : proc.getParameters())
-            if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
-            {
-                rp->beginChangeGesture();
-                rp->setValueNotifyingHost (rp->getDefaultValue());
-                rp->endChangeGesture();
-            }
-        setStatus (juce::String::fromUTF8 ("全パラメータを初期値に戻しました。"));
+        // ONE undo step; locked sections keep their values
+        int kept = 0;
+        proc.history.group ([&]
+        {
+            for (auto* p : proc.getParameters())
+                if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
+                {
+                    if (proc.isParamLocked (rp->paramID)) { ++kept; continue; }
+                    rp->beginChangeGesture();
+                    rp->setValueNotifyingHost (rp->getDefaultValue());
+                    rp->endChangeGesture();
+                }
+        });
+        auto msg = juce::String::fromUTF8 ("全パラメータを初期値に戻しました");
+        if (kept > 0)
+            msg += juce::String::fromUTF8 ("(") + juce::String (kept)
+                 + juce::String::fromUTF8 ("項目はロック保持)");
+        setStatus (msg + juce::String::fromUTF8 ("。Undoで戻せます。"));
     }
 
     void setStatus (const juce::String& s) { status.setText (s, juce::dontSendNotification); }
@@ -1528,6 +1597,12 @@ struct FnComponent : public juce::Component
     void resized() override { if (fn) fn(); }
 };
 
+struct FnTimer : public juce::Timer
+{
+    std::function<void()> fn;
+    void timerCallback() override { if (fn) fn(); }
+};
+
 class VoxMorphEditor : public juce::AudioProcessorEditor,
                        private juce::Timer
 {
@@ -1582,7 +1657,7 @@ public:
         content.addAndMakeVisible (status);    // realtime status (latency)
         items.push_back ({ &status, 26 });
 
-        addSection ("PITCH");
+        addSection ("PITCH", 0);
         addSliderRow ("pitch", "Pitch (semitones)",
             tip ("Shifts the pitch in semitones. The timbre (formants) stays unchanged. "
                  "Male-to-female: +5 to +7. Female-to-male: around -5.",
@@ -1597,7 +1672,7 @@ public:
             tip ("The fixed pitch (Hz) used while Robotize is on.",
                  "Robotizeがオンのとき固定されるピッチ(Hz)。"));
 
-        addSection ("HIGH RANGE");
+        addSection ("HIGH RANGE", 1);
         addSliderRow ("hifreq", "High Range Start (Hz)",
             tip ("When your INPUT pitch (before conversion) rises above this - laughing, squealing, "
                  "exclamations - the Pitch/Formant shifts blend smoothly toward the High amounts "
@@ -1618,7 +1693,7 @@ public:
                  "高音域で残すFormantシフトの割合。通常は100%のまま(声色は保ちつつピッチだけ"
                  "落ち着かせる)が自然です。"));
 
-        addSection ("FORMANT");
+        addSection ("FORMANT", 2);
         addSliderRow ("formant", "Formant (semitones)",
             tip ("Changes the vocal-tract size = the timbre, without changing pitch. "
                  "+ sounds younger/feminine, - sounds deeper/masculine. +3 to +4 for male-to-female.",
@@ -1658,7 +1733,7 @@ public:
                  "this region carries much of a voice's charm.",
                  "第3フォルマント付近の強さ。上げると艶・張りが出ます。声の「華」が乗る帯域です。"));
 
-        addSection ("INTONATION");
+        addSection ("INTONATION", 3);
         addSliderRow ("range", "Intonation Amount (%)",
             tip ("Exaggerates or flattens the pitch movement (intonation). 100% = unchanged. "
                  "Unlike 'Pitch', which moves the whole voice up or down, this scales only the movement. "
@@ -1672,7 +1747,7 @@ public:
                  "抑揚を拡大/縮小するときの中心になる音程。変換後の声の平均的な高さに"
                  "合わせてください(女声なら200〜250Hz)。Amountが100%のときは無効。"));
 
-        addSection ("VOICE QUALITY");
+        addSection ("VOICE QUALITY", 4);
         addSliderRow ("tilt", "Softness / Tilt (dB)",
             tip ("Spectral tilt of the voice. + is softer and warmer, - is brighter and more present. "
                  "Start around +/-2 dB.",
@@ -1699,7 +1774,7 @@ public:
                  "下げるほど中音域まで効いて効果が強くなります。効きが弱いと感じたら700〜900に。"
                  "音程を動かしたときにザラつきや元の声の高さの残りが聴こえる場合は上げてください。"));
 
-        addSection ("ADVANCED");
+        addSection ("ADVANCED", 5);
         addToggleRow ("gci", "GCI Grain Sync (Beta)",
             tip ("EXPERIMENTAL. Aligns the internal grain cutting to the glottal closure instants "
                  "(the exact moments the vocal folds snap shut) and keeps them phase-locked from "
@@ -1766,7 +1841,7 @@ public:
                  "話しているうちに声が低くなりすぎる場合の補正用。0=オフ。"
                  "女声化なら140〜180が目安です。"));
 
-        addSection ("OUTPUT");
+        addSection ("OUTPUT", 6);
         addSliderRow ("mix", "Mix",
             tip ("Balance between the converted voice (1.0) and the original (0.0). Usually 1.0.",
                  "変換した声(1.0)と元の声(0.0)の割合。通常は1.0のままにします。"));
@@ -1788,6 +1863,33 @@ public:
         contentHeight = 20;
         for (auto& it : items) contentHeight += it.h;
         contentHeight += 52;
+
+        // Undo / Redo (top-right, over the tab strip) + history poller.
+        // The poller turns a settled burst of manual knob edits into one
+        // undo step and keeps the buttons / lock UI in sync.
+        addAndMakeVisible (undoBtn);
+        addAndMakeVisible (redoBtn);
+        undoBtn.setEnabled (false);
+        redoBtn.setEnabled (false);
+        undoBtn.setTooltip (tip (
+            "Undo the last sound-changing operation: knob edits, a preset load, "
+            "'Reset All' or an Analyze Auto-Set / Refine (each counts as one step).",
+            "直前の「音が変わる操作」を取り消します。つまみ操作・プリセット読込・"
+            "Reset All・AnalyzeのAuto-Set/Refineが対象で、一括変更は1回のUndoで戻ります。"));
+        redoBtn.setTooltip (tip ("Redo the operation you just undid.",
+                                 "取り消した操作をやり直します。"));
+        undoBtn.onClick = [this] { proc.history.undo(); };
+        redoBtn.onClick = [this] { proc.history.redo(); };
+        histPoll.fn = [this]
+        {
+            proc.history.poll();
+            undoBtn.setEnabled (proc.history.canUndo());
+            redoBtn.setEnabled (proc.history.canRedo());
+            if (lastLockMask != proc.lockMask)   // e.g. host restored state
+                syncLockUI();
+        };
+        histPoll.startTimerHz (3);
+        syncLockUI();
 
         setResizable (true, true);
         setResizeLimits (440, 320, 900, contentHeight + 50);
@@ -1838,6 +1940,9 @@ public:
         if (fxBar.isVisible())
             fxBar.setBounds (r.removeFromTop (30));
         tabs.setBounds (r);
+        auto tb = r.removeFromTop (30);       // over the tab strip's right end
+        redoBtn.setBounds (tb.removeFromRight (58).reduced (3, 4));
+        undoBtn.setBounds (tb.removeFromRight (58).reduced (3, 4));
     }
 
     // Standalone: switch the app window to the OS-native title bar (like
@@ -1961,15 +2066,82 @@ private:
     };
 
     // ---- builders -----------------------------------------------------------
-    void addSection (const char* text)
+    // section header with an optional Lock toggle. lockSec = index into
+    // VoxMorphProcessor::lockSections() (-1 = not lockable, e.g. VISUALIZER).
+    struct SectionHeader : public juce::Component
     {
-        auto lbl = std::make_unique<juce::Label>();
-        lbl->setText (text, juce::dontSendNotification);
-        lbl->setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-        lbl->setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));   // section mint
-        content.addAndMakeVisible (*lbl);
-        items.push_back ({ lbl.get(), 26 });
-        owned.push_back (std::move (lbl));
+        juce::Label      name;
+        juce::TextButton lock { "Lock" };
+        SectionHeader()
+        {
+            addAndMakeVisible (name);
+            addAndMakeVisible (lock);
+            lock.setClickingTogglesState (true);
+        }
+        void resized() override
+        {
+            auto r = getLocalBounds();
+            lock.setBounds (r.removeFromRight (56).reduced (2, 3));
+            name.setBounds (r);
+        }
+    };
+
+    void addSection (const char* text, int lockSec = -1)
+    {
+        curSection = lockSec;       // rows added after this belong to it
+        if (lockSec < 0)
+        {
+            auto lbl = std::make_unique<juce::Label>();
+            lbl->setText (text, juce::dontSendNotification);
+            lbl->setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
+            lbl->setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));   // section mint
+            content.addAndMakeVisible (*lbl);
+            items.push_back ({ lbl.get(), 26 });
+            owned.push_back (std::move (lbl));
+            return;
+        }
+
+        auto hdr = std::make_unique<SectionHeader>();
+        hdr->name.setText (text, juce::dontSendNotification);
+        hdr->name.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
+        hdr->name.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+        hdr->lock.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xfff08ba5));
+        hdr->lock.setColour (juce::TextButton::textColourOnId,   juce::Colours::white);
+        hdr->lock.setTooltip (tip (
+            "Locks this whole section. While locked, the controls are greyed out and the "
+            "values are protected from everything: manual edits, the reset arrows, preset "
+            "loading, 'Reset All' and Analyze Auto-Set / Refine. Lock/unlock itself is not "
+            "part of the undo history.",
+            "このセクション全体をロックします。ロック中はコントロールがグレーアウトし、"
+            "手動操作・↺リセット・プリセット読込・Reset All・AnalyzeのAuto-Set/Refineの"
+            "いずれでも値が変わりません。ロック操作自体はUndo対象外です。"));
+        SectionHeader* h = hdr.get();
+        hdr->lock.onClick = [this, lockSec, h]
+        {
+            const uint32_t bit = 1u << lockSec;
+            proc.lockMask = h->lock.getToggleState() ? (proc.lockMask | bit)
+                                                     : (proc.lockMask & ~bit);
+            syncLockUI();
+        };
+        if ((int) lockHeaders.size() <= lockSec) lockHeaders.resize ((size_t) lockSec + 1, nullptr);
+        lockHeaders[(size_t) lockSec] = h;
+        content.addAndMakeVisible (*hdr);
+        items.push_back ({ hdr.get(), 26 });
+        owned.push_back (std::move (hdr));
+    }
+
+    // grey out / re-enable the rows of locked sections and mirror the mask
+    // into the header buttons (also called when a host restores the state)
+    void syncLockUI()
+    {
+        for (size_t i = 0; i < lockHeaders.size(); ++i)
+            if (lockHeaders[i] != nullptr)
+                lockHeaders[i]->lock.setToggleState ((proc.lockMask >> i) & 1u,
+                                                     juce::dontSendNotification);
+        for (auto& it : items)
+            if (it.lockSec >= 0)
+                it.comp->setEnabled ((proc.lockMask & (1u << it.lockSec)) == 0);
+        lastLockMask = proc.lockMask;
     }
 
     void addSliderRow (const juce::String& id, const juce::String& displayName, const juce::String& tipText)
@@ -1999,7 +2171,7 @@ private:
         };
 
         content.addAndMakeVisible (*row);
-        items.push_back ({ row.get(), 30 });
+        items.push_back ({ row.get(), 30, curSection });
         owned.push_back (std::move (row));
     }
 
@@ -2011,7 +2183,7 @@ private:
         row->att = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
                         proc.apvts, id, row->toggle);
         content.addAndMakeVisible (*row);
-        items.push_back ({ row.get(), 28 });
+        items.push_back ({ row.get(), 28, curSection });
         owned.push_back (std::move (row));
     }
 
@@ -2034,11 +2206,18 @@ private:
     juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
     int contentHeight = 0;
 
-    struct Item { juce::Component* comp; int h; };
+    struct Item { juce::Component* comp; int h; int lockSec = -1; };
     std::vector<Item> items;
     std::vector<std::unique_ptr<juce::Component>> owned;
     juce::Label footer;
     juce::String defaultFooterText;
+
+    // undo/redo + section locks
+    juce::TextButton undoBtn { "Undo" }, redoBtn { "Redo" };
+    FnTimer  histPoll;
+    std::vector<SectionHeader*> lockHeaders;
+    uint32_t lastLockMask = 0;
+    int      curSection   = -1;    // section index for rows being built
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoxMorphEditor)
 };
