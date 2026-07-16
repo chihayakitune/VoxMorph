@@ -1783,6 +1783,13 @@ public:
                  "ノイズ的な帯域だけを通します。音程を動かしたときに元の声の高さの残り(ゴースト)が"
                  "息側に漏れにくくなり、ささやきや摩擦音の質感も保持されます。量やBandのつまみは"
                  "共通です。オフ=従来アルゴリズム。"));
+        addSliderRow ("airshine", "Air Shine (dB, Beta)",
+            tip ("Natural Air v2 only: extra level for the preserved top air (above ~6 kHz) on its "
+                 "way back into the output. Adds open, airy sparkle without touching the mids or "
+                 "the harmonic body — only the highest breath band comes back louder. Try 2-4 dB.",
+                 "Natural Air v2専用。保持された最上段の空気感(約6kHz以上)を出力へ戻すときだけ"
+                 "音量を持ち上げます。中音域や声の芯には一切触れず、高域の抜け・きらめきを"
+                 "強められます。まずは2〜4dBがおすすめ。"));
 
         addSection ("ADVANCED");
         addToggleRow ("gci", "GCI Grain Sync (Beta)",

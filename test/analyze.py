@@ -211,6 +211,25 @@ rl = np.sqrt((load("out_nav2_sib_leg.wav")**2).mean())
 rb = np.sqrt((load("out_nav2_sib_bac.wav")**2).mean())
 print(f"  5-12k ratio: dry={sd:.3f}  legacy={sl:.3f}  v2={sb:.3f}   RMS legacy={rl:.4f} v2={rb:.4f}")
 
+print("low-pitch ghost, 90 Hz pulse rate +7st (subharmonic structure lives on")
+print("the 45 Hz half-grid; energy there excluding the shifted grid = ghost):")
+f0o90 = 90.0 * 2**(7/12)
+for name, base in [("alternating +-1% ", "out_nav2_alt"),
+                   ("subharmonic -15% ", "out_nav2_sub")]:
+    gl = ghost_db(load(base + "_leg.wav"), 45.0, f0o90)
+    gb = ghost_db(load(base + "_bac.wav"), 45.0, f0o90)
+    print(f"  {name}: legacy={gl:6.1f} dB  v2={gb:6.1f} dB  (v2 <= legacy is good)")
+g90 = ghost_db(load("out_nav2_low90_bac.wav"), 90.0, f0o90)
+print(f"  90Hz steady, v2: old-grid energy={g90:6.1f} dB (compare across versions)")
+
+print("Air Shine (top-band bypass gain only, breathy vowel +7st):")
+for db, path in [(0, "out_nav2_breathy_bac.wav"),
+                 (3, "out_nav2_shine3.wav"),
+                 (6, "out_nav2_shine6.wav")]:
+    x = load(path)
+    print(f"  +{db} dB: 6-16k={band_ratio(x,6000,16000):.5f}  1-4k={band_ratio(x,1000,4000):.4f}"
+          f"  rms={np.sqrt((x*x).mean()):.4f}   (6-16k up, 1-4k & rms ~flat)")
+
 print("control-rate settling after unvoiced->voiced (HF air onset, evaluates")
 print("the 512-sample update + 5 ms gain smoothing; voiced starts at t=1.0s):")
 def onset_ms(path):

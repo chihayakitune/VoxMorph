@@ -97,6 +97,14 @@ public:
         // versions.
         bool  airV2 = false;
 
+        // Air Shine (Beta, Natural Air v2 only): extra gain on the TOP
+        // band's (>6 kHz) bypassed air, on top of the knob's boost. Only
+        // the re-addition into the output is raised — the subtraction from
+        // the grain path is untouched, so the mids/presence balance and the
+        // harmonic content stay exactly as before; the top "air" simply
+        // comes back louder. 0 = neutral.
+        float airShineDb = 0.0f;   // 0..6
+
         // High Range guard (Babisei-style variable pitch): when the INPUT
         // pitch rises above hiRangeHz (laughing, squealing), the pitch and
         // formant shifts blend from their normal amounts toward
@@ -170,7 +178,8 @@ public:
         airMotHold = 0;
         pitchConf = 0.0f;
         for (auto& v : airBandScr)
-            v.assign ((size_t) (kAirN + maxLagLow + 300), 0.0f);
+            v.assign ((size_t) (kAirN + 2 * maxLagLow + 400), 0.0f);
+        airPfx.assign ((size_t) (kAirN + 2 * maxLagLow + 400) + 1, 0.0);
         dbuf.reserve ((size_t) (maxLagLow / 2 + 2));   // no first-call alloc on the audio thread
     }
 
@@ -235,6 +244,7 @@ public:
         // clearly audible.
         airKSplit      = 0.6667f * std::min (1.0f, airAmt);
         airBoost       = 1.0f + 1.2f * std::max (0.0f, airAmt - 1.0f);
+        airShineLin    = std::pow (10.0f, std::clamp (q.airShineDb, 0.0f, 6.0f) / 20.0f);
         if (airV2On != q.airV2)          // mode switch: clear both paths' states
         {
             airV2On = q.airV2;
@@ -377,6 +387,7 @@ public:
                 {
                     tS[b] = on ? airKSplit * wBand[b] * aB[b] : 0.0f;
                     tB[b] = tS[b] * airBoost;
+                    if (b == 3) tB[b] *= airShineLin;   // Air Shine: bypass only
                     tMax  = std::max (tMax, tB[b]);
                     gMax  = std::max ({ gMax, gS2[b], gB2[b] });
                 }
@@ -683,9 +694,9 @@ private:
         const float P    = std::clamp (curP, (float) minLag, (float) maxLagLow);
         const int   lag  = (int) std::lround (P);
         const int   N    = std::clamp ((int) (2.5f * P), 768, kAirN);
-        const int   sr   = std::max (1, (int) (0.02f * P));   // lag search
+        const int   sr2  = std::max (1, (int) (0.04f * P));   // search @2P
         const int   warm = 256;                    // one-pole transient settle
-        const int   span = N + lag + sr + warm;
+        const int   span = N + 2 * lag + sr2 + warm;
         if (writePos < (int64_t) (span + 2 * lag + 4)) return;
 
         // rebuild the comb residual over the span (same predictor as the
@@ -724,6 +735,14 @@ private:
 
         if (! voiced) return;          // split gains are voicing-gated anyway
 
+        // low-f0 caution: long periods make period-doubling / alternating-
+        // period / jittery-fry leakage worst-case (user-reported ghost on
+        // sustained low vowels), and most of that residue's energy sits in
+        // the two lower bands. Below ~130 Hz their keep amount may only
+        // rise slowly; the top bands (the actual "air") stay unaffected.
+        const float lowCons = std::clamp (((float) (fs / (double) P) - 80.0f) / 50.0f,
+                                          0.25f, 1.0f);
+
         // f0-motion gate. Vibrato's maximum slope is only ~0.7 %/frame, so
         // the knee sits at 0.8 %/frame (full block) and any slope above
         // 0.25 %/frame arms a 6-frame hold: the hold keeps the gate closed
@@ -741,21 +760,51 @@ private:
         for (int b = 0; b < 4; ++b)
         {
             const float* x = airBandScr[b].data();
-            double saa = 0.0;
-            for (int i = t0; i < span; ++i) saa += (double) x[i] * x[i];
-            float best = -1.0f;
-            for (int dl = -sr; dl <= sr; ++dl)
+            // prefix energy: O(1) window energies for every candidate lag
+            airPfx[0] = 0.0;
+            for (int i = 0; i < span; ++i)
+                airPfx[(size_t) i + 1] = airPfx[(size_t) i] + (double) x[i] * x[i];
+            const double saa = airPfx[(size_t) span] - airPfx[(size_t) t0];
+            float pk = 0.0f;
+            for (int i = t0; i < span; ++i)
+                pk = std::max (pk, std::abs (x[i]));
+
+            auto rhoAt = [&] (int L) -> float
             {
-                const int L = lag + dl;
-                double sab = 0.0, sbb = 0.0;
+                double sab = 0.0;
                 const float* a = x + t0;
                 const float* c = x + t0 - L;
-                for (int i = 0; i < N; ++i)
+                for (int i = 0; i < N; ++i) sab += (double) a[i] * c[i];
+                const double sbb = airPfx[(size_t) (t0 - L + N)] - airPfx[(size_t) (t0 - L)];
+                return (float) (sab / std::sqrt (saa * sbb + 1.0e-30));
+            };
+
+            // leakage candidate lags: the pitch lag P, its double 2P
+            // (period-doubled / alternating-period / light-fry phonation
+            // repeats at 2P and correlates only weakly at P — the source of
+            // the sustained-low-vowel ghost) and P/2 (octave-low locks).
+            // Each searched +-2 % for the smoothed-curP tracking error
+            // (stride 2, then +-1 refinement around the best hit); the best
+            // rho of all candidates counts as harmonic leakage.
+            float best = -1.0f;
+            const int cand[3] = { lag, 2 * lag, lag / 2 };
+            for (int ci = 0; ci < 3; ++ci)
+            {
+                const int L0 = cand[ci];
+                if (ci == 2 && L0 < minLag) continue;
+                const int srL = std::max (1, (int) (0.02f * (float) L0));
+                int   bl = L0;
+                float bv = rhoAt (L0);
+                for (int dl = 2; dl <= srL; dl += 2)
                 {
-                    sab += (double) a[i] * c[i];
-                    sbb += (double) c[i] * c[i];
+                    float r = rhoAt (L0 - dl);
+                    if (r > bv) { bv = r; bl = L0 - dl; }
+                    r = rhoAt (L0 + dl);
+                    if (r > bv) { bv = r; bl = L0 + dl; }
                 }
-                best = std::max (best, (float) (sab / std::sqrt (saa * sbb + 1.0e-30)));
+                bv = std::max (bv, rhoAt (bl - 1));
+                bv = std::max (bv, rhoAt (bl + 1));
+                best = std::max (best, bv);
             }
 
             // rho -> keep amount = the residual's estimated NOISE share.
@@ -768,13 +817,24 @@ private:
             // would otherwise cost ~15 % of the keep amount on true noise
             float a1 = std::clamp (1.18f * (1.0f - leak) - 0.03f, 0.0f, 1.0f);
 
+            // impulsive-residue guard: randomly-jittered glottal pulses
+            // (low, slightly creaky voices) leave a residue that correlates
+            // at NO lag — technically aperiodic — yet still sounds like the
+            // old pitch, because it is a pulse train. Its crest factor
+            // separates it cleanly from breath noise (Gaussian max over
+            // this frame ~3.5): fade the keep amount out above ~4.5.
+            const float rms   = (float) std::sqrt (saa / (double) N + 1.0e-30);
+            const float crest = pk / std::max (rms, 1.0e-15f);
+            a1 *= std::clamp ((7.0f - crest) / 2.5f, 0.0f, 1.0f);
+
             // noise-floor assist: full keep at >= ~9 dB over the floor,
             // fading to none as the band sinks into the background
             if (airFloorE[b] > 1.0e-13)
                 a1 *= std::clamp ((float) (E[b] / (6.0 * airFloorE[b])) - 0.333f,
                                   0.0f, 1.0f);
 
-            const float rate = (a1 < aB[b]) ? 0.5f : 0.5f * rel;
+            const float rate = (a1 < aB[b]) ? 0.5f
+                             : 0.5f * rel * (b < 2 ? lowCons : 1.0f);
             aB[b] += rate * (a1 - aB[b]);
         }
     }
@@ -1254,10 +1314,12 @@ private:
     double   airFloorE[4] { 0.0, 0.0, 0.0, 0.0 };   // background floor (min stats)
     float    gS2[4] { 0.0f, 0.0f, 0.0f, 0.0f };     // smoothed split gains
     float    gB2[4] { 0.0f, 0.0f, 0.0f, 0.0f };     // smoothed bypass gains
+    float    airShineLin = 1.0f;          // Air Shine top-band bypass gain
     float    airPrevP  = 320.0f;          // control-rate f0-motion tracking
     int      airMotHold = 0;              // frames left in the motion hold
     float    pitchConf = 0.0f;            // YIN clarity 0..1
     std::vector<float> airBandScr[4];     // control-rate band scratch
+    std::vector<double> airPfx;           // prefix band energies (scratch)
 
     // GCI Grain Sync state
     bool    gciOn   = false;

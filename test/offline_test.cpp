@@ -229,6 +229,40 @@ static void addNoise (std::vector<float>& v, double relDb, bool pink, uint32_t s
         v[i] = (float) std::clamp ((double) v[i] + g * nz[i], -1.0, 1.0);
 }
 
+// low-pitch pulse train with alternating period (+/-dev) and alternating
+// pulse amplitude (ampAlt on every 2nd pulse) through vowel resonators —
+// mild vocal-fry / period-doubling / subharmonic textures around 80-120 Hz.
+// These repeat exactly at TWO pulse periods, so their harmonic leakage
+// correlates at 2P but only weakly at P.
+static std::vector<float> makeAltPulse (double f0, double dev, double ampAlt,
+                                        double seconds)
+{
+    const int n = (int) (FS * seconds);
+    std::vector<double> src ((size_t) n, 0.0);
+    double nextPulse = 100.0;
+    bool flip = false;
+    for (int i = 0; i < n; ++i)
+        if ((double) i >= nextPulse)
+        {
+            src[(size_t) i] = flip ? ampAlt : 1.0;
+            nextPulse += (FS / f0) * (flip ? 1.0 - dev : 1.0 + dev);
+            flip = ! flip;
+        }
+    Reso f1 (600.0, 110.0), f2 (1100.0, 130.0), f3 (2500.0, 170.0);
+    std::vector<double> y ((size_t) n, 0.0);
+    double maxA = 1e-12;
+    for (int i = 0; i < n; ++i)
+    {
+        const double s = f1.tick (src[(size_t) i]) + 0.7 * f2.tick (src[(size_t) i])
+                       + 0.3 * f3.tick (src[(size_t) i]);
+        y[(size_t) i] = s;
+        maxA = std::max (maxA, std::abs (s));
+    }
+    std::vector<float> v ((size_t) n, 0.0f);
+    for (int i = 0; i < n; ++i) v[(size_t) i] = (float) (0.7 * y[(size_t) i] / maxA);
+    return v;
+}
+
 // sibilant-like unvoiced noise: white noise high-passed at ~5 kHz
 static std::vector<float> makeSibilant (double seconds)
 {
@@ -590,6 +624,16 @@ int main()
         writeWav ("out_nav2_sib_leg.wav", run (sib, leg));
         writeWav ("out_nav2_sib_bac.wav", run (sib, bac));
 
+        // Air Shine: top-band bypass gain comparison (0/3/6 dB; 0 dB is
+        // out_nav2_breathy_bac). Only the >6k air may rise; mids untouched.
+        {
+            P sh = bac;
+            sh.airShineDb = 3.0f;
+            writeWav ("out_nav2_shine3.wav", run (makeBreathy (120.0, 2.0), sh));
+            sh.airShineDb = 6.0f;
+            writeWav ("out_nav2_shine6.wav", run (makeBreathy (120.0, 2.0), sh));
+        }
+
         std::vector<float> tr = makeNoiseCons (1.0);
         const auto bre = makeBreathy (120.0, 2.0);
         tr.insert (tr.end(), bre.begin(), bre.end());
@@ -603,6 +647,84 @@ int main()
         std::printf ("unvoiced->voiced max sample step: %.3f  %s\n",
                      step, step < 0.5 ? "PASS" : "FAIL");
         if (step >= 0.5) ++naFail;
+    }
+
+    // (g) low-pitch leakage guard (user-reported: sustained low "ah" grows
+    // an old-pitch ghost). Period-doubled / alternating-period / light-
+    // subharmonic phonation repeats at 2P and correlates only weakly at P;
+    // it must be recognised as leakage, not air. Also verifies that aB does
+    // NOT creep upward over a 6 s sustained low vowel (the ghost appearing
+    // "after a few seconds" is exactly that creep).
+    {
+        auto track = [] (const std::vector<float>& in, const P& p,
+                         float aMax[4], float aEnd[4], double& voicedFrac)
+        {
+            PsolaEngine eng;
+            eng.prepare (FS);
+            eng.setParams (p);
+            std::vector<float> out (in.size(), 0.0f);
+            for (int b = 0; b < 4; ++b) { aMax[b] = 0.0f; aEnd[b] = 0.0f; }
+            long vo = 0, tot = 0;
+            for (size_t i = 0; i < in.size(); i += 256)
+            {
+                eng.process (in.data() + i, out.data() + i,
+                             (int) std::min ((size_t) 256, in.size() - i));
+                if (i > (size_t) FS)
+                {
+                    ++tot;  if (eng.isVoiced()) ++vo;
+                    if ((i % 24576) < 256)                    // ~every 0.5 s
+                        for (int b = 0; b < 4; ++b)
+                            aMax[b] = std::max (aMax[b], eng.airBandAperiodicity (b));
+                }
+            }
+            for (int b = 0; b < 4; ++b) aEnd[b] = eng.airBandAperiodicity (b);
+            voicedFrac = tot > 0 ? (double) vo / (double) tot : 0.0;
+            return out;
+        };
+        P pv2; pv2.pitchSemi = 7.0f; pv2.airV2 = true; pv2.airPreserve = 1.0f;
+        P leg = pv2; leg.airV2 = false;
+
+        const auto low90 = makeVowel   (90.0, 90.0, 6.0);
+        const auto altp  = makeAltPulse (90.0, 0.01, 1.0,  6.0);   // stronger and YIN drops to unvoiced
+        const auto subh  = makeAltPulse (90.0, 0.0,  0.85, 6.0);
+
+        float aM[4], aE[4], bM[4], bE[4], cM[4], cE[4];
+        double vfA, vfB, vfC;
+        const auto oLow = track (low90, pv2, aM, aE, vfA);
+        const auto oAlt = track (altp,  pv2, bM, bE, vfB);
+        const auto oSub = track (subh,  pv2, cM, cE, vfC);
+        writeWav ("out_nav2_low90_bac.wav", oLow);
+        writeWav ("out_nav2_alt_bac.wav",   oAlt);
+        writeWav ("out_nav2_sub_bac.wav",   oSub);
+        writeWav ("out_nav2_alt_leg.wav",   run (altp, leg));
+        writeWav ("out_nav2_sub_leg.wav",   run (subh, leg));
+
+        std::printf ("low-pitch keep amounts (max over time / at 6 s), voiced%%:\n");
+        std::printf ("  90Hz steady     : max %.2f/%.2f/%.2f/%.2f  end %.2f/%.2f/%.2f/%.2f  v=%.0f%%\n",
+                     aM[0],aM[1],aM[2],aM[3], aE[0],aE[1],aE[2],aE[3], 100.0*vfA);
+        std::printf ("  alt period +-1%% : max %.2f/%.2f/%.2f/%.2f  end %.2f/%.2f/%.2f/%.2f  v=%.0f%%\n",
+                     bM[0],bM[1],bM[2],bM[3], bE[0],bE[1],bE[2],bE[3], 100.0*vfB);
+        std::printf ("  subharmonic -15%%: max %.2f/%.2f/%.2f/%.2f  end %.2f/%.2f/%.2f/%.2f  v=%.0f%%\n",
+                     cM[0],cM[1],cM[2],cM[3], cE[0],cE[1],cE[2],cE[3], 100.0*vfC);
+
+        // steady low vowel: v2 with air up must stay ~identical to air off
+        P pOff; pOff.pitchSemi = 7.0f;
+        const auto oOff = run (low90, pOff);
+        double de = 0.0, se = 0.0;
+        for (size_t i = oOff.size() / 3; i < oOff.size(); ++i)
+        {
+            const double d = (double) oLow[i] - (double) oOff[i];
+            de += d * d;  se += (double) oOff[i] * oOff[i];
+        }
+        const double relDiff = std::sqrt (de / std::max (se, 1e-30));
+        std::printf ("  90Hz steady, v2 air 1.0 vs air off: rel diff=%.4f  (want ~0)\n", relDiff);
+
+        const bool ok = vfB > 0.7 && vfC > 0.7
+                     && bM[1] < 0.35f && bM[2] < 0.35f
+                     && cM[1] < 0.35f && cM[2] < 0.35f
+                     && relDiff < 0.03;
+        std::printf ("low-pitch leakage guard: %s\n", ok ? "PASS" : "FAIL");
+        if (! ok) ++naFail;
     }
 
     std::printf ("Natural Air v2 checks: %s (%d failure(s))\n",

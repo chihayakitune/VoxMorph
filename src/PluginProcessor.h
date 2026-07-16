@@ -223,6 +223,7 @@ private:
     std::atomic<float>* pAir       = nullptr;
     std::atomic<float>* pAirBand   = nullptr;
     std::atomic<float>* pAir2      = nullptr;
+    std::atomic<float>* pAirShine  = nullptr;
     std::atomic<float>* pGci       = nullptr;
     std::atomic<float>* pHiFreq    = nullptr;
     std::atomic<float>* pHiPitch   = nullptr;
