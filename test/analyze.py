@@ -150,3 +150,80 @@ co, cn = load("out_gci_creak_off.wav"), load("out_gci_creak_on.wav")
 print(f"creaky+7st f0: off={f0_autocorr(co):5.1f}  on={f0_autocorr(cn):5.1f}  "
       f"r(T): off={periodicity(co, 82.4):.4f}  on={periodicity(cn, 82.4):.4f}"
       f"   (compare by listening too)")
+
+print("== Natural Air v2 (band-adaptive comb) vs legacy Air Preserve ==")
+def ghost_db(x, f0in, f0out, n=32768, at=None):
+    """Energy on the ORIGINAL pitch's harmonic grid, excluding bins shared
+    with the shifted grid: the audible 'old-pitch ghost'. Lower is better."""
+    a = at if at is not None else len(x)//3
+    seg = x[a : a+n] * np.hanning(n)
+    mag = np.abs(np.fft.rfft(seg))**2
+    total = mag.sum() + 1e-30
+    outbins = set()
+    for h in range(1, 400):
+        b = int(round(h * f0out * n / FS))
+        if b >= len(mag): break
+        w = max(2, int(0.02 * b))
+        outbins.update(range(b-2*w, b+2*w+1))
+    e = 0.0
+    for h in range(1, 400):
+        b = int(round(h * f0in * n / FS))
+        w = max(2, int(0.02 * b))
+        if b + w >= len(mag): break
+        if any(bb in outbins for bb in range(b-w, b+w+1)): continue
+        e += mag[b-w:b+w+1].sum()
+    return 10*np.log10(e/total + 1e-12)
+
+f0i = 150.0
+f0o = f0i * 2**(7/12)
+print("old-pitch ghost after +7st (energy on the un-shifted harmonic grid):")
+for name, base in [("steady harmonics", "out_nav2_harm"),
+                   ("vibrato 5.5Hz   ", "out_nav2_vib"),
+                   ("harm + white    ", "out_nav2_hw"),
+                   ("harm + pink     ", "out_nav2_hp")]:
+    gl = ghost_db(load(base + "_leg.wav"), f0i, f0o)
+    gb = ghost_db(load(base + "_bac.wav"), f0i, f0o)
+    print(f"  {name}: legacy={gl:6.1f} dB  v2={gb:6.1f} dB  (v2 lower = less leakage)")
+
+print("known-noise retention (HF 4-16k energy ratio, want v2 ~= dry's noise):")
+for name, base in [("white -15dB", "out_nav2_hw"), ("pink  -12dB", "out_nav2_hp")]:
+    d = band_ratio(load(base + "_dry.wav"), 4000, 16000)
+    l = band_ratio(load(base + "_leg.wav"), 4000, 16000)
+    b = band_ratio(load(base + "_bac.wav"), 4000, 16000)
+    print(f"  {name}: dry={d:.4f}  legacy={l:.4f}  v2={b:.4f}")
+
+print("aspiration naturalness on the breathy vowel (HF periodicity @ output lag):")
+bb  = load("out_nav2_breathy_bac.wav")
+bl  = load("out_nav2_breathy_leg.wav")
+f0o2 = 120.0 * 2**(7/12)
+print(f"  dry={hf_periodicity(load('out_air_dry.wav'), f0o2):.3f}  off={hf_periodicity(off, f0o2):.3f}  "
+      f"legacy={hf_periodicity(bl, f0o2):.3f}  v2={hf_periodicity(bb, f0o2):.3f}  (closer to dry = better)")
+print(f"  f0: legacy={f0_autocorr(bl):6.1f}  v2={f0_autocorr(bb):6.1f}  (both ~{f0o2:.0f})")
+fl_ = " ".join(f"{p:5.0f}" for p in formants_lpc(bl))
+fb_ = " ".join(f"{p:5.0f}" for p in formants_lpc(bb))
+print(f"  formants: legacy={fl_}   v2={fb_}   (should match)")
+
+print("sibilant-only input (unvoiced: air path is gated, both should match):")
+sd = band_ratio(load("out_nav2_sib_dry.wav"), 5000, 12000)
+sl = band_ratio(load("out_nav2_sib_leg.wav"), 5000, 12000)
+sb = band_ratio(load("out_nav2_sib_bac.wav"), 5000, 12000)
+rl = np.sqrt((load("out_nav2_sib_leg.wav")**2).mean())
+rb = np.sqrt((load("out_nav2_sib_bac.wav")**2).mean())
+print(f"  5-12k ratio: dry={sd:.3f}  legacy={sl:.3f}  v2={sb:.3f}   RMS legacy={rl:.4f} v2={rb:.4f}")
+
+print("control-rate settling after unvoiced->voiced (HF air onset, evaluates")
+print("the 512-sample update + 5 ms gain smoothing; voiced starts at t=1.0s):")
+def onset_ms(path):
+    x = load(path)
+    X = np.fft.rfft(x)
+    fr = np.fft.rfftfreq(len(x), 1/FS)
+    X[(fr < 3000) | (fr > 10000)] = 0
+    y = np.fft.irfft(X, len(x))
+    hop = int(0.005 * FS)
+    env = np.array([np.sqrt((y[i:i+hop]**2).mean()) for i in range(0, len(y)-hop, hop)])
+    t = np.arange(len(env)) * hop / FS
+    steady = np.median(env[(t > 1.6) & (t < 2.6)])
+    after = np.where((t > 1.0) & (env > 0.8 * steady))[0]
+    return (t[after[0]] - 1.0) * 1000 if len(after) else float('nan')
+print(f"  time to 80% of steady HF: legacy={onset_ms('out_nav2_trans_leg.wav'):.0f} ms  "
+      f"v2={onset_ms('out_nav2_trans_bac.wav'):.0f} ms  (v2 - legacy = added tracking lag)")

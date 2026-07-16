@@ -14,6 +14,8 @@
 //   * Tilt             = source spectral tilt (low/high balance around 1 kHz)
 //   * Air preserve     = mixed harmonic+noise handling: the natural breath
 //                        component bypasses the pitch shifter un-pitched
+//                        (v2 "Natural Air": band-adaptive residual split
+//                        driven by per-band aperiodicity, see airV2)
 
 #pragma once
 #include <vector>
@@ -81,6 +83,20 @@ public:
         // higher keeps only the top "air".
         float airFreqHz   = 1000.0f;   // 300..4000
 
+        // Natural Air v2 (Beta): band-adaptive residual split. Instead of
+        // one fixed high-pass, the comb residual is divided into 4
+        // complementary bands (~700 / 2500 / 6000 Hz crossovers) and each
+        // band's keep gain follows its measured aperiodicity, updated every
+        // 512 samples with confidence gating (see updateAirBands). Strongly
+        // periodic bands stay out of the air path — much less harmonic
+        // leakage / old-pitch ghost — while genuinely noisy bands (breath,
+        // fricatives, whisper) are kept in full, including the presence
+        // region the legacy high-pass threw away. airFreqHz acts as a bias
+        // on the band weights (legacy-compatible reach into the mids).
+        // false = legacy Air Preserve path, bit-identical to previous
+        // versions.
+        bool  airV2 = false;
+
         // High Range guard (Babisei-style variable pitch): when the INPUT
         // pitch rises above hiRangeHz (laughing, squealing), the pitch and
         // formant shifts blend from their normal amounts toward
@@ -145,9 +161,49 @@ public:
         airP   = curP;
         airK   = 1.0f - std::exp ((float) (-1.0 / (0.005 * fs)));          // ~5 ms gate
         hpAirK = 1.0f - std::exp ((float) (-2.0 * M_PI * 1400.0 / fs));    // breath band HP
+
+        airSplit.setup (sampleRate);
+        airSplit.reset();
+        for (int b = 0; b < 4; ++b)
+        { aB[b] = 0.0f; airFloorE[b] = 0.0; gS2[b] = 0.0f; gB2[b] = 0.0f; }
+        airPrevP  = curP;
+        airMotHold = 0;
+        pitchConf = 0.0f;
+        for (auto& v : airBandScr)
+            v.assign ((size_t) (kAirN + maxLagLow + 300), 0.0f);
+        dbuf.reserve ((size_t) (maxLagLow / 2 + 2));   // no first-call alloc on the audio thread
     }
 
     int latencySamples() const { return D; }
+
+    // ---- Natural Air v2: complementary 4-band splitter -------------------
+    // Bands are formed by successive one-pole low-pass subtraction, so
+    // b[0]+b[1]+b[2]+b[3] == x holds exactly for every sample: recombining
+    // with equal gains is perfectly transparent (flat magnitude response,
+    // zero reconstruction error, no phase compensation needed). Public so
+    // the offline harness can verify the reconstruction directly.
+    struct AirBands
+    {
+        float k[3]  { 0.09f, 0.28f, 0.55f };
+        float lp[3] { 0.0f, 0.0f, 0.0f };
+        void setup (double fs)
+        {
+            static constexpr double xover[3] = { 700.0, 2500.0, 6000.0 };
+            for (int i = 0; i < 3; ++i)
+                k[i] = 1.0f - std::exp ((float) (-2.0 * M_PI * xover[i] / fs));
+        }
+        void reset() { lp[0] = lp[1] = lp[2] = 0.0f; }
+        void split (float x, float* b)
+        {
+            lp[0] += k[0] * (x - lp[0]);   b[0] = lp[0];   float h = x - lp[0];
+            lp[1] += k[1] * (h - lp[1]);   b[1] = lp[1];   h -= lp[1];
+            lp[2] += k[2] * (h - lp[2]);   b[2] = lp[2];   b[3] = h - lp[2];
+        }
+    };
+
+    // smoothed per-band aperiodicity estimate (0 = periodic, 1 = noise);
+    // exposed for the offline harness and future UI metering
+    float airBandAperiodicity (int b) const { return aB[std::clamp (b, 0, 3)]; }
 
     // forward FFT for the plugin's spectrum visualizer (reuses the engine's
     // own radix-2 so the UI needs no extra dependencies). n = power of two.
@@ -179,6 +235,22 @@ public:
         // clearly audible.
         airKSplit      = 0.6667f * std::min (1.0f, airAmt);
         airBoost       = 1.0f + 1.2f * std::max (0.0f, airAmt - 1.0f);
+        if (airV2On != q.airV2)          // mode switch: clear both paths' states
+        {
+            airV2On = q.airV2;
+            airSplit.reset();
+            airLp1 = airLp2 = 0.0f;
+            airG = airB = 0.0f;
+            for (int b = 0; b < 4; ++b) { gS2[b] = 0.0f; gB2[b] = 0.0f; }
+        }
+        {   // v2 band weights from the airband knob: bands whose centre sits
+            // above the knob frequency keep full weight, lower bands fade
+            // out over one octave (legacy-compatible reach into the mids)
+            static constexpr float fcB[4] = { 350.0f, 1450.0f, 4000.0f, 10000.0f };
+            const float afq = std::clamp (q.airFreqHz, 300.0f, 4000.0f);
+            for (int b = 0; b < 4; ++b)
+                wBand[b] = std::clamp (0.5f + std::log2 (fcB[b] / afq), 0.0f, 1.0f);
+        }
         gciOn          = q.gciSync;
         hiFreq         = (q.hiRangeHz > 20.0f) ? std::clamp (q.hiRangeHz, 100.0f, 600.0f) : 0.0f;
         hiPAmt         = std::clamp (q.hiPitchAmt,   0.0f, 1.0f);
@@ -256,37 +328,94 @@ public:
         // on voicing and dezippers knob moves; when it is fully off the
         // buffers are a plain copy and the comb is skipped (no CPU cost).
         {
-            const bool  on      = voiced && airAmt > 0.001f;
-            const float tSplit  = on ? airKSplit            : 0.0f;
-            const float tBypass = on ? airKSplit * airBoost : 0.0f;
-            if (tSplit > 0.0f || airG > 1.0e-4f)
+            const bool on = voiced && airAmt > 0.001f;
+            if (! airV2On)
             {
-                for (int i = 0; i < n; ++i)
+                // ---- legacy path (v0.6.x): single high-passed residual ----
+                const float tSplit  = on ? airKSplit            : 0.0f;
+                const float tBypass = on ? airKSplit * airBoost : 0.0f;
+                if (tSplit > 0.0f || airG > 1.0e-4f)
                 {
-                    const int64_t pos = start + i;
-                    const size_t  idx = (size_t) (pos & kMask);
-                    airG += airK * (tSplit  - airG);
-                    airB += airK * (tBypass - airB);
-                    airP += 0.002f * (curP - airP);        // ~10 ms period glide
-                    const double P = (double) std::max (32.0f, airP);
-                    const float per = 0.5f * (readCubic ((double) pos - P)
-                                            + readCubic ((double) pos - 2.0 * P));
-                    float res = inBuf[idx] - per;
-                    airLp1 += hpAirK * (res - airLp1);  res -= airLp1;
-                    airLp2 += hpAirK * (res - airLp2);  res -= airLp2;
-                    noiseBuf[idx] = airB * res;
-                    harmBuf[idx]  = inBuf[idx] - airG * res;
+                    for (int i = 0; i < n; ++i)
+                    {
+                        const int64_t pos = start + i;
+                        const size_t  idx = (size_t) (pos & kMask);
+                        airG += airK * (tSplit  - airG);
+                        airB += airK * (tBypass - airB);
+                        airP += 0.002f * (curP - airP);        // ~10 ms period glide
+                        const double P = (double) std::max (32.0f, airP);
+                        const float per = 0.5f * (readCubic ((double) pos - P)
+                                                + readCubic ((double) pos - 2.0 * P));
+                        float res = inBuf[idx] - per;
+                        airLp1 += hpAirK * (res - airLp1);  res -= airLp1;
+                        airLp2 += hpAirK * (res - airLp2);  res -= airLp2;
+                        noiseBuf[idx] = airB * res;
+                        harmBuf[idx]  = inBuf[idx] - airG * res;
+                    }
+                }
+                else
+                {
+                    for (int i = 0; i < n; ++i)
+                    {
+                        const size_t idx = (size_t) ((start + i) & kMask);
+                        harmBuf[idx]  = inBuf[idx];
+                        noiseBuf[idx] = 0.0f;
+                    }
+                    airG = airB = 0.0f;  airLp1 = airLp2 = 0.0f;  airP = curP;
                 }
             }
             else
             {
-                for (int i = 0; i < n; ++i)
+                // ---- Natural Air v2: band-adaptive comb ----
+                // Same causal comb residual, but split into 4 complementary
+                // bands whose keep gains follow the measured per-band
+                // aperiodicity (control rate, see updateAirBands). While the
+                // knob is <= 1.0 the bypass gains equal the split gains, so
+                // harmBuf + noiseBuf reconstructs the input exactly.
+                float tS[4], tB[4], tMax = 0.0f, gMax = 0.0f;
+                for (int b = 0; b < 4; ++b)
                 {
-                    const size_t idx = (size_t) ((start + i) & kMask);
-                    harmBuf[idx]  = inBuf[idx];
-                    noiseBuf[idx] = 0.0f;
+                    tS[b] = on ? airKSplit * wBand[b] * aB[b] : 0.0f;
+                    tB[b] = tS[b] * airBoost;
+                    tMax  = std::max (tMax, tB[b]);
+                    gMax  = std::max ({ gMax, gS2[b], gB2[b] });
                 }
-                airG = airB = 0.0f;  airLp1 = airLp2 = 0.0f;  airP = curP;
+                if (tMax > 0.0f || gMax > 1.0e-4f)
+                {
+                    for (int i = 0; i < n; ++i)
+                    {
+                        const int64_t pos = start + i;
+                        const size_t  idx = (size_t) (pos & kMask);
+                        airP += 0.002f * (curP - airP);        // ~10 ms period glide
+                        const double P = (double) std::max (32.0f, airP);
+                        const float per = 0.5f * (readCubic ((double) pos - P)
+                                                + readCubic ((double) pos - 2.0 * P));
+                        float bnd[4];
+                        airSplit.split (inBuf[idx] - per, bnd);
+                        float sub = 0.0f, air = 0.0f;
+                        for (int b = 0; b < 4; ++b)
+                        {
+                            gS2[b] += airK * (tS[b] - gS2[b]);
+                            gB2[b] += airK * (tB[b] - gB2[b]);
+                            sub += gS2[b] * bnd[b];
+                            air += gB2[b] * bnd[b];
+                        }
+                        noiseBuf[idx] = air;
+                        harmBuf[idx]  = inBuf[idx] - sub;
+                    }
+                }
+                else
+                {
+                    for (int i = 0; i < n; ++i)
+                    {
+                        const size_t idx = (size_t) ((start + i) & kMask);
+                        harmBuf[idx]  = inBuf[idx];
+                        noiseBuf[idx] = 0.0f;
+                    }
+                    airSplit.reset();
+                    for (int b = 0; b < 4; ++b) { gS2[b] = 0.0f; gB2[b] = 0.0f; }
+                    airP = curP;
+                }
             }
         }
 
@@ -303,6 +432,8 @@ public:
         if (sinceDetect >= 512 && writePos >= kDetN + maxLag)
         {
             detectPitch();
+            if (airV2On && airAmt > 0.001f)
+                updateAirBands();
             sinceDetect = 0;
         }
 
@@ -357,7 +488,8 @@ private:
 
         double energy = 0.0;
         for (int i = 0; i < kDetN; ++i) energy += (double) tmp[(size_t)i] * tmp[(size_t)i];
-        if (energy / kDetN < 1.0e-8) { voiced = false; holdCount = 0; lastGci = -1; return; }
+        if (energy / kDetN < 1.0e-8)
+        { voiced = false; holdCount = 0; lastGci = -1; pitchConf = 0.0f; return; }
 
         // ---- decimate x2: the CMND search runs on a half-rate copy, cutting
         // this burst (which lands on a SINGLE block every 512 samples) ~4x.
@@ -431,11 +563,13 @@ private:
             if (lowVoice && voiced && holdCount < kHoldMax)
             {
                 ++holdCount;
+                pitchConf *= 0.8f;           // held pitch: decaying trust
                 return;                      // keep previous curP, stay voiced
             }
             voiced = false;
             holdCount = 0;
             lastGci = -1;
+            pitchConf = 0.0f;
             return;
         }
         holdCount = 0;
@@ -466,6 +600,10 @@ private:
                     lag = nl;   // higher dip was weak - keep current octave
             }
         }
+
+        // YIN clarity of this frame (0..1). Natural Air v2 uses it to decide
+        // how far the fixed-lag periodicity measurements can be trusted.
+        pitchConf = (float) std::clamp (1.0 - d[(size_t) lag] / confThr, 0.0, 1.0);
 
         // ---- full-rate refinement around 2*lag: sub-sample precision from
         // the plain difference function (cheap: 5 lags x kDetN)
@@ -515,6 +653,130 @@ private:
         // and regularising fry is exactly what the epoch tracking is for.
         if (! lowVoice && rel > 0.04f) gciHold = 4;
         else if (gciHold > 0)         --gciHold;
+    }
+
+    // ---------------- Natural Air v2: per-band aperiodicity ---------------
+    // Control-rate companion of the band-adaptive comb (runs right after
+    // detectPitch, every 512 samples). It band-splits the COMB RESIDUAL of
+    // the last few periods and measures each band's normalized
+    // autocorrelation at the pitch lag (searching +-2 % of the period,
+    // because the smoothed curP lags the true period during movement).
+    // The question answered per band is direct: "does this band's residual
+    // still correlate at the pitch period?" — if yes it is harmonic
+    // LEAKAGE (comb misprediction, the old-pitch ghost) and must stay out
+    // of the air path; if no it is genuine noise and its residual is kept
+    // in full, exactly like the legacy split. Pure comb-filtered noise
+    // even correlates slightly NEGATIVELY at the lag (rho -> -1/6), so the
+    // two cases separate cleanly. The estimate is still not trusted
+    // blindly: frames where YIN is unclear or the f0 is really moving
+    // (vibrato, glides, jitter) can only LOWER a band's keep amount, never
+    // raise it (reliability-gated asymmetric update below). A per-band
+    // minimum-statistics noise floor additionally shrinks the keep gain of
+    // bands sitting at the background level, so room/mic hiss is not
+    // adopted as "air" (an assist on the keep amount only — nothing is
+    // ever subtracted from the signal itself).
+    void updateAirBands()
+    {
+        const float dRel = std::abs (curP - airPrevP) / std::max (curP, 1.0f);
+        airPrevP = curP;
+
+        const float P    = std::clamp (curP, (float) minLag, (float) maxLagLow);
+        const int   lag  = (int) std::lround (P);
+        const int   N    = std::clamp ((int) (2.5f * P), 768, kAirN);
+        const int   sr   = std::max (1, (int) (0.02f * P));   // lag search
+        const int   warm = 256;                    // one-pole transient settle
+        const int   span = N + lag + sr + warm;
+        if (writePos < (int64_t) (span + 2 * lag + 4)) return;
+
+        // rebuild the comb residual over the span (same predictor as the
+        // audio path, with the frame-constant period) and band-split it
+        // with a fresh splitter copy (its transient dies inside the
+        // warm-up region, well before the frame)
+        AirBands bs = airSplit;
+        bs.reset();
+        const int64_t s0 = writePos - span;
+        for (int i = 0; i < span; ++i)
+        {
+            const int64_t pos = s0 + i;
+            const float per = 0.5f * (readCubic ((double) pos - (double) P)
+                                    + readCubic ((double) pos - 2.0 * (double) P));
+            float bnd[4];
+            bs.split (inBuf[(size_t) (pos & kMask)] - per, bnd);
+            airBandScr[0][(size_t) i] = bnd[0];
+            airBandScr[1][(size_t) i] = bnd[1];
+            airBandScr[2][(size_t) i] = bnd[2];
+            airBandScr[3][(size_t) i] = bnd[3];
+        }
+        const int t0 = span - N;
+
+        // frame energy + minimum-statistics floor: the floor falls instantly
+        // on quiet frames and rises only ~0.08 %/frame (~9 s to double), so
+        // speech — voiced, breathy or sibilant — never trains it; pauses do
+        double E[4];
+        for (int b = 0; b < 4; ++b)
+        {
+            const float* x = airBandScr[b].data() + t0;
+            double e = 0.0;
+            for (int i = 0; i < N; ++i) e += (double) x[i] * x[i];
+            E[b] = e / (double) N;
+            airFloorE[b] = std::min (airFloorE[b] * 1.0008 + 1.0e-14, E[b]);
+        }
+
+        if (! voiced) return;          // split gains are voicing-gated anyway
+
+        // f0-motion gate. Vibrato's maximum slope is only ~0.7 %/frame, so
+        // the knee sits at 0.8 %/frame (full block) and any slope above
+        // 0.25 %/frame arms a 6-frame hold: the hold keeps the gate closed
+        // through the vibrato extremes, where the slope passes through zero
+        // although the intra-frame modulation still corrupts the estimate.
+        // While the gate is closed the aperiodicity map simply FREEZES at
+        // its last trusted values (a moving voice keeps the air character it
+        // had when it was last steady) — increases never pass untrusted.
+        const float mot = std::clamp (1.0f - dRel / 0.008f, 0.0f, 1.0f);
+        if (dRel > 0.0025f)          airMotHold = 6;
+        else if (airMotHold > 0)     --airMotHold;
+        float rel = pitchConf * mot;
+        if (airMotHold > 0) rel *= 0.15f;
+
+        for (int b = 0; b < 4; ++b)
+        {
+            const float* x = airBandScr[b].data();
+            double saa = 0.0;
+            for (int i = t0; i < span; ++i) saa += (double) x[i] * x[i];
+            float best = -1.0f;
+            for (int dl = -sr; dl <= sr; ++dl)
+            {
+                const int L = lag + dl;
+                double sab = 0.0, sbb = 0.0;
+                const float* a = x + t0;
+                const float* c = x + t0 - L;
+                for (int i = 0; i < N; ++i)
+                {
+                    sab += (double) a[i] * c[i];
+                    sbb += (double) c[i] * c[i];
+                }
+                best = std::max (best, (float) (sab / std::sqrt (saa * sbb + 1.0e-30)));
+            }
+
+            // rho -> keep amount = the residual's estimated NOISE share.
+            // Pure comb-filtered noise gives rho ~= -1/6, pure harmonic
+            // leakage gives rho ~= +1, and mixtures interpolate linearly in
+            // energy, so the leakage fraction is (rho + 1/6) / (7/6).
+            const float leak = std::clamp ((best + 0.1667f) / 1.1667f, 0.0f, 1.0f);
+            // mild expansion: the max over the lag search window biases the
+            // noise-case rho upward by ~1/sqrt(N) per lag tried, which
+            // would otherwise cost ~15 % of the keep amount on true noise
+            float a1 = std::clamp (1.18f * (1.0f - leak) - 0.03f, 0.0f, 1.0f);
+
+            // noise-floor assist: full keep at >= ~9 dB over the floor,
+            // fading to none as the band sinks into the background
+            if (airFloorE[b] > 1.0e-13)
+                a1 *= std::clamp ((float) (E[b] / (6.0 * airFloorE[b])) - 0.333f,
+                                  0.0f, 1.0f);
+
+            const float rate = (a1 < aB[b]) ? 0.5f : 0.5f * rel;
+            aB[b] += rate * (a1 - aB[b]);
+        }
     }
 
     // ---------------- grain placement ----------------
@@ -982,6 +1244,20 @@ private:
     float airP   = 320.0f;                // per-sample smoothed comb period
     float airLp1 = 0.0f, airLp2 = 0.0f;   // HP filter states (2x one-pole)
     float airK   = 0.004f, hpAirK = 0.17f;
+
+    // Natural Air v2 (band-adaptive comb) state
+    static constexpr int kAirN = 2048;    // aperiodicity frame cap (samples)
+    bool     airV2On = false;
+    AirBands airSplit;                    // residual splitter (audio path)
+    float    wBand[4] { 0.0f, 1.0f, 1.0f, 1.0f };   // airband-knob weights
+    float    aB[4]    { 0.0f, 0.0f, 0.0f, 0.0f };   // smoothed aperiodicity
+    double   airFloorE[4] { 0.0, 0.0, 0.0, 0.0 };   // background floor (min stats)
+    float    gS2[4] { 0.0f, 0.0f, 0.0f, 0.0f };     // smoothed split gains
+    float    gB2[4] { 0.0f, 0.0f, 0.0f, 0.0f };     // smoothed bypass gains
+    float    airPrevP  = 320.0f;          // control-rate f0-motion tracking
+    int      airMotHold = 0;              // frames left in the motion hold
+    float    pitchConf = 0.0f;            // YIN clarity 0..1
+    std::vector<float> airBandScr[4];     // control-rate band scratch
 
     // GCI Grain Sync state
     bool    gciOn   = false;

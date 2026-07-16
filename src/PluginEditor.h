@@ -1773,6 +1773,16 @@ public:
                  "この周波数より上を「息」として扱います(Air Preserve使用時のみ有効)。"
                  "下げるほど中音域まで効いて効果が強くなります。効きが弱いと感じたら700〜900に。"
                  "音程を動かしたときにザラつきや元の声の高さの残りが聴こえる場合は上げてください。"));
+        addToggleRow ("air2", "Natural Air v2 (Beta)",
+            tip ("Upgraded Air Preserve engine. The breath separation is split into four frequency "
+                 "bands and each band passes only as much as is genuinely noise-like right now, so "
+                 "sliding or vibrato pitch no longer leaks a ghost of your original pitch into the "
+                 "preserved breath, and fricative/whisper texture in the presence region is kept. "
+                 "Uses the same Air Preserve amount and Band knobs. Off = the original algorithm.",
+                 "Air Preserveの改良版エンジン(ベータ)。息の分離を4つの帯域に分け、いま実際に"
+                 "ノイズ的な帯域だけを通します。音程を動かしたときに元の声の高さの残り(ゴースト)が"
+                 "息側に漏れにくくなり、ささやきや摩擦音の質感も保持されます。量やBandのつまみは"
+                 "共通です。オフ=従来アルゴリズム。"));
 
         addSection ("ADVANCED");
         addToggleRow ("gci", "GCI Grain Sync (Beta)",

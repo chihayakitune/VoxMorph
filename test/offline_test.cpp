@@ -3,9 +3,27 @@
 #include "../dsp/VoiceAnalyzer.h"
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <string>
 #include <vector>
 #include <cmath>
+#include <new>
+
+// global allocation counter: verifies process() never allocates after the
+// warm-up (offline stand-in for the real-time thread allocation check)
+static bool g_countAlloc = false;
+static long g_allocCount = 0;
+void* operator new (std::size_t sz)
+{
+    if (g_countAlloc) ++g_allocCount;
+    if (void* p = std::malloc (sz ? sz : 1)) return p;
+    throw std::bad_alloc();
+}
+void* operator new[] (std::size_t sz) { return operator new (sz); }
+void  operator delete   (void* p) noexcept              { std::free (p); }
+void  operator delete[] (void* p) noexcept              { std::free (p); }
+void  operator delete   (void* p, std::size_t) noexcept { std::free (p); }
+void  operator delete[] (void* p, std::size_t) noexcept { std::free (p); }
 
 static const double FS = 48000.0;
 
@@ -155,6 +173,102 @@ static std::vector<float> makeBreathy (double f0, double seconds)
     return v;
 }
 
+// pure harmonic series (partials at -6 dB/oct up to Nyquist*0.9), with an
+// optional log-domain glide (f0a -> f0b over the length) and vibrato —
+// the "known ground truth" inputs for the Natural Air v2 tests
+static std::vector<float> makeHarm (double f0a, double f0b, double seconds,
+                                    double vibHz = 0.0, double vibSemi = 0.0)
+{
+    const int n = (int) (FS * seconds);
+    std::vector<float> v ((size_t) n, 0.0f);
+    double ph = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        const double t  = i / FS;
+        double f0 = f0a * std::pow (f0b / f0a, t / seconds);
+        if (vibHz > 0.0)
+            f0 *= std::pow (2.0, vibSemi / 12.0 * std::sin (2.0 * M_PI * vibHz * t));
+        ph += f0 / FS;
+        double s = 0.0;
+        for (int h = 1; h <= 160; ++h)
+        {
+            if (h * f0 > 0.45 * FS) break;
+            s += std::sin (2.0 * M_PI * h * ph) / h;
+        }
+        v[(size_t) i] = (float) (0.25 * s);
+    }
+    return v;
+}
+
+// add white or pink noise at a known RMS level relative to the signal
+static void addNoise (std::vector<float>& v, double relDb, bool pink, uint32_t seed)
+{
+    double sig = 0.0;
+    for (float s : v) sig += (double) s * s;
+    sig = std::sqrt (sig / (double) v.size());
+    std::vector<double> nz (v.size(), 0.0);
+    uint32_t rng = seed;
+    double b0 = 0, b1 = 0, b2 = 0, nrms = 0.0;
+    for (size_t i = 0; i < v.size(); ++i)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        const double w = (double) ((int32_t) rng) / 2147483648.0;
+        double x = w;
+        if (pink)   // Kellet economy pink filter (~-3 dB/oct)
+        {
+            b0 = 0.99765 * b0 + w * 0.0990460;
+            b1 = 0.96300 * b1 + w * 0.2965164;
+            b2 = 0.57000 * b2 + w * 1.0526913;
+            x  = 0.185 * (b0 + b1 + b2 + w * 0.1848);
+        }
+        nz[i] = x;  nrms += x * x;
+    }
+    nrms = std::sqrt (nrms / (double) v.size());
+    const double g = sig * std::pow (10.0, relDb / 20.0) / std::max (nrms, 1e-12);
+    for (size_t i = 0; i < v.size(); ++i)
+        v[i] = (float) std::clamp ((double) v[i] + g * nz[i], -1.0, 1.0);
+}
+
+// sibilant-like unvoiced noise: white noise high-passed at ~5 kHz
+static std::vector<float> makeSibilant (double seconds)
+{
+    const int n = (int) (FS * seconds);
+    std::vector<float> v ((size_t) n, 0.0f);
+    uint32_t rng = 1122334455u;
+    double lp1 = 0.0, lp2 = 0.0;
+    const double k = 1.0 - std::exp (-2.0 * M_PI * 5000.0 / FS);
+    for (int i = 0; i < n; ++i)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        double x = (double) ((int32_t) rng) / 2147483648.0;
+        lp1 += k * (x - lp1);  x -= lp1;
+        lp2 += k * (x - lp2);  x -= lp2;
+        v[(size_t) i] = (float) (0.35 * x);
+    }
+    return v;
+}
+
+static bool hasBad (const std::vector<float>& x)
+{
+    for (float s : x) if (! std::isfinite (s)) return true;
+    return false;
+}
+
+static double rmsOf (const std::vector<float>& x)   // stable middle section
+{
+    const size_t a = x.size() / 3, b = std::min (x.size(), a + (size_t) FS);
+    double e = 0.0;
+    for (size_t i = a; i < b; ++i) e += (double) x[i] * x[i];
+    return std::sqrt (e / (double) (b - a));
+}
+
+static double peakOf (const std::vector<float>& x)
+{
+    double p = 0.0;
+    for (float s : x) p = std::max (p, (double) std::abs (s));
+    return p;
+}
+
 // run and also count voiced/unvoiced transitions (the "flutter" artifact)
 static std::vector<float> runToggles (const std::vector<float>& in,
                                       const PsolaEngine::Params& p, int& toggles)
@@ -298,6 +412,202 @@ int main()
                      ps.f0Hz, ps.f0SpreadSt);
     }
 
+    // ==== Natural Air v2 (band-adaptive comb) ====
+    std::puts ("\n== Natural Air v2 (band-adaptive comb) ==");
+    int naFail = 0;
+
+    // (a) splitter recombination: b0+b1+b2+b3 must equal the input exactly
+    {
+        PsolaEngine::AirBands sp;
+        sp.setup (FS);
+        uint32_t rng = 13579u;
+        double maxErr = 0.0;
+        for (int i = 0; i < 48000; ++i)
+        {
+            rng = rng * 1664525u + 1013904223u;
+            const float x = (float) ((int32_t) rng) / 2147483648.0f;
+            float b[4];
+            sp.split (x, b);
+            maxErr = std::max (maxErr, (double) std::abs ((b[0]+b[1]+b[2]+b[3]) - x));
+        }
+        const bool ok = maxErr < 1.0e-5;
+        std::printf ("band recombination (white noise, 1 s): max err=%.2e  %s\n",
+                     maxErr, ok ? "PASS" : "FAIL");
+        if (! ok) ++naFail;
+    }
+
+    // (b) OFF bypass: v2 selected but knob 0 must equal legacy off bit-for-bit
+    {
+        const auto breathy = makeBreathy (120.0, 2.0);
+        P p0; p0.pitchSemi = 7.0f;              // air fully off, legacy
+        P p2 = p0; p2.airV2 = true;             // v2 selected, knob still 0
+        const auto o0 = run (breathy, p0);
+        const auto o2 = run (breathy, p2);
+        double dmax = 0.0;
+        for (size_t i = 0; i < o0.size(); ++i)
+            dmax = std::max (dmax, (double) std::abs (o0[i] - o2[i]));
+        const bool ok = dmax == 0.0;
+        std::printf ("air off, v2 toggle on vs legacy: max diff=%.2e  %s\n",
+                     dmax, ok ? "PASS (bit-identical)" : "FAIL");
+        if (! ok) ++naFail;
+    }
+
+    // (c) per-band aperiodicity discrimination (spec item: vibrato / glide /
+    // known noise must not fool the estimator)
+    {
+        auto lastA = [] (const std::vector<float>& in, const P& p, float* a4)
+        {
+            PsolaEngine eng;
+            eng.prepare (FS);
+            eng.setParams (p);
+            std::vector<float> out (in.size(), 0.0f);
+            for (size_t i = 0; i < in.size(); i += 256)
+                eng.process (in.data() + i, out.data() + i,
+                             (int) std::min ((size_t) 256, in.size() - i));
+            for (int b = 0; b < 4; ++b) a4[b] = eng.airBandAperiodicity (b);
+        };
+        P p; p.pitchSemi = 7.0f; p.airV2 = true; p.airPreserve = 1.0f;
+
+        float aH[4], aN[4], aV[4], aG[4], aBr[4];
+        const auto harm  = makeHarm (150.0, 150.0, 2.0);
+        auto       hn    = makeHarm (150.0, 150.0, 2.0);
+        addNoise (hn, -15.0, false, 111u);
+        const auto vib   = makeHarm (150.0, 150.0, 2.5, 5.5, 0.35);
+        const auto glide = makeHarm (110.0, 220.0, 2.5);
+        const auto brth  = makeBreathy (120.0, 2.0);
+        lastA (harm, p, aH); lastA (hn, p, aN); lastA (vib, p, aV);
+        lastA (glide, p, aG); lastA (brth, p, aBr);
+        std::printf ("residual keep amount a[b] (b0 <700, b1 <2.5k, b2 <6k, b3 >6k):\n");
+        std::printf ("  steady harmonics    : %.2f %.2f %.2f %.2f  (residual = tiny interp noise, safe either way)\n",
+                     aH[0], aH[1], aH[2], aH[3]);
+        std::printf ("  + white @-15 dB     : %.2f %.2f %.2f %.2f  (want high: real noise kept)\n",
+                     aN[0], aN[1], aN[2], aN[3]);
+        std::printf ("  vibrato 5.5Hz 0.35st: %.2f %.2f %.2f %.2f  (want low: leakage guarded)\n",
+                     aV[0], aV[1], aV[2], aV[3]);
+        std::printf ("  glide 110->220 Hz   : %.2f %.2f %.2f %.2f  (want low: leakage guarded)\n",
+                     aG[0], aG[1], aG[2], aG[3]);
+        std::printf ("  breathy vowel       : %.2f %.2f %.2f %.2f  (want high in b2/b3: aspiration kept)\n",
+                     aBr[0], aBr[1], aBr[2], aBr[3]);
+
+        // what actually matters for pure harmonics: with v2 fully up the
+        // output must stay ~identical to air-off (nothing real to bypass)
+        P pOff; pOff.pitchSemi = 7.0f;
+        const auto oOff = run (harm, pOff);
+        const auto oOn  = run (harm, p);
+        double de = 0.0, se = 0.0;
+        for (size_t i = oOff.size() / 3; i < oOff.size(); ++i)
+        {
+            const double d = (double) oOn[i] - (double) oOff[i];
+            de += d * d;  se += (double) oOff[i] * oOff[i];
+        }
+        const double relDiff = std::sqrt (de / std::max (se, 1e-30));
+        std::printf ("pure harmonics, v2 air 1.0 vs air off: rel diff=%.4f  (want ~0)\n", relDiff);
+
+        const bool ok = relDiff < 0.02
+                     && aN[3] > 0.45f
+                     && aV[1] < 0.35f && aV[2] < 0.35f && aV[3] < 0.40f
+                     && aBr[2] > 0.6f && aBr[3] > 0.6f;
+        std::printf ("discrimination: %s\n", ok ? "PASS" : "FAIL");
+        if (! ok) ++naFail;
+    }
+
+    // (d) level neutrality + NaN/Inf on the breathy vowel (steady voiced)
+    {
+        const auto breathy = makeBreathy (120.0, 2.0);
+        P pl; pl.pitchSemi = 7.0f; pl.airPreserve = 1.0f;
+        P pb = pl; pb.airV2 = true;
+        const auto ol = run (breathy, pl);
+        const auto ob = run (breathy, pb);
+        writeWav ("out_nav2_breathy_leg.wav", ol);
+        writeWav ("out_nav2_breathy_bac.wav", ob);
+        const bool bad = hasBad (ol) || hasBad (ob);
+        const double rl = rmsOf (ol), rb = rmsOf (ob);
+        const double dDb = 20.0 * std::log10 (std::max (rb, 1e-12)
+                                            / std::max (rl, 1e-12));
+        std::printf ("breathy +7st: RMS legacy=%.4f v2=%.4f (%+.2f dB)  "
+                     "peak=%.3f/%.3f  NaN/Inf=%s\n",
+                     rl, rb, dDb, peakOf (ol), peakOf (ob), bad ? "FOUND" : "none");
+        const bool ok = ! bad && std::abs (dDb) < 1.5;
+        std::printf ("level neutrality: %s\n", ok ? "PASS" : "FAIL");
+        if (! ok) ++naFail;
+    }
+
+    // (e) no allocation in process() after warm-up (heaviest settings on)
+    {
+        PsolaEngine eng;
+        eng.prepare (FS);
+        P p; p.pitchSemi = 7.0f; p.airV2 = true; p.airPreserve = 1.2f;
+        p.f2Shift = 3.0f; p.breath = 0.5f; p.gciSync = true;
+        eng.setParams (p);
+        const auto breathy = makeBreathy (120.0, 3.0);
+        std::vector<float> out (breathy.size(), 0.0f);
+        size_t i = 0;
+        for (; i + 256 <= (size_t) FS; i += 256)           // 1 s warm-up
+            eng.process (breathy.data() + i, out.data() + i, 256);
+        g_allocCount = 0;  g_countAlloc = true;
+        for (; i + 256 <= breathy.size(); i += 256)
+            eng.process (breathy.data() + i, out.data() + i, 256);
+        g_countAlloc = false;
+        std::printf ("allocations inside process() after warm-up: %ld  %s\n",
+                     g_allocCount, g_allocCount == 0 ? "PASS" : "FAIL");
+        if (g_allocCount != 0) ++naFail;
+    }
+
+    // (f) wav pairs for analyze.py: harmonic leakage (old-pitch ghost),
+    // vibrato, glide, known white/pink noise retention, sibilant,
+    // unvoiced->voiced transition (also checked for step discontinuities)
+    {
+        P leg; leg.pitchSemi = 7.0f; leg.airPreserve = 1.0f;
+        P bac = leg; bac.airV2 = true;
+
+        const auto harm = makeHarm (150.0, 150.0, 2.5);
+        writeWav ("out_nav2_harm_dry.wav", harm);
+        writeWav ("out_nav2_harm_leg.wav", run (harm, leg));
+        writeWav ("out_nav2_harm_bac.wav", run (harm, bac));
+
+        const auto vib = makeHarm (150.0, 150.0, 3.0, 5.5, 0.35);
+        writeWav ("out_nav2_vib_leg.wav", run (vib, leg));
+        writeWav ("out_nav2_vib_bac.wav", run (vib, bac));
+
+        const auto glide = makeHarm (110.0, 220.0, 3.0);
+        writeWav ("out_nav2_glide_leg.wav", run (glide, leg));
+        writeWav ("out_nav2_glide_bac.wav", run (glide, bac));
+
+        auto hw = makeHarm (150.0, 150.0, 2.5);
+        addNoise (hw, -15.0, false, 111u);
+        writeWav ("out_nav2_hw_dry.wav", hw);
+        writeWav ("out_nav2_hw_leg.wav", run (hw, leg));
+        writeWav ("out_nav2_hw_bac.wav", run (hw, bac));
+
+        auto hp = makeHarm (150.0, 150.0, 2.5);
+        addNoise (hp, -12.0, true, 222u);
+        writeWav ("out_nav2_hp_dry.wav", hp);
+        writeWav ("out_nav2_hp_leg.wav", run (hp, leg));
+        writeWav ("out_nav2_hp_bac.wav", run (hp, bac));
+
+        const auto sib = makeSibilant (2.0);
+        writeWav ("out_nav2_sib_dry.wav", sib);
+        writeWav ("out_nav2_sib_leg.wav", run (sib, leg));
+        writeWav ("out_nav2_sib_bac.wav", run (sib, bac));
+
+        std::vector<float> tr = makeNoiseCons (1.0);
+        const auto bre = makeBreathy (120.0, 2.0);
+        tr.insert (tr.end(), bre.begin(), bre.end());
+        writeWav ("out_nav2_trans_leg.wav", run (tr, leg));
+        const auto tb = run (tr, bac);
+        writeWav ("out_nav2_trans_bac.wav", tb);
+
+        double step = 0.0;
+        for (size_t i = 1; i < tb.size(); ++i)
+            step = std::max (step, (double) std::abs (tb[i] - tb[i-1]));
+        std::printf ("unvoiced->voiced max sample step: %.3f  %s\n",
+                     step, step < 0.5 ? "PASS" : "FAIL");
+        if (step >= 0.5) ++naFail;
+    }
+
+    std::printf ("Natural Air v2 checks: %s (%d failure(s))\n",
+                 naFail == 0 ? "ALL PASS" : "FAILURES", naFail);
+
     std::puts ("done");
-    return 0;
+    return naFail == 0 ? 0 : 1;
 }
