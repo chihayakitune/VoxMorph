@@ -172,6 +172,11 @@ public:
 
         airSplit.setup (sampleRate);
         airSplit.reset();
+        noiseFx.assign (kRing, 0.0f);
+        hannFx.resize ((size_t) kFxN);
+        for (int i = 0; i < kFxN; ++i)
+            hannFx[(size_t) i] = 0.5f * (1.0f - std::cos (2.0f * (float) M_PI * (float) i / (float) kFxN));
+        airFxHop = kFxN;
         for (int b = 0; b < 4; ++b)
         { aB[b] = 0.0f; airFloorE[b] = 0.0; gS2[b] = 0.0f; gB2[b] = 0.0f; }
         airPrevP  = curP;
@@ -318,6 +323,7 @@ public:
             D = pendingD;
             std::fill (accBuf.begin(),  accBuf.end(),  0.0f);
             std::fill (normBuf.begin(), normBuf.end(), 0.0f);
+            std::fill (noiseFx.begin(), noiseFx.end(), 0.0f);
             nextMarkF  = (double) (writePos + D);
             lastInMark = (double) writePos;
             voiced = false;
@@ -391,7 +397,8 @@ public:
                     tMax  = std::max (tMax, tB[b]);
                     gMax  = std::max ({ gMax, gS2[b], gB2[b] });
                 }
-                if (tMax > 0.0f || gMax > 1.0e-4f)
+                airActive = tMax > 0.0f || gMax > 1.0e-4f;
+                if (airActive)
                 {
                     for (int i = 0; i < n; ++i)
                     {
@@ -448,6 +455,21 @@ public:
             sinceDetect = 0;
         }
 
+        // Natural Air v2 spectral cleanup: runs inside the air path's
+        // D-sample delay slack, so it adds no latency. Needs D >= window;
+        // in Low Latency mode the air passes through raw as before.
+        const bool airFxOn = airV2On && D >= kFxN + 8;
+        if (airFxOn)
+        {
+            while (airFxHop <= writePos)
+            {
+                processAirFx (airFxHop);
+                airFxHop += kFxN / 2;
+            }
+        }
+        else
+            airFxHop = (writePos / (kFxN / 2) + 1) * (int64_t) (kFxN / 2);
+
         while (nextMarkF < (double) (writePos + houtCapCur))
             placeGrain();
 
@@ -461,8 +483,9 @@ public:
             float wet = nrm > 1.0e-3f ? accBuf[idx] / std::max (nrm, 0.25f) : 0.0f;
 
             const int64_t di = oi - D;
-            if (di >= 0)
-                wet += noiseBuf[(size_t) (di & kMask)];   // un-pitched breath
+            if (di >= 0)                                  // un-pitched breath
+                wet += airFxOn ? noiseFx[(size_t) (di & kMask)]
+                               : noiseBuf[(size_t) (di & kMask)];
 
             if (doTilt)   // source spectral tilt around 1 kHz (wet path only)
             {
@@ -837,6 +860,80 @@ private:
                              : 0.5f * rel * (b < 2 ? lowCons : 1.0f);
             aB[b] += rate * (a1 - aB[b]);
         }
+    }
+
+    // ---------------- Natural Air v2: spectral air cleanup ----------------
+    // The bypassed air is delayed by D samples before it reaches the output,
+    // which leaves room to run a windowed FFT pass over it with NO added
+    // latency (1024-point, hop 512, periodic Hann = unity 50 % overlap-add).
+    // On voiced frames the bins around every multiple of the INPUT f0 (up
+    // to 6 kHz) are clamped down to the local inter-harmonic floor: any
+    // f0-periodic residue that survived the band keep gains (audible as the
+    // old pitch under strong sustained vowels) is removed spectrally, while
+    // the broadband air BETWEEN the harmonics — the part worth keeping —
+    // passes untouched. Above 6 kHz nothing is modified, so Air Shine's top
+    // band is preserved exactly. Requires D >= window (i.e. skipped in Low
+    // Latency mode, where the air passes through raw as in Phase 1); also
+    // idles to plain zero-fill while the air path is silent.
+    void processAirFx (int64_t h)
+    {
+        const int H = kFxN / 2;
+        for (int i = 0; i < H; ++i)                 // fresh half starts clean
+            noiseFx[(size_t) ((h - H + i) & kMask)] = 0.0f;
+        if (! airActive)
+            return;                                 // window is silent
+
+        for (int i = 0; i < kFxN; ++i)
+        {
+            fr[(size_t) i] = noiseBuf[(size_t) ((h - kFxN + i) & kMask)]
+                           * hannFx[(size_t) i];
+            fi[(size_t) i] = 0.0f;
+        }
+        fftRadix2 (fr.data(), fi.data(), kFxN, false);
+
+        // harmonic spacing in bins; below 3 bins (f0 < ~130 Hz) the grid is
+        // too dense to separate floor from harmonic — leave it to the
+        // low-f0 caution of the band gains instead
+        const float spacing = (float) kFxN / std::max (32.0f, airP);
+        const int   bTop    = (int) (6000.0 * kFxN / fs);
+        if (voiced && spacing >= 3.0f)
+        {
+            auto magAt = [&] (float x) -> float
+            {
+                const int b = std::clamp ((int) std::lround (x), 1, kFxN / 2 - 1);
+                return std::sqrt (fr[(size_t) b] * fr[(size_t) b]
+                                + fi[(size_t) b] * fi[(size_t) b]);
+            };
+            for (int k = 1; ; ++k)
+            {
+                const float c = (float) k * spacing;
+                if (c >= (float) bTop) break;
+                // local floor: the quieter inter-harmonic midpoint (robust
+                // against a leaky neighbour harmonic)
+                const float floorM = std::min (magAt (c - 0.5f * spacing),
+                                               magAt (c + 0.5f * spacing));
+                const float target = 1.4f * floorM + 1.0e-12f;
+                const int   w  = std::clamp ((int) (0.02f * c + 0.6f), 1,
+                                             std::max (1, (int) (0.35f * spacing)));
+                const int   bc = (int) std::lround (c);
+                const int   b0 = std::max (1, bc - w);
+                const int   b1 = std::min (kFxN / 2 - 1, bc + w);
+                for (int b = b0; b <= b1; ++b)
+                {
+                    const float m = std::sqrt (fr[(size_t) b] * fr[(size_t) b]
+                                             + fi[(size_t) b] * fi[(size_t) b]);
+                    if (m > target)
+                    {
+                        const float g = target / m;
+                        fr[(size_t) b] *= g;              fi[(size_t) b] *= g;
+                        fr[(size_t) (kFxN - b)] *= g;     fi[(size_t) (kFxN - b)] *= g;
+                    }
+                }
+            }
+        }
+        fftRadix2 (fr.data(), fi.data(), kFxN, true);
+        for (int i = 0; i < kFxN; ++i)
+            noiseFx[(size_t) ((h - kFxN + i) & kMask)] += fr[(size_t) i];
     }
 
     // ---------------- grain placement ----------------
@@ -1320,6 +1417,13 @@ private:
     float    pitchConf = 0.0f;            // YIN clarity 0..1
     std::vector<float> airBandScr[4];     // control-rate band scratch
     std::vector<double> airPfx;           // prefix band energies (scratch)
+
+    // Natural Air v2 spectral cleanup state
+    static constexpr int kFxN = 1024;     // cleanup FFT window (hop = /2)
+    std::vector<float> noiseFx;           // de-harmonized air (OLA output ring)
+    std::vector<float> hannFx;            // periodic Hann window table
+    int64_t airFxHop  = 1024;             // next hop boundary to process
+    bool    airActive = false;            // air path carried signal this chunk
 
     // GCI Grain Sync state
     bool    gciOn   = false;

@@ -288,6 +288,51 @@ static bool hasBad (const std::vector<float>& x)
     return false;
 }
 
+// energy on the f0in harmonic grid excluding bins shared with the f0out
+// grid ("old-pitch ghost"), via the engine's own FFT. dB re total.
+static double ghostDb (const std::vector<float>& x, double f0in, double f0out)
+{
+    const int n = 32768;
+    const size_t a = x.size() / 3;
+    if (x.size() < a + (size_t) n) return 0.0;
+    std::vector<float> re ((size_t) n), im ((size_t) n, 0.0f);
+    for (int i = 0; i < n; ++i)
+    {
+        const float w = 0.5f * (1.0f - std::cos (2.0f * (float) M_PI * (float) i / (float) (n - 1)));
+        re[(size_t) i] = x[a + (size_t) i] * w;
+    }
+    PsolaEngine::fftForViz (re.data(), im.data(), n);
+    std::vector<double> mag ((size_t) n / 2 + 1);
+    double total = 0.0;
+    for (int b = 0; b <= n / 2; ++b)
+    {
+        mag[(size_t) b] = (double) re[(size_t) b] * re[(size_t) b]
+                        + (double) im[(size_t) b] * im[(size_t) b];
+        total += mag[(size_t) b];
+    }
+    std::vector<uint8_t> outb ((size_t) n / 2 + 1, 0);
+    for (int h = 1; h < 400; ++h)
+    {
+        const int b = (int) std::lround (h * f0out * n / FS);
+        if (b > n / 2) break;
+        const int w = std::max (2, (int) (0.02 * b));
+        for (int bb = std::max (0, b - 2*w); bb <= std::min (n/2, b + 2*w); ++bb)
+            outb[(size_t) bb] = 1;
+    }
+    double e = 0.0;
+    for (int h = 1; h < 400; ++h)
+    {
+        const int b = (int) std::lround (h * f0in * n / FS);
+        const int w = std::max (2, (int) (0.02 * b));
+        if (b + w > n / 2) break;
+        bool shared = false;
+        for (int bb = b - w; bb <= b + w && ! shared; ++bb) shared = outb[(size_t) bb];
+        if (shared) continue;
+        for (int bb = b - w; bb <= b + w; ++bb) e += mag[(size_t) bb];
+    }
+    return 10.0 * std::log10 (e / (total + 1e-300) + 1e-12);
+}
+
 static double rmsOf (const std::vector<float>& x)   // stable middle section
 {
     const size_t a = x.size() / 3, b = std::min (x.size(), a + (size_t) FS);
@@ -724,6 +769,36 @@ int main()
                      && cM[1] < 0.35f && cM[2] < 0.35f
                      && relDiff < 0.03;
         std::printf ("low-pitch leakage guard: %s\n", ok ? "PASS" : "FAIL");
+        if (! ok) ++naFail;
+    }
+
+    // (h) spectral air cleanup: +12st on a strong sustained vowel with a
+    // little noise (the real-voice "KITUNE_middle" case: odd input
+    // harmonics sit exactly between the output harmonics and expose any
+    // f0-periodic residue in the bypassed air). The air path must not add
+    // old-pitch energy over air-off, with or without Air Shine.
+    {
+        auto hv = makeHarm (182.0, 182.0, 2.5);
+        addNoise (hv, -25.0, false, 333u);
+        P off12; off12.pitchSemi = 12.0f;
+        P v212 = off12; v212.airV2 = true; v212.airPreserve = 1.0f;
+        P v2sh = v212; v2sh.airShineDb = 6.0f;
+        const auto o0 = run (hv, off12);
+        const auto o1 = run (hv, v212);
+        const auto o2 = run (hv, v2sh);
+        const double g0 = ghostDb (o0, 182.0, 364.4);
+        const double g1 = ghostDb (o1, 182.0, 364.4);
+        const double g2 = ghostDb (o2, 182.0, 364.4);
+        // Low Latency mode: cleanup disabled by design (D < window) — the
+        // raw Phase-1 air path must still be finite and sane
+        P vlo = v212; vlo.lowLatency = true;
+        const auto o3 = run (hv, vlo);
+        std::printf ("+12st sustained vowel ghost: air off=%.1f dB  v2=%.1f  "
+                     "v2+shine6=%.1f  (delta vs off: %+.1f / %+.1f dB)\n",
+                     g0, g1, g2, g1 - g0, g2 - g0);
+        const bool ok = (g1 - g0) < 1.5 && (g2 - g0) < 1.5
+                     && ! hasBad (o1) && ! hasBad (o2) && ! hasBad (o3);
+        std::printf ("spectral air cleanup: %s\n", ok ? "PASS" : "FAIL");
         if (! ok) ++naFail;
     }
 
