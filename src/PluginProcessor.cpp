@@ -638,7 +638,7 @@ void VoxMorphProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     if (auto xml = apvts.copyState().createXml())
     {
-        xml->setAttribute ("lockMask", (int) lockMask);   // section locks
+        xml->setAttribute ("lockedIds", lockedIds.joinIntoString (","));   // 🔒 params
         copyXmlToBinary (*xml, dest);
     }
 }
@@ -647,7 +647,8 @@ void VoxMorphProcessor::setStateInformation (const void* data, int size)
 {
     if (auto xml = getXmlFromBinary (data, size))
     {
-        lockMask = (uint32_t) xml->getIntAttribute ("lockMask", 0);
+        lockedIds = juce::StringArray::fromTokens (xml->getStringAttribute ("lockedIds"), ",", "");
+        lockedIds.removeEmptyStrings();
         apvts.replaceState (juce::ValueTree::fromXml (*xml));
     }
 }

@@ -1657,7 +1657,7 @@ public:
         content.addAndMakeVisible (status);    // realtime status (latency)
         items.push_back ({ &status, 26 });
 
-        addSection ("PITCH", 0);
+        addSection ("PITCH");
         addSliderRow ("pitch", "Pitch (semitones)",
             tip ("Shifts the pitch in semitones. The timbre (formants) stays unchanged. "
                  "Male-to-female: +5 to +7. Female-to-male: around -5.",
@@ -1672,7 +1672,7 @@ public:
             tip ("The fixed pitch (Hz) used while Robotize is on.",
                  "Robotizeがオンのとき固定されるピッチ(Hz)。"));
 
-        addSection ("HIGH RANGE", 1);
+        addSection ("HIGH RANGE");
         addSliderRow ("hifreq", "High Range Start (Hz)",
             tip ("When your INPUT pitch (before conversion) rises above this - laughing, squealing, "
                  "exclamations - the Pitch/Formant shifts blend smoothly toward the High amounts "
@@ -1693,7 +1693,7 @@ public:
                  "高音域で残すFormantシフトの割合。通常は100%のまま(声色は保ちつつピッチだけ"
                  "落ち着かせる)が自然です。"));
 
-        addSection ("FORMANT", 2);
+        addSection ("FORMANT");
         addSliderRow ("formant", "Formant (semitones)",
             tip ("Changes the vocal-tract size = the timbre, without changing pitch. "
                  "+ sounds younger/feminine, - sounds deeper/masculine. +3 to +4 for male-to-female.",
@@ -1733,7 +1733,7 @@ public:
                  "this region carries much of a voice's charm.",
                  "第3フォルマント付近の強さ。上げると艶・張りが出ます。声の「華」が乗る帯域です。"));
 
-        addSection ("INTONATION", 3);
+        addSection ("INTONATION");
         addSliderRow ("range", "Intonation Amount (%)",
             tip ("Exaggerates or flattens the pitch movement (intonation). 100% = unchanged. "
                  "Unlike 'Pitch', which moves the whole voice up or down, this scales only the movement. "
@@ -1747,7 +1747,7 @@ public:
                  "抑揚を拡大/縮小するときの中心になる音程。変換後の声の平均的な高さに"
                  "合わせてください(女声なら200〜250Hz)。Amountが100%のときは無効。"));
 
-        addSection ("VOICE QUALITY", 4);
+        addSection ("VOICE QUALITY");
         addSliderRow ("tilt", "Softness / Tilt (dB)",
             tip ("Spectral tilt of the voice. + is softer and warmer, - is brighter and more present. "
                  "Start around +/-2 dB.",
@@ -1774,7 +1774,7 @@ public:
                  "下げるほど中音域まで効いて効果が強くなります。効きが弱いと感じたら700〜900に。"
                  "音程を動かしたときにザラつきや元の声の高さの残りが聴こえる場合は上げてください。"));
 
-        addSection ("ADVANCED", 5);
+        addSection ("ADVANCED");
         addToggleRow ("gci", "GCI Grain Sync (Beta)",
             tip ("EXPERIMENTAL. Aligns the internal grain cutting to the glottal closure instants "
                  "(the exact moments the vocal folds snap shut) and keeps them phase-locked from "
@@ -1841,7 +1841,7 @@ public:
                  "話しているうちに声が低くなりすぎる場合の補正用。0=オフ。"
                  "女声化なら140〜180が目安です。"));
 
-        addSection ("OUTPUT", 6);
+        addSection ("OUTPUT");
         addSliderRow ("mix", "Mix",
             tip ("Balance between the converted voice (1.0) and the original (0.0). Usually 1.0.",
                  "変換した声(1.0)と元の声(0.0)の割合。通常は1.0のままにします。"));
@@ -1873,11 +1873,16 @@ public:
         redoBtn.setEnabled (false);
         undoBtn.setTooltip (tip (
             "Undo the last sound-changing operation: knob edits, a preset load, "
-            "'Reset All' or an Analyze Auto-Set / Refine (each counts as one step).",
+            "'Reset All' or an Analyze Auto-Set / Refine (each counts as one step). "
+            "Shortcut: Cmd+Z (Mac) / Ctrl+Z (Windows).",
             "直前の「音が変わる操作」を取り消します。つまみ操作・プリセット読込・"
-            "Reset All・AnalyzeのAuto-Set/Refineが対象で、一括変更は1回のUndoで戻ります。"));
-        redoBtn.setTooltip (tip ("Redo the operation you just undid.",
-                                 "取り消した操作をやり直します。"));
+            "Reset All・AnalyzeのAuto-Set/Refineが対象で、一括変更は1回のUndoで戻ります。"
+            "ショートカット: Cmd+Z (Mac) / Ctrl+Z (Windows)。"));
+        redoBtn.setTooltip (tip (
+            "Redo the operation you just undid. Shortcut: Shift+Cmd+Z (Mac) / "
+            "Shift+Ctrl+Z or Ctrl+Y (Windows).",
+            "取り消した操作をやり直します。ショートカット: Shift+Cmd+Z (Mac) / "
+            "Shift+Ctrl+ZまたはCtrl+Y (Windows)。"));
         undoBtn.onClick = [this] { proc.history.undo(); };
         redoBtn.onClick = [this] { proc.history.redo(); };
         histPoll.fn = [this]
@@ -1885,8 +1890,8 @@ public:
             proc.history.poll();
             undoBtn.setEnabled (proc.history.canUndo());
             redoBtn.setEnabled (proc.history.canRedo());
-            if (lastLockMask != proc.lockMask)   // e.g. host restored state
-                syncLockUI();
+            if (lastLockState != proc.lockedIds.joinIntoString (","))
+                syncLockUI();                    // e.g. host restored state
         };
         histPoll.startTimerHz (3);
         syncLockUI();
@@ -1910,6 +1915,20 @@ public:
     // survive a crash / force-quit. In a DAW the shortcut is left to the host.
     bool keyPressed (const juce::KeyPress& key) override
     {
+        // Cmd+Z (Mac) / Ctrl+Z (Windows) = Undo; +Shift or Cmd/Ctrl+Y = Redo
+        if (key == juce::KeyPress ('z', juce::ModifierKeys::commandModifier
+                                        | juce::ModifierKeys::shiftModifier, 0)
+         || key == juce::KeyPress ('y', juce::ModifierKeys::commandModifier, 0))
+        {
+            proc.history.redo();
+            return true;
+        }
+        if (key == juce::KeyPress ('z', juce::ModifierKeys::commandModifier, 0))
+        {
+            proc.history.undo();
+            return true;
+        }
+
         if (proc.wrapperType == juce::AudioProcessor::wrapperType_Standalone
             && key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier, 0))
         {
@@ -2035,11 +2054,13 @@ private:
     };
 
     // ---- row components ---------------------------------------------------
+    // every parameter row ends with the same right-aligned set:
+    // [value box] [↺ reset] [🔒 lock]
     struct SliderRow : public juce::Component
     {
         juce::Label      name;
         juce::Slider     slider;
-        juce::TextButton reset;
+        juce::TextButton reset, lock;
         std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> att;
 
         SliderRow()
@@ -2047,11 +2068,13 @@ private:
             addAndMakeVisible (name);
             addAndMakeVisible (slider);
             addAndMakeVisible (reset);
+            addAndMakeVisible (lock);
         }
         void resized() override
         {
             auto r = getLocalBounds();
             name.setBounds (r.removeFromLeft (168));
+            lock.setBounds  (r.removeFromRight (30).reduced (3));
             reset.setBounds (r.removeFromRight (30).reduced (3));
             slider.setBounds (r);
         }
@@ -2060,88 +2083,72 @@ private:
     struct ToggleRow : public juce::Component
     {
         juce::ToggleButton toggle;
+        juce::TextButton   reset, lock;
         std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> att;
-        ToggleRow() { addAndMakeVisible (toggle); }
-        void resized() override { toggle.setBounds (getLocalBounds().withTrimmedLeft (4)); }
-    };
-
-    // ---- builders -----------------------------------------------------------
-    // section header with an optional Lock toggle. lockSec = index into
-    // VoxMorphProcessor::lockSections() (-1 = not lockable, e.g. VISUALIZER).
-    struct SectionHeader : public juce::Component
-    {
-        juce::Label      name;
-        juce::TextButton lock { "Lock" };
-        SectionHeader()
+        ToggleRow()
         {
-            addAndMakeVisible (name);
+            addAndMakeVisible (toggle);
+            addAndMakeVisible (reset);
             addAndMakeVisible (lock);
-            lock.setClickingTogglesState (true);
         }
         void resized() override
         {
             auto r = getLocalBounds();
-            lock.setBounds (r.removeFromRight (56).reduced (2, 3));
-            name.setBounds (r);
+            lock.setBounds  (r.removeFromRight (30).reduced (2));
+            reset.setBounds (r.removeFromRight (30).reduced (2));
+            toggle.setBounds (r.withTrimmedLeft (4));
         }
     };
 
-    void addSection (const char* text, int lockSec = -1)
+    // ---- builders -----------------------------------------------------------
+    void addSection (const char* text)
     {
-        curSection = lockSec;       // rows added after this belong to it
-        if (lockSec < 0)
-        {
-            auto lbl = std::make_unique<juce::Label>();
-            lbl->setText (text, juce::dontSendNotification);
-            lbl->setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-            lbl->setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));   // section mint
-            content.addAndMakeVisible (*lbl);
-            items.push_back ({ lbl.get(), 26 });
-            owned.push_back (std::move (lbl));
-            return;
-        }
-
-        auto hdr = std::make_unique<SectionHeader>();
-        hdr->name.setText (text, juce::dontSendNotification);
-        hdr->name.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-        hdr->name.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
-        hdr->lock.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xfff08ba5));
-        hdr->lock.setColour (juce::TextButton::textColourOnId,   juce::Colours::white);
-        hdr->lock.setTooltip (tip (
-            "Locks this whole section. While locked, the controls are greyed out and the "
-            "values are protected from everything: manual edits, the reset arrows, preset "
-            "loading, 'Reset All' and Analyze Auto-Set / Refine. Lock/unlock itself is not "
-            "part of the undo history.",
-            "このセクション全体をロックします。ロック中はコントロールがグレーアウトし、"
-            "手動操作・↺リセット・プリセット読込・Reset All・AnalyzeのAuto-Set/Refineの"
-            "いずれでも値が変わりません。ロック操作自体はUndo対象外です。"));
-        SectionHeader* h = hdr.get();
-        hdr->lock.onClick = [this, lockSec, h]
-        {
-            const uint32_t bit = 1u << lockSec;
-            proc.lockMask = h->lock.getToggleState() ? (proc.lockMask | bit)
-                                                     : (proc.lockMask & ~bit);
-            syncLockUI();
-        };
-        if ((int) lockHeaders.size() <= lockSec) lockHeaders.resize ((size_t) lockSec + 1, nullptr);
-        lockHeaders[(size_t) lockSec] = h;
-        content.addAndMakeVisible (*hdr);
-        items.push_back ({ hdr.get(), 26 });
-        owned.push_back (std::move (hdr));
+        auto lbl = std::make_unique<juce::Label>();
+        lbl->setText (text, juce::dontSendNotification);
+        lbl->setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
+        lbl->setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));   // section mint
+        content.addAndMakeVisible (*lbl);
+        items.push_back ({ lbl.get(), 26 });
+        owned.push_back (std::move (lbl));
     }
 
-    // grey out / re-enable the rows of locked sections and mirror the mask
-    // into the header buttons (also called when a host restores the state)
+    // wires one row's 🔒 button to the per-parameter lock and registers a
+    // refresher that mirrors the lock state into the row (button glyph,
+    // tooltip, greyed controls). `controls` = what to disable while locked.
+    void wireLock (juce::TextButton& lockBtn, const juce::String& id,
+                   std::vector<juce::Component*> controls)
+    {
+        lockBtn.onClick = [this, id]
+        {
+            proc.setParamLocked (id, ! proc.isParamLocked (id));
+            syncLockUI();
+        };
+        lockRefreshers.push_back ([this, &lockBtn, id, controls]
+        {
+            const bool locked = proc.isParamLocked (id);
+            lockBtn.setButtonText (juce::String::fromUTF8 (locked ? "\xF0\x9F\x94\x92"      // 🔒
+                                                                  : "\xF0\x9F\x94\x93"));   // 🔓
+            lockBtn.setColour (juce::TextButton::buttonColourId,
+                               locked ? juce::Colour (0xffffe9ef) : juce::Colours::white);
+            lockBtn.setTooltip (locked
+                ? tip ("Locked: this value cannot be changed - not by knobs, the reset arrow, "
+                       "presets, Reset All or Analyze Auto-Set. Click to unlock.",
+                       "ロック中のため変更できません(手動操作・↺・プリセット・Reset All・"
+                       "Auto-Setのすべてから保護)。クリックで解除します。")
+                : tip ("Lock this parameter: protects the value from manual edits, the reset "
+                       "arrow, preset loading, Reset All and Analyze Auto-Set / Refine.",
+                       "この項目をロックします。手動操作・↺・プリセット読込・Reset All・"
+                       "AnalyzeのAuto-Set/Refineから値を保護します。"));
+            for (auto* c : controls)
+                c->setEnabled (! locked);
+        });
+    }
+
+    // re-apply every row's lock state (also called when a host restores it)
     void syncLockUI()
     {
-        for (size_t i = 0; i < lockHeaders.size(); ++i)
-            if (lockHeaders[i] != nullptr)
-                lockHeaders[i]->lock.setToggleState ((proc.lockMask >> i) & 1u,
-                                                     juce::dontSendNotification);
-        for (auto& it : items)
-            if (it.lockSec >= 0)
-                it.comp->setEnabled ((proc.lockMask & (1u << it.lockSec)) == 0);
-        lastLockMask = proc.lockMask;
+        for (auto& f : lockRefreshers) f();
+        lastLockState = proc.lockedIds.joinIntoString (",");
     }
 
     void addSliderRow (const juce::String& id, const juce::String& displayName, const juce::String& tipText)
@@ -2169,9 +2176,10 @@ private:
             rp->setValueNotifyingHost (rp->getDefaultValue());
             rp->endChangeGesture();
         };
+        wireLock (row->lock, id, { &row->slider, &row->reset, &row->name });
 
         content.addAndMakeVisible (*row);
-        items.push_back ({ row.get(), 30, curSection });
+        items.push_back ({ row.get(), 30 });
         owned.push_back (std::move (row));
     }
 
@@ -2182,8 +2190,20 @@ private:
         row->toggle.setTooltip (tipText);
         row->att = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
                         proc.apvts, id, row->toggle);
+
+        auto* rp = proc.apvts.getParameter (id);
+        row->reset.setButtonText (juce::String::fromUTF8 ("\xE2\x86\xBA"));
+        row->reset.setTooltip (tip ("Reset to default.", "初期値に戻します。"));
+        row->reset.onClick = [rp]
+        {
+            rp->beginChangeGesture();
+            rp->setValueNotifyingHost (rp->getDefaultValue());
+            rp->endChangeGesture();
+        };
+        wireLock (row->lock, id, { &row->toggle, &row->reset });
+
         content.addAndMakeVisible (*row);
-        items.push_back ({ row.get(), 28, curSection });
+        items.push_back ({ row.get(), 28 });
         owned.push_back (std::move (row));
     }
 
@@ -2206,18 +2226,17 @@ private:
     juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
     int contentHeight = 0;
 
-    struct Item { juce::Component* comp; int h; int lockSec = -1; };
+    struct Item { juce::Component* comp; int h; };
     std::vector<Item> items;
     std::vector<std::unique_ptr<juce::Component>> owned;
     juce::Label footer;
     juce::String defaultFooterText;
 
-    // undo/redo + section locks
+    // undo/redo + per-parameter locks
     juce::TextButton undoBtn { "Undo" }, redoBtn { "Redo" };
-    FnTimer  histPoll;
-    std::vector<SectionHeader*> lockHeaders;
-    uint32_t lastLockMask = 0;
-    int      curSection   = -1;    // section index for rows being built
+    FnTimer histPoll;
+    std::vector<std::function<void()>> lockRefreshers;   // one per 🔒 row
+    juce::String lastLockState;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoxMorphEditor)
 };

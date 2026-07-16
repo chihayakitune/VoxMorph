@@ -32,39 +32,21 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
-    // ---- Section locks + snapshot undo/redo (MESSAGE THREAD ONLY) --------
+    // ---- Per-parameter locks + snapshot undo/redo (MESSAGE THREAD ONLY) --
     // The audio thread never reads any of this: locks are enforced purely on
     // the parameter-writing (UI) side and the history only stores/sets
     // parameter values, so the realtime path is unaffected.
 
-    // Lockable UI sections and the parameter ids they protect. The order
-    // defines the lockMask bit for each section and must match the section
-    // order on the editor's MAIN tab.
-    struct LockSection { const char* label; std::vector<juce::String> ids; };
-    static const std::vector<LockSection>& lockSections()
+    // Ids the user pinned with the row 🔒 buttons. Locked params are skipped
+    // by preset load, Reset All and Analyze Auto-Set / Refine, and the UI
+    // greys their controls out. Persisted in the plugin state, deliberately
+    // NOT saved into preset files (locks are the user's intent).
+    juce::StringArray lockedIds;
+    bool isParamLocked (const juce::String& id) const { return lockedIds.contains (id); }
+    void setParamLocked (const juce::String& id, bool on)
     {
-        static const std::vector<LockSection> s = {
-            { "PITCH",         { "pitch", "robot", "robotHz" } },
-            { "HIGH RANGE",    { "hifreq", "hipitch", "hiformant" } },
-            { "FORMANT",       { "formant", "consonant", "f1shift", "f1gain",
-                                 "f2shift", "f2gain", "f3shift", "f3gain" } },
-            { "INTONATION",    { "range", "center" } },
-            { "VOICE QUALITY", { "tilt", "jitter", "air", "airband" } },
-            { "ADVANCED",      { "gci", "lowvoice", "lowlat", "stereo",
-                                 "automute", "gate", "breath2", "pitchfloor" } },
-            { "OUTPUT",        { "mix", "gain" } },
-        };
-        return s;
-    }
-    uint32_t lockMask = 0;     // bit i = lockSections()[i] is locked
-    bool isParamLocked (const juce::String& id) const
-    {
-        const auto& secs = lockSections();
-        for (size_t i = 0; i < secs.size(); ++i)
-            if ((lockMask & (1u << i)) != 0)
-                for (const auto& pid : secs[i].ids)
-                    if (pid == id) return true;
-        return false;
+        if (on) lockedIds.addIfNotAlreadyThere (id);
+        else    lockedIds.removeString (id);
     }
 
     // Snapshot-based undo/redo for sound-changing operations. Manual knob
