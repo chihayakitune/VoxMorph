@@ -116,6 +116,33 @@ public:
         float hiPitchAmt   = 0.5f;    // 0..1: pitch shift kept in high range
         float hiFormantAmt = 1.0f;    // 0..1: formant shift kept in high range
 
+        // EXPERIMENTAL grain-width override (offline A/B, internal Beta —
+        // not exposed in the plugin UI). 0 = current behaviour. >0: the
+        // voiced grain half-width becomes this fraction of the INPUT
+        // period (still clamped by the lookahead caps). Used to chase the
+        // low-voice large-upshift old-pitch residue in the grain path.
+        float grainHalfP = 0.0f;
+
+        // EXPERIMENTAL grain blend (offline A/B, internal Beta). At large
+        // upward shifts each input pulse sources several consecutive output
+        // grains; the resulting sample-and-hold pattern turns the voice's
+        // natural period jitter into sidebands at the OLD pitch spacing
+        // (measured corr(reuse irregularity, ghost) = -0.84 on a real low
+        // voice). With blending, every grain is a fractional-position
+        // crossfade of the two pulse grains bracketing its ideal input
+        // position, replacing the abrupt grain switches with a smooth
+        // interpolation. Voiced, non-robot, upshift only.
+        bool  grainBlend = false;
+
+        // EXPERIMENTAL pulse-pair averaging (offline A/B, internal Beta).
+        // Lightly creaky low voices carry a period-2 alternation (pulse_n =
+        // common + (-1)^n * alt); after a x2 upshift that alternation stays
+        // at the INPUT rate and is heard as the old pitch. Averaging each
+        // grain 50/50 with the PREVIOUS pulse cancels the alternating part
+        // exactly while keeping the common pulse (the voice's body).
+        // Voiced, non-robot, upshift only. Overrides grainBlend.
+        bool  grainAvg = false;
+
         // GCI Grain Sync: align grain centres to the glottal closure
         // instants (sharpest flank of each period, found by short-time
         // derivative energy) and track them period-to-period, ESOLA-style,
@@ -219,6 +246,19 @@ public:
     // exposed for the offline harness and future UI metering
     float airBandAperiodicity (int b) const { return aB[std::clamp (b, 0, 3)]; }
 
+#ifdef PSOLA_GRAIN_LOG
+    // offline instrumentation (never compiled into the plugin): one row per
+    // placed grain, for reuse counting and overlap-add diagnostics
+    struct GrainLogRow
+    {
+        double outMark, inMark, err;
+        int    hout;
+        float  P, Ts;
+        bool   voiced;
+    };
+    std::vector<GrainLogRow> grainLog;
+#endif
+
     // forward FFT for the plugin's spectrum visualizer (reuses the engine's
     // own radix-2 so the UI needs no extra dependencies). n = power of two.
     static void fftForViz (float* re, float* im, int n) { fftRadix2 (re, im, n, false); }
@@ -267,6 +307,9 @@ public:
                 wBand[b] = std::clamp (0.5f + std::log2 (fcB[b] / afq), 0.0f, 1.0f);
         }
         gciOn          = q.gciSync;
+        grainHalfPOv   = std::clamp (q.grainHalfP, 0.0f, 1.5f);
+        grainBlendOn   = q.grainBlend;
+        grainAvgOn     = q.grainAvg;
         hiFreq         = (q.hiRangeHz > 20.0f) ? std::clamp (q.hiRangeHz, 100.0f, 600.0f) : 0.0f;
         hiPAmt         = std::clamp (q.hiPitchAmt,   0.0f, 1.0f);
         hiFAmt         = std::clamp (q.hiFormantAmt, 0.0f, 1.0f);
@@ -1006,13 +1049,47 @@ private:
         float baseHalf = v ? std::min (P, capHalfCur) : 256.0f;
         if (v)
             baseHalf = std::min (baseHalf, std::max (48.0f, 1.25f * Ts));
+        if (v && grainHalfPOv > 0.01f)                  // experimental A/B
+            baseHalf = std::min (grainHalfPOv * P, capHalfCur);
         const int Hout = (int) std::clamp (baseHalf / f, 32.0f, (float) houtCapCur);
+
+#ifdef PSOLA_GRAIN_LOG
+        grainLog.push_back ({ nextMarkF, c, (double) err, Hout, P, Ts, v });
+#endif
+
+        // experimental grain blend: crossfade with the pulse grain on the
+        // other side of the ideal (un-snapped) input position, weighted by
+        // the fractional pulse offset. Only meaningful while pulses are
+        // being reused (upshift); the future-side partner is used only when
+        // it is fully inside the received input.
+        double cB = 0.0;
+        float  wB = 0.0f;
+        if (grainAvgOn && v && ! robotize && Ts < 0.8f * P)
+        {
+            cB = alignToPeak (c - (double) P, P);   // past pulse: always here
+            wB = 0.5f;
+        }
+        else if (grainBlendOn && v && ! robotize && Ts < 0.8f * P)
+        {
+            const double beta = std::clamp ((natural - c) / (double) P, -0.5, 0.5);
+            wB = (float) std::abs (beta);
+            if (wB > 0.02f)
+            {
+                cB = alignToPeak (c + (beta >= 0.0 ? (double) P : -(double) P), P);
+                if (cB + (double) ((Hout + 1) * f) + 2.0 >= (double) writePos)
+                    wB = 0.0f;                   // future pulse not here yet
+            }
+            else
+                wB = 0.0f;
+        }
+        const float wA = 1.0f - wB;
 
         // pass 1: resample grain into scratch (from the harmonic-only buffer;
         // identical to the input while Air Preserve is off)
         for (int j = -Hout; j <= Hout; ++j)
         {
-            const double  ip = c + ((double) j + err) * (double) f;
+            const double  jf = ((double) j + err) * (double) f;
+            const double  ip = c + jf;
             const int64_t i0 = (int64_t) std::floor (ip);
             float s = 0.0f;
             if (i0 >= 0 && i0 + 1 < writePos)
@@ -1020,6 +1097,19 @@ private:
                 const float frac = (float) (ip - (double) i0);
                 s = harmBuf[(size_t) (i0 & kMask)] * (1.0f - frac)
                   + harmBuf[(size_t) ((i0 + 1) & kMask)] * frac;
+            }
+            if (wB > 0.0f)
+            {
+                const double  ip2 = cB + jf;
+                const int64_t i2  = (int64_t) std::floor (ip2);
+                float s2 = 0.0f;
+                if (i2 >= 0 && i2 + 1 < writePos)
+                {
+                    const float fr2 = (float) (ip2 - (double) i2);
+                    s2 = harmBuf[(size_t) (i2 & kMask)] * (1.0f - fr2)
+                       + harmBuf[(size_t) ((i2 + 1) & kMask)] * fr2;
+                }
+                s = wA * s + wB * s2;
             }
             grainScratch[(size_t) (j + Hout)] = s;
         }
@@ -1424,6 +1514,10 @@ private:
     std::vector<float> hannFx;            // periodic Hann window table
     int64_t airFxHop  = 1024;             // next hop boundary to process
     bool    airActive = false;            // air path carried signal this chunk
+
+    float grainHalfPOv = 0.0f;            // experimental width override (0 = off)
+    bool  grainBlendOn = false;           // experimental pulse-grain crossfade
+    bool  grainAvgOn   = false;           // experimental pulse-pair averaging
 
     // GCI Grain Sync state
     bool    gciOn   = false;
