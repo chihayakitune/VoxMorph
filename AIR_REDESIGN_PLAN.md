@@ -1,7 +1,8 @@
 # AIR セクション再設計計画（調査・比較・提案）
 
 対象: Air Preserve 高性能化 + AIR セクション統合
-状態: **Phase 1（Natural Air v2 試作）実装完了 v0.20.0。実声評価・実機CPU計測待ち**
+状態: **v0.23.0 = Natural Air改善フェーズの安定候補（2026-07-18ユーザー確定）。
+数値追い込み停止・安全マージン維持。air2low標準統合は6実声条件の副作用確認後。**
 作成: 2026-07-16
 
 ## Phase 1 実装結果（v0.20.0, 2026-07-16）
@@ -405,3 +406,15 @@ Natural Air 完成後に着手。
 
 - D4C 論文: Morise, "D4C, a band-aperiodicity estimator for high-quality speech synthesis", Speech Communication 2016
 - WORLD: https://github.com/mmorise/World （修正 BSD）
+
+## フェーズ確定（2026-07-18、ユーザー判断）
+
+- v0.23.0 を Natural Air 改善フェーズの安定候補とする。残差 +0.4〜0.8dB の
+  追い込み（ノッチ幅・ゲート強化）は停止。音色・副作用・息の保持を優先。
+- air2low の標準統合（トグル廃止）条件: 次の実声で副作用なしを確認後 —
+  通常の低音男性声 / 息混じりの低音 / ボーカルフライ / 低音→中音グライド /
+  摩擦音を含む短文 / 発声の立ち上がり・減衰。
+- Low Voice Mode はピッチ追跡継続機能として扱う（ゴースト除去機能ではない。
+  フライ由来の低周期成分の残存は仕様上のトレードオフ）。
+- grainBlend / grainAvg / grainHalfP は実験フックのまま保留（実聴差なし）。
+- 次フェーズ候補: Phase 3（AIRセクションUI化・Natural Air改名）、実機CPU計測。
