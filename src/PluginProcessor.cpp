@@ -29,12 +29,37 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::NormalisableRange<float> (-6.0f, 6.0f, 0.01f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "f3gain", 1 }, "F3 Gain (dB)",
                 juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f));
-    // Vowel-Adaptive Formant Warp (Beta, v0.25.0). Defaults keep old
-    // sessions bit-identical (off / 0 %).
+    // AEIOU Character (v0.26.0; ids "vadapt"/"vamount" kept from the
+    // v0.25.0 Beta for session compatibility). vadapt defaults OFF, so old
+    // sessions/presets that predate the feature stay bit-identical even
+    // though vamount now defaults to 60 % (the feature is gated by vadapt;
+    // v0.25.0 sessions carry their own saved vamount value and restore it).
     layout.add (std::make_unique<juce::AudioParameterBool> (
-                juce::ParameterID { "vadapt", 1 }, "Vowel Adaptive Warp", false));
-    layout.add (std::make_unique<P> (juce::ParameterID { "vamount", 1 }, "Vowel Adapt Amount (%)",
-                juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 0.0f));
+                juce::ParameterID { "vadapt", 1 }, "AEIOU Character", false));
+    layout.add (std::make_unique<P> (juce::ParameterID { "vamount", 1 }, "AEIOU Amount (%)",
+                juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 60.0f));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+                juce::ParameterID { "vcharacter", 1 }, "AEIOU Character Type",
+                juce::StringArray { "Natural", "Soft", "Active", "Loli",
+                                    "Anime", "Elegant", "Uni", "Custom" }, 0));
+    // Custom map: 15 fixed ids (vowel a/i/u/e/o x F1/F2/F3, semitones),
+    // defaults = the Natural preset. Kept in the state even while a
+    // built-in Character is selected.
+    {
+        static const char* vw[5] = { "a", "i", "u", "e", "o" };
+        static constexpr float rng[3] = { 2.0f, 3.0f, 1.5f };
+        const auto& nat = getAEIOUCharacterMap (AEIOUCharacter::natural);
+        for (int v = 0; v < 5; ++v)
+            for (int f = 0; f < 3; ++f)
+            {
+                const auto id = juce::String ("va_") + vw[v] + "_f" + juce::String (f + 1);
+                const auto nm = juce::String ("AEIOU ") + juce::String (vw[v]).toUpperCase()
+                              + " F" + juce::String (f + 1) + " (st)";
+                layout.add (std::make_unique<P> (juce::ParameterID { id, 1 }, nm,
+                            juce::NormalisableRange<float> (-rng[f], rng[f], 0.01f),
+                            nat.offset[v][f]));
+            }
+    }
     layout.add (std::make_unique<P> (juce::ParameterID { "breath2", 1 }, "Breath",
                 juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "air", 1 }, "Natural Air",
@@ -128,6 +153,14 @@ VoxMorphProcessor::VoxMorphProcessor()
     pF3G = apvts.getRawParameterValue ("f3gain");
     pVAdapt  = apvts.getRawParameterValue ("vadapt");
     pVAmount = apvts.getRawParameterValue ("vamount");
+    pVChar   = apvts.getRawParameterValue ("vcharacter");
+    {
+        static const char* vw[5] = { "a", "i", "u", "e", "o" };
+        for (int v = 0; v < 5; ++v)
+            for (int f = 0; f < 3; ++f)
+                pVCustom[v][f] = apvts.getRawParameterValue (
+                    juce::String ("va_") + vw[v] + "_f" + juce::String (f + 1));
+    }
     pBreath2 = apvts.getRawParameterValue ("breath2");
     pAir     = apvts.getRawParameterValue ("air");
     pAirShine = apvts.getRawParameterValue ("airshine");
@@ -380,8 +413,20 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.f1Shift = pF1S->load();  p.f1Gain = pF1G->load();
     p.f2Shift = pF2S->load();  p.f2Gain = pF2G->load();
     p.f3Shift = pF3S->load();  p.f3Gain = pF3G->load();
-    p.vowelAdapt    = pVAdapt->load() > 0.5f;      // Beta
+    p.vowelAdapt    = pVAdapt->load() > 0.5f;      // AEIOU Character
     p.vowelAdaptAmt = pVAmount->load() * 0.01f;    // % -> 0..1
+    {
+        // Character selection -> per-vowel map. Custom reads the 15 APVTS
+        // values; every other choice copies the immutable built-in preset
+        // (plain float copies on the audio thread, no lookup, no strings).
+        const auto ch = (AEIOUCharacter) (int) pVChar->load();
+        if (ch == AEIOUCharacter::custom)
+            for (int v = 0; v < 5; ++v)
+                for (int f = 0; f < 3; ++f)
+                    p.vowelMap.offset[v][f] = pVCustom[v][f]->load();
+        else
+            p.vowelMap = getAEIOUCharacterMap (ch);
+    }
     p.jitter        = pJitter->load();
     p.robotize      = pRobot->load() > 0.5f;
     p.lowVoice      = pLowVoice->load() > 0.5f;

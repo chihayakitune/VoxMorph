@@ -65,14 +65,17 @@ public:
         // tracking floor rises to ~90 Hz. Ignored while lowVoice is on.
         bool  lowLatency = false;
 
-        // Vowel-Adaptive Formant Warp (Beta): estimates the current vowel
-        // (continuous height/frontness coordinate from the tracked F1/F2)
-        // and ADDS small per-vowel offsets to the F1/F2/F3 shifts above,
-        // so each vowel is nudged toward the target speaker's version of
-        // that same vowel. The manual shifts stay the base values. Off (or
-        // amount 0) = bit-identical to previous versions.
+        // AEIOU Character (vowel-adaptive formant warp): estimates the
+        // current vowel (continuous height/frontness coordinate from the
+        // tracked F1/F2) and ADDS small per-vowel offsets to the F1/F2/F3
+        // shifts above, shaping the voice character per vowel region. The
+        // manual shifts stay the base values. Off (or amount 0) =
+        // bit-identical to previous versions. vowelMap carries the selected
+        // Character preset or the user's Custom values (15 plain floats,
+        // resolved by the host wrapper — the engine never looks up presets).
         bool  vowelAdapt    = false;
         float vowelAdaptAmt = 0.0f;   // 0..1 overall strength
+        AEIOUCharacterMap vowelMap = getAEIOUCharacterMap (AEIOUCharacter::natural);
 
         // Natural Air (standard since v0.24.0): keeps the voice's own
         // breath / aperiodic detail while suppressing old-pitch leakage.
@@ -300,8 +303,10 @@ public:
         fShiftRatio[2] = std::pow (2.0f, q.f3Shift / 12.0f);
         fGainDb[0] = q.f1Gain;  fGainDb[1] = q.f2Gain;  fGainDb[2] = q.f3Gain;
 
-        // Vowel-Adaptive Formant Warp: off (or amount 0) must be a perfect
-        // no-op, so the enable flag collapses into the amount
+        // AEIOU Character: off (or amount 0) must be a perfect no-op, so
+        // the enable flag collapses into the amount. The map is copied at
+        // this control-rate call (15 floats, clamped inside setMap).
+        vaw.setMap (q.vowelMap.offset);
         const float vaAmt = q.vowelAdapt
                           ? std::clamp (q.vowelAdaptAmt, 0.0f, 1.0f) : 0.0f;
         vaw.setAmount (vaAmt);
@@ -526,8 +531,11 @@ public:
     bool  isVoiced()  const { return voiced; }
     float currentF0() const { return voiced ? (float) fs / curP : 0.0f; }
 
-    // Vowel-Adaptive Formant Warp debug taps (Phase 1 observability; safe to
-    // read from any thread — plain floats, display only)
+    // AEIOU Character debug taps (Phase 1 observability). NOTE: plain
+    // non-atomic floats written on the audio thread — currently read by
+    // nothing but the offline test harness. If the UI ever wants these,
+    // publish them through std::atomic<float> on the processor instead of
+    // reading here directly.
     float vowelHeight()          const { return vaw.vowelHeight(); }
     float vowelFrontness()       const { return vaw.vowelFrontness(); }
     float vowelConfidence()      const { return vaw.confidence(); }

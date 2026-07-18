@@ -1006,6 +1006,30 @@ int main()
         if (! ok) ++vaFail;
     }
 
+    // (f) AEIOU Character map plumbing (v0.26.0): Params.vowelMap reaches
+    // the estimator — an all-zero map must produce zero offsets while the
+    // default (Natural) map produces the nonzero offsets checked in (b)
+    {
+        const auto aVow = makeVowel (120.0, 120.0, 2.0);
+        PsolaEngine eng;
+        eng.prepare (FS);
+        P p; p.pitchSemi = 7.0f; p.vowelAdapt = true; p.vowelAdaptAmt = 1.0f;
+        for (auto& vv : p.vowelMap.offset)
+            for (auto& x : vv) x = 0.0f;
+        eng.setParams (p);
+        std::vector<float> out (aVow.size(), 0.0f);
+        for (size_t i = 0; i < aVow.size(); i += 256)
+            eng.process (aVow.data() + i, out.data() + i,
+                         (int) std::min ((size_t) 256, aVow.size() - i));
+        const float mx = std::max ({ std::abs (eng.vowelOffsetSemi (0)),
+                                     std::abs (eng.vowelOffsetSemi (1)),
+                                     std::abs (eng.vowelOffsetSemi (2)) });
+        const bool ok = mx < 1.0e-4f && ! hasBad (out);
+        std::printf ("zero character map -> zero offsets: max=%.5f st  %s\n",
+                     mx, ok ? "PASS" : "FAIL");
+        if (! ok) ++vaFail;
+    }
+
     std::printf ("Vowel-Adaptive Warp checks: %s (%d failure(s))\n",
                  vaFail == 0 ? "ALL PASS" : "FAILURES", vaFail);
 

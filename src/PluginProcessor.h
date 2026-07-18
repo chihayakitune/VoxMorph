@@ -221,6 +221,8 @@ private:
     std::atomic<float>* pF3S = nullptr; std::atomic<float>* pF3G = nullptr;
     std::atomic<float>* pVAdapt  = nullptr;
     std::atomic<float>* pVAmount = nullptr;
+    std::atomic<float>* pVChar   = nullptr;
+    std::atomic<float>* pVCustom[5][3] = {};   // [a,i,u,e,o][F1,F2,F3]
     std::atomic<float>* pBreath2   = nullptr;
     std::atomic<float>* pAir       = nullptr;
     std::atomic<float>* pAirShine  = nullptr;

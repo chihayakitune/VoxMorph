@@ -19,6 +19,7 @@
 #pragma once
 #include <cmath>
 #include <algorithm>
+#include "AEIOUCharacterPresets.h"
 
 class VowelAdaptiveWarp
 {
@@ -26,6 +27,11 @@ public:
     static constexpr int kAnchors = 5;            // a, i, u, e, o
     // safety caps for the final offsets (semitones)
     static constexpr float kMaxOff[3] = { 2.0f, 3.0f, 1.5f };
+
+    VowelAdaptiveWarp()
+    {
+        setMap (getAEIOUCharacterMap (AEIOUCharacter::natural).offset);
+    }
 
     struct Input
     {
@@ -57,9 +63,19 @@ public:
         amount = std::isfinite (a01) ? std::clamp (a01, 0.0f, 1.0f) : 0.0f;
     }
 
-    // Replaceable target map (Phase 5 hook: per-vowel F1/F2/F3 deltas
-    // measured from an original/target profile pair go here). Values are
-    // clamped to the safety caps above.
+    // Replace the whole per-vowel map at once (AEIOU Character presets /
+    // Custom values, copied at control rate — 15 plain floats, RT-safe).
+    // Values are clamped to the safety caps.
+    void setMap (const float (&m)[kAnchors][3])
+    {
+        for (int a = 0; a < kAnchors; ++a)
+            for (int i = 0; i < 3; ++i)
+                mapOff[a][i] = std::isfinite (m[a][i])
+                             ? std::clamp (m[a][i], -kMaxOff[i], kMaxOff[i]) : 0.0f;
+    }
+
+    // Per-anchor variant (kept for the planned measured-target flow).
+    // Values are clamped to the safety caps above.
     void setAnchorOffsets (int anchor, float f1Semi, float f2Semi, float f3Semi)
     {
         if (anchor < 0 || anchor >= kAnchors) return;
@@ -161,19 +177,11 @@ private:
     static constexpr float kAnchorH[kAnchors] = { 0.86f, 0.06f, 0.18f, 0.44f, 0.47f };
     static constexpr float kAnchorF[kAnchors] = { 0.04f, 1.00f, 0.57f, 0.67f, 0.13f };
 
-    // default anchor offsets (semitones, {F1, F2, F3} per vowel a,i,u,e,o):
-    // a conservative feminine-leaning EXAMPLE map — open vowels get a bit
-    // more F1, front/close vowels a bit more F2 — so the Beta Amount knob is
-    // audible out of the box. Deliberately small (max 1.2 st, well under the
-    // caps); Phase 5 replaces these per target speaker via setAnchorOffsets.
-    float mapOff[kAnchors][3] =
-    {
-        { 1.2f, 0.6f, 0.0f },    // a
-        { 0.0f, 0.8f, 0.5f },    // i
-        { 0.4f, 1.2f, 0.3f },    // u
-        { 0.8f, 0.8f, 0.3f },    // e
-        { 0.9f, 0.4f, 0.0f },    // o
-    };
+    // active anchor offsets (semitones, {F1, F2, F3} per vowel a,i,u,e,o).
+    // Set through setMap() — the AEIOU Character presets or the user's
+    // Custom values (see dsp/AEIOUCharacterPresets.h); the constructor
+    // starts on the Natural map.
+    float mapOff[kAnchors][3] = {};
 
     float amount = 0.0f;
     float aAtk = 0.3f, aRel = 0.12f, aGone = 0.07f;

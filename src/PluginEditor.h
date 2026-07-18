@@ -1603,6 +1603,238 @@ struct FnTimer : public juce::Timer
     void timerCallback() override { if (fn) fn(); }
 };
 
+// ---------------------------------------------------------------------------
+// AEIOU Character DETAIL window (v0.26.0): per-vowel F1-F3 map viewer/editor.
+// Built-in Characters are shown read-only; the Custom character attaches the
+// 15 sliders to the va_*_f* APVTS parameters. A 4 Hz poll follows character
+// switches and per-parameter locks (same style as the editor's histPoll).
+class AEIOUCharacterPanel : public juce::Component, private juce::Timer
+{
+public:
+    explicit AEIOUCharacterPanel (VoxMorphProcessor& p)
+        : proc (p), pChar (p.apvts.getRawParameterValue ("vcharacter"))
+    {
+        charLbl.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
+        charLbl.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+        addAndMakeVisible (charLbl);
+
+        copyBtn.setTooltip (juce::String::fromUTF8 (
+            "Copies the current built-in Character's 15 values into Custom and "
+            "switches to Custom for editing.\n\n"
+            "現在の内蔵Characterの15値をCustomへコピーし、編集用にCustomへ切り替えます。"));
+        copyBtn.onClick = [this] { copyToCustom(); };
+        addAndMakeVisible (copyBtn);
+
+        resetBtn.setTooltip (juce::String::fromUTF8 (
+            "Resets the Custom map to the Natural preset values.\n\n"
+            "CustomのマップをNaturalの初期値へ戻します。"));
+        resetBtn.onClick = [this] { resetCustom(); };
+        addAndMakeVisible (resetBtn);
+
+        note.setText (juce::String::fromUTF8 (
+            "Built-in Characters are read-only. Use \"Copy to Custom\" to edit. / "
+            "内蔵Characterは読み取り専用です。編集する場合は「Copy to Custom」でCustomへコピーしてください。"),
+            juce::dontSendNotification);
+        note.setFont (juce::Font (juce::FontOptions (12.0f)));
+        note.setColour (juce::Label::textColourId, juce::Colours::grey);
+        addAndMakeVisible (note);
+
+        static const char* colTxt[3] = { "F1 Shift (st)", "F2 Shift (st)", "F3 Shift (st)" };
+        for (int f = 0; f < 3; ++f)
+        {
+            colLbl[f].setText (colTxt[f], juce::dontSendNotification);
+            colLbl[f].setFont (juce::Font (juce::FontOptions (12.5f, juce::Font::bold)));
+            colLbl[f].setJustificationType (juce::Justification::centred);
+            addAndMakeVisible (colLbl[f]);
+        }
+        static const char* vowTxt[5] = { "A / \xe3\x81\x82", "I / \xe3\x81\x84",
+                                         "U / \xe3\x81\x86", "E / \xe3\x81\x88",
+                                         "O / \xe3\x81\x8a" };
+        static constexpr float rng[3] = { 2.0f, 3.0f, 1.5f };
+        for (int v = 0; v < 5; ++v)
+        {
+            vowLbl[v].setText (juce::String::fromUTF8 (vowTxt[v]), juce::dontSendNotification);
+            vowLbl[v].setFont (juce::Font (juce::FontOptions (13.0f)));
+            addAndMakeVisible (vowLbl[v]);
+            for (int f = 0; f < 3; ++f)
+            {
+                auto& s = cell[v][f];
+                s.setSliderStyle (juce::Slider::LinearHorizontal);
+                s.setTextBoxStyle (juce::Slider::TextBoxRight, false, 52, 18);
+                s.setRange (-rng[f], rng[f], 0.01);
+                s.setDoubleClickReturnValue (true,
+                    getAEIOUCharacterMap (AEIOUCharacter::natural).offset[v][f]);
+                addAndMakeVisible (s);
+            }
+        }
+
+        closeBtn.onClick = [this]
+        {
+            if (auto* dw = findParentComponentOfClass<juce::DocumentWindow>())
+                dw->setVisible (false);
+        };
+        addAndMakeVisible (closeBtn);
+
+        setSize (620, 420);
+        sync (true);
+        startTimerHz (4);
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (14, 10);
+        auto top = r.removeFromTop (28);
+        charLbl.setBounds (top.removeFromLeft (240));
+        resetBtn.setBounds (top.removeFromRight (120).reduced (0, 2));
+        top.removeFromRight (6);
+        copyBtn.setBounds (top.removeFromRight (130).reduced (0, 2));
+        r.removeFromTop (2);
+        note.setBounds (r.removeFromTop (20));
+        r.removeFromTop (6);
+
+        auto hdr = r.removeFromTop (18);
+        hdr.removeFromLeft (76);
+        const int cw = hdr.getWidth() / 3;
+        for (int f = 0; f < 3; ++f)
+            colLbl[f].setBounds (hdr.removeFromLeft (cw));
+
+        for (int v = 0; v < 5; ++v)
+        {
+            auto row = r.removeFromTop (46);
+            vowLbl[v].setBounds (row.removeFromLeft (76));
+            const int cw2 = row.getWidth() / 3;
+            for (int f = 0; f < 3; ++f)
+                cell[v][f].setBounds (row.removeFromLeft (cw2).reduced (4, 8));
+        }
+        closeBtn.setBounds (getLocalBounds().reduced (14, 10)
+                                .removeFromBottom (26).removeFromRight (90));
+    }
+
+private:
+    static juce::String customId (int v, int f)
+    {
+        static const char* vw[5] = { "a", "i", "u", "e", "o" };
+        return juce::String ("va_") + vw[v] + "_f" + juce::String (f + 1);
+    }
+
+    void timerCallback() override { sync (false); }
+
+    // mirror the current character into the grid: Custom = attached and
+    // editable (minus locked params), built-ins = detached read-only values
+    void sync (bool force)
+    {
+        const int ch = juce::jlimit (0, kAEIOUNumCharacters - 1,
+                                     (int) pChar->load());
+        const bool custom = ch == (int) AEIOUCharacter::custom;
+        if (force || ch != lastCh)
+        {
+            static const char* names[8] = { "Natural", "Soft", "Active", "Loli",
+                                            "Anime", "Elegant", "Uni", "Custom" };
+            charLbl.setText (juce::String ("Character: ") + names[ch],
+                             juce::dontSendNotification);
+            for (int v = 0; v < 5; ++v)
+                for (int f = 0; f < 3; ++f)
+                {
+                    auto& s = cell[v][f];
+                    if (custom)
+                    {
+                        if (att[v][f] == nullptr)
+                            att[v][f] = std::make_unique<
+                                juce::AudioProcessorValueTreeState::SliderAttachment> (
+                                    proc.apvts, customId (v, f), s);
+                    }
+                    else
+                    {
+                        att[v][f].reset();
+                        s.setValue (getAEIOUCharacterMap ((AEIOUCharacter) ch).offset[v][f],
+                                    juce::dontSendNotification);
+                    }
+                }
+            lastCh = ch;
+        }
+        for (int v = 0; v < 5; ++v)
+            for (int f = 0; f < 3; ++f)
+                cell[v][f].setEnabled (custom && ! proc.isParamLocked (customId (v, f)));
+        copyBtn.setEnabled (! custom);
+        resetBtn.setEnabled (custom);
+    }
+
+    void copyToCustom()
+    {
+        const int ch = juce::jlimit (0, kAEIOUNumCharacters - 1,
+                                     (int) pChar->load());
+        if (ch == (int) AEIOUCharacter::custom) return;
+        const auto& m = getAEIOUCharacterMap ((AEIOUCharacter) ch);
+        proc.history.group ([&]
+        {
+            for (int v = 0; v < 5; ++v)
+                for (int f = 0; f < 3; ++f)
+                {
+                    const auto id = customId (v, f);
+                    if (proc.isParamLocked (id)) continue;
+                    if (auto* rp = proc.apvts.getParameter (id))
+                    {
+                        rp->beginChangeGesture();
+                        rp->setValueNotifyingHost (rp->convertTo0to1 (m.offset[v][f]));
+                        rp->endChangeGesture();
+                    }
+                }
+            if (! proc.isParamLocked ("vcharacter"))
+                if (auto* cp = proc.apvts.getParameter ("vcharacter"))
+                {
+                    cp->beginChangeGesture();
+                    cp->setValueNotifyingHost (
+                        cp->convertTo0to1 ((float) AEIOUCharacter::custom));
+                    cp->endChangeGesture();
+                }
+        });
+        sync (true);
+    }
+
+    void resetCustom()   // back to the Natural defaults (no confirmation)
+    {
+        proc.history.group ([&]
+        {
+            for (int v = 0; v < 5; ++v)
+                for (int f = 0; f < 3; ++f)
+                {
+                    const auto id = customId (v, f);
+                    if (proc.isParamLocked (id)) continue;
+                    if (auto* rp = proc.apvts.getParameter (id))
+                    {
+                        rp->beginChangeGesture();
+                        rp->setValueNotifyingHost (rp->getDefaultValue());
+                        rp->endChangeGesture();
+                    }
+                }
+        });
+    }
+
+    VoxMorphProcessor& proc;
+    std::atomic<float>* pChar = nullptr;
+    juce::Label charLbl, note, colLbl[3], vowLbl[5];
+    juce::TextButton copyBtn { "Copy to Custom" }, resetBtn { "Reset Custom" },
+                     closeBtn { "Close" };
+    juce::Slider cell[5][3];
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> att[5][3];
+    int lastCh = -1;
+};
+
+class AEIOUCharacterWindow : public juce::DocumentWindow
+{
+public:
+    explicit AEIOUCharacterWindow (VoxMorphProcessor& p)
+        : juce::DocumentWindow ("AEIOU Character Detail",
+                                juce::Colour (0xfffcf9f9), juce::DocumentWindow::closeButton)
+    {
+        setUsingNativeTitleBar (true);
+        setContentOwned (new AEIOUCharacterPanel (p), true);
+        centreWithSize (getWidth(), getHeight());
+        setVisible (true);
+    }
+    void closeButtonPressed() override { setVisible (false); }
+};
+
 class VoxMorphEditor : public juce::AudioProcessorEditor,
                        private juce::Timer
 {
@@ -1732,21 +1964,43 @@ public:
             tip ("Boost or cut around the third formant. Boosting adds sheen and 'sparkle' - "
                  "this region carries much of a voice's charm.",
                  "第3フォルマント付近の強さ。上げると艶・張りが出ます。声の「華」が乗る帯域です。"));
-        addToggleRow ("vadapt", "Vowel Adaptive Warp (Beta)",
-            tip ("EXPERIMENTAL. Estimates the current vowel / formant pattern while you speak "
-                 "and applies small adaptive offsets to F1-F3, nudging each vowel toward the "
-                 "target speaker's version of that vowel. Your manual F1-F3 settings remain "
-                 "the base values; this only adds a little on top. Off = previous behaviour.",
-                 "実験的機能。発音中の母音・フォルマント配置を推定し、F1〜F3の変換量を"
-                 "自動で微調整します(母音ごとにターゲット話者らしい響きへ近づけます)。"
-                 "手動のF1〜F3設定は基本値としてそのまま維持され、その上に少量の補正が"
-                 "乗るだけです。オフ=従来どおり。"));
-        addSliderRow ("vamount", "Vowel Adapt Amount (%)",
-            tip ("Strength of the vowel-adaptive offsets. 0 % = identical to the feature "
-                 "being off. Start around 30-50 % and listen; the correction is deliberately "
-                 "small even at 100 %.",
-                 "母音適応補正の強さ。0%=機能オフと完全に同じ音。まず30〜50%で試して"
-                 "ください。100%でも補正量は控えめに制限されています。"));
+        addToggleRow ("vadapt", "AEIOU Character",
+            tip ("Shapes the voice character by applying different F1-F3 adjustments to the "
+                 "estimated A/E/I/O/U vowel regions. Your manual F1-F3 settings remain the "
+                 "base values; the per-vowel offsets are added on top. Off = previous behaviour.",
+                 "発音中の「あ・い・う・え・お」を推定し、母音ごとにF1〜F3の響きを調整して"
+                 "声のキャラクターを作ります。手動のF1〜F3設定は基本値としてそのまま維持され、"
+                 "その上に母音別の補正が乗ります。オフ=従来どおり。"));
+        addComboRow ("vcharacter", "Character",
+            tip ("Choose the voice character:\n"
+                 "Natural - natural feminine balance / Soft - soft and rounded / "
+                 "Active - bright and energetic / Loli - small and youthful / "
+                 "Anime - exaggerated vowel contrast / Elegant - calm and refined / "
+                 "Uni - neutral and androgynous / Custom - your own A-I-U-E-O map (DETAIL...).",
+                 "声のキャラクターを選びます:\n"
+                 "Natural=自然な女性声 / Soft=柔らかい声 / Active=元気な声 / "
+                 "Loli=幼な声 / Anime=アニメ声 / Elegant=お姉さん声 / "
+                 "Uni=中性声 / Custom=詳細モード(DETAIL...の母音別設定を使用)。"));
+        addSliderRow ("vamount", "AEIOU Amount (%)",
+            tip ("Strength of the selected character's per-vowel offsets. 0 % = identical "
+                 "to the feature being off. Around 40-70 % is a good starting range.",
+                 "選択したキャラクター補正の強さ。0%=機能オフと完全に同じ音。"
+                 "まず40〜70%あたりから試してください。"));
+        addButtonRow ("Vowel Detail", "DETAIL...",
+            tip ("Opens a window to view and edit the per-vowel F1-F3 settings. Built-in "
+                 "Characters are shown read-only; \"Copy to Custom\" makes them editable.",
+                 "母音別のF1〜F3設定を確認・編集するウィンドウを開きます。内蔵Characterは"
+                 "読み取り専用で、「Copy to Custom」でCustomへコピーすると編集できます。"),
+            [this]
+            {
+                if (aeiouWin == nullptr)
+                    aeiouWin = std::make_unique<AEIOUCharacterWindow> (proc);
+                else
+                {
+                    aeiouWin->setVisible (true);
+                    aeiouWin->toFront (true);
+                }
+            });
 
         addSection ("INTONATION");
         addSliderRow ("range", "Intonation Amount (%)",
@@ -2106,6 +2360,46 @@ private:
         }
     };
 
+    struct ComboRow : public juce::Component
+    {
+        juce::Label      name;
+        juce::ComboBox   combo;
+        juce::TextButton reset, lock;
+        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> att;
+        ComboRow()
+        {
+            addAndMakeVisible (name);
+            addAndMakeVisible (combo);
+            addAndMakeVisible (reset);
+            addAndMakeVisible (lock);
+        }
+        void resized() override
+        {
+            auto r = getLocalBounds();
+            name.setBounds (r.removeFromLeft (168));
+            lock.setBounds  (r.removeFromRight (30).reduced (3));
+            reset.setBounds (r.removeFromRight (30).reduced (3));
+            combo.setBounds (r.reduced (0, 3));
+        }
+    };
+
+    struct ButtonRow : public juce::Component
+    {
+        juce::Label      name;
+        juce::TextButton btn;
+        ButtonRow()
+        {
+            addAndMakeVisible (name);
+            addAndMakeVisible (btn);
+        }
+        void resized() override
+        {
+            auto r = getLocalBounds();
+            name.setBounds (r.removeFromLeft (168));
+            btn.setBounds (r.removeFromLeft (150).reduced (0, 3));
+        }
+    };
+
     // ---- builders -----------------------------------------------------------
     void addSection (const char* text)
     {
@@ -2189,6 +2483,51 @@ private:
         owned.push_back (std::move (row));
     }
 
+    void addComboRow (const juce::String& id, const juce::String& displayName, const juce::String& tipText)
+    {
+        auto row = std::make_unique<ComboRow>();
+        row->name.setText (displayName, juce::dontSendNotification);
+        row->name.setTooltip (tipText);
+        row->name.setFont (juce::Font (juce::FontOptions (13.0f)));
+
+        auto* rp = proc.apvts.getParameter (id);
+        if (auto* cp = dynamic_cast<juce::AudioParameterChoice*> (rp))
+            for (int i = 0; i < cp->choices.size(); ++i)
+                row->combo.addItem (cp->choices[i], i + 1);
+        row->combo.setTooltip (tipText);
+        row->att = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
+                        proc.apvts, id, row->combo);
+
+        row->reset.setButtonText (juce::String::fromUTF8 ("\xE2\x86\xBA"));
+        row->reset.setTooltip (tip ("Reset to default.", "初期値に戻します。"));
+        row->reset.onClick = [rp]
+        {
+            rp->beginChangeGesture();
+            rp->setValueNotifyingHost (rp->getDefaultValue());
+            rp->endChangeGesture();
+        };
+        wireLock (row->lock, id, { &row->combo, &row->reset, &row->name });
+
+        content.addAndMakeVisible (*row);
+        items.push_back ({ row.get(), 30 });
+        owned.push_back (std::move (row));
+    }
+
+    void addButtonRow (const juce::String& displayName, const juce::String& btnText,
+                       const juce::String& tipText, std::function<void()> onClick)
+    {
+        auto row = std::make_unique<ButtonRow>();
+        row->name.setText (displayName, juce::dontSendNotification);
+        row->name.setTooltip (tipText);
+        row->name.setFont (juce::Font (juce::FontOptions (13.0f)));
+        row->btn.setButtonText (btnText);
+        row->btn.setTooltip (tipText);
+        row->btn.onClick = std::move (onClick);
+        content.addAndMakeVisible (*row);
+        items.push_back ({ row.get(), 30 });
+        owned.push_back (std::move (row));
+    }
+
     void addToggleRow (const juce::String& id, const juce::String& displayName, const juce::String& tipText)
     {
         auto row = std::make_unique<ToggleRow>();
@@ -2235,6 +2574,9 @@ private:
     struct Item { juce::Component* comp; int h; };
     std::vector<Item> items;
     std::vector<std::unique_ptr<juce::Component>> owned;
+    // AEIOU Character DETAIL window (child of this editor: destroyed with
+    // it, re-fronted instead of duplicated on repeated DETAIL clicks)
+    std::unique_ptr<AEIOUCharacterWindow> aeiouWin;
     juce::Label footer;
     juce::String defaultFooterText;
 
