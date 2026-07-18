@@ -1732,6 +1732,21 @@ public:
             tip ("Boost or cut around the third formant. Boosting adds sheen and 'sparkle' - "
                  "this region carries much of a voice's charm.",
                  "第3フォルマント付近の強さ。上げると艶・張りが出ます。声の「華」が乗る帯域です。"));
+        addToggleRow ("vadapt", "Vowel Adaptive Warp (Beta)",
+            tip ("EXPERIMENTAL. Estimates the current vowel / formant pattern while you speak "
+                 "and applies small adaptive offsets to F1-F3, nudging each vowel toward the "
+                 "target speaker's version of that vowel. Your manual F1-F3 settings remain "
+                 "the base values; this only adds a little on top. Off = previous behaviour.",
+                 "実験的機能。発音中の母音・フォルマント配置を推定し、F1〜F3の変換量を"
+                 "自動で微調整します(母音ごとにターゲット話者らしい響きへ近づけます)。"
+                 "手動のF1〜F3設定は基本値としてそのまま維持され、その上に少量の補正が"
+                 "乗るだけです。オフ=従来どおり。"));
+        addSliderRow ("vamount", "Vowel Adapt Amount (%)",
+            tip ("Strength of the vowel-adaptive offsets. 0 % = identical to the feature "
+                 "being off. Start around 30-50 % and listen; the correction is deliberately "
+                 "small even at 100 %.",
+                 "母音適応補正の強さ。0%=機能オフと完全に同じ音。まず30〜50%で試して"
+                 "ください。100%でも補正量は控えめに制限されています。"));
 
         addSection ("INTONATION");
         addSliderRow ("range", "Intonation Amount (%)",

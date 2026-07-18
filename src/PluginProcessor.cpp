@@ -29,6 +29,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::NormalisableRange<float> (-6.0f, 6.0f, 0.01f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "f3gain", 1 }, "F3 Gain (dB)",
                 juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f));
+    // Vowel-Adaptive Formant Warp (Beta, v0.25.0). Defaults keep old
+    // sessions bit-identical (off / 0 %).
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "vadapt", 1 }, "Vowel Adaptive Warp", false));
+    layout.add (std::make_unique<P> (juce::ParameterID { "vamount", 1 }, "Vowel Adapt Amount (%)",
+                juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "breath2", 1 }, "Breath",
                 juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "air", 1 }, "Natural Air",
@@ -120,6 +126,8 @@ VoxMorphProcessor::VoxMorphProcessor()
     pF2G = apvts.getRawParameterValue ("f2gain");
     pF3S = apvts.getRawParameterValue ("f3shift");
     pF3G = apvts.getRawParameterValue ("f3gain");
+    pVAdapt  = apvts.getRawParameterValue ("vadapt");
+    pVAmount = apvts.getRawParameterValue ("vamount");
     pBreath2 = apvts.getRawParameterValue ("breath2");
     pAir     = apvts.getRawParameterValue ("air");
     pAirShine = apvts.getRawParameterValue ("airshine");
@@ -372,6 +380,8 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.f1Shift = pF1S->load();  p.f1Gain = pF1G->load();
     p.f2Shift = pF2S->load();  p.f2Gain = pF2G->load();
     p.f3Shift = pF3S->load();  p.f3Gain = pF3G->load();
+    p.vowelAdapt    = pVAdapt->load() > 0.5f;      // Beta
+    p.vowelAdaptAmt = pVAmount->load() * 0.01f;    // % -> 0..1
     p.jitter        = pJitter->load();
     p.robotize      = pRobot->load() > 0.5f;
     p.lowVoice      = pLowVoice->load() > 0.5f;

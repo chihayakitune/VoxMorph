@@ -73,6 +73,34 @@ static std::vector<float> makeVowel (double f0a, double f0b, double seconds)
     return v;
 }
 
+// vowel with custom formant frequencies (for the vowel-adaptive warp tests)
+static std::vector<float> makeVowelF (double f0, double F1, double F2, double F3,
+                                      double seconds)
+{
+    const int n = (int) (FS * seconds);
+    std::vector<double> src ((size_t) n, 0.0);
+    double phase = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        phase += f0 / FS;
+        if (phase >= 1.0) { phase -= 1.0; src[(size_t)i] = 1.0; }
+    }
+    Reso r1 (F1, 110.0), r2 (F2, 120.0), r3 (F3, 160.0);
+    std::vector<double> y ((size_t) n, 0.0);
+    double maxA = 1e-12;
+    for (int i = 0; i < n; ++i)
+    {
+        const double s = r1.tick (src[(size_t)i]) + 0.7 * r2.tick (src[(size_t)i])
+                       + 0.35 * r3.tick (src[(size_t)i]);
+        y[(size_t)i] = s;
+        maxA = std::max (maxA, std::abs (s));
+    }
+    std::vector<float> v ((size_t) n, 0.0f);
+    for (int i = 0; i < n; ++i)
+        v[(size_t)i] = (float) (0.7 * y[(size_t)i] / maxA);
+    return v;
+}
+
 // unvoiced "consonant": white noise through a 3 kHz resonator
 static std::vector<float> makeNoiseCons (double seconds)
 {
@@ -807,6 +835,180 @@ int main()
     std::printf ("Natural Air v2 checks: %s (%d failure(s))\n",
                  naFail == 0 ? "ALL PASS" : "FAILURES", naFail);
 
+    std::puts ("\n== Vowel-Adaptive Formant Warp (Beta) ==");
+    int vaFail = 0;
+
+    // (a) compatibility: disabled (whatever the amount) and amount 0 must be
+    // bit-identical to the previous behaviour, with and without manual F1-F3
+    {
+        const auto aVow = makeVowel (120.0, 120.0, 2.0);
+        P p0; p0.pitchSemi = 7.0f; p0.f2Shift = 3.0f;
+        P p1 = p0; p1.vowelAdapt = false; p1.vowelAdaptAmt = 1.0f;
+        P p2 = p0; p2.vowelAdapt = true;  p2.vowelAdaptAmt = 0.0f;
+        P q0; q0.pitchSemi = 7.0f;                       // no manual F1-F3
+        P q2 = q0; q2.vowelAdapt = true; q2.vowelAdaptAmt = 0.0f;
+        const auto o0 = run (aVow, p0), o1 = run (aVow, p1), o2 = run (aVow, p2);
+        const auto u0 = run (aVow, q0), u2 = run (aVow, q2);
+        double d1 = 0.0, d2 = 0.0, d3 = 0.0;
+        for (size_t i = 0; i < o0.size(); ++i)
+        {
+            d1 = std::max (d1, (double) std::abs (o1[i] - o0[i]));
+            d2 = std::max (d2, (double) std::abs (o2[i] - o0[i]));
+            d3 = std::max (d3, (double) std::abs (u2[i] - u0[i]));
+        }
+        const bool ok = d1 == 0.0 && d2 == 0.0 && d3 == 0.0;
+        std::printf ("off/amount-0 compatibility: max diff %.2e / %.2e / %.2e  %s\n",
+                     d1, d2, d3, ok ? "PASS (bit-identical)" : "FAIL");
+        if (! ok) ++vaFail;
+    }
+
+    // (b) vowel coordinate sanity + bounded effect on a steady /a/-like
+    // vowel (F1 700 / F2 1220): open (height high), back-ish (frontness low)
+    {
+        const auto aVow = makeVowel (120.0, 120.0, 2.5);
+        PsolaEngine eng;
+        eng.prepare (FS);
+        P p; p.pitchSemi = 7.0f; p.vowelAdapt = true; p.vowelAdaptAmt = 1.0f;
+        eng.setParams (p);
+        std::vector<float> out (aVow.size(), 0.0f);
+        for (size_t i = 0; i < aVow.size(); i += 256)
+            eng.process (aVow.data() + i, out.data() + i,
+                         (int) std::min ((size_t) 256, aVow.size() - i));
+        const float h = eng.vowelHeight(), fr = eng.vowelFrontness();
+        const float cf = eng.vowelConfidence();
+        const float o1 = eng.vowelOffsetSemi (0), o2 = eng.vowelOffsetSemi (1),
+                    o3 = eng.vowelOffsetSemi (2);
+        P pOff; pOff.pitchSemi = 7.0f;
+        const auto oRef = run (aVow, pOff);
+        const double dDb = 20.0 * std::log10 (std::max (rmsOf (out), 1e-12)
+                                            / std::max (rmsOf (oRef), 1e-12));
+        std::printf ("/a/ vowel: height=%.2f frontness=%.2f conf=%.2f  "
+                     "offsets=%+.2f/%+.2f/%+.2f st  level %+0.2f dB  NaN/Inf=%s\n",
+                     h, fr, cf, o1, o2, o3, dDb, hasBad (out) ? "FOUND" : "none");
+        const bool ok = ! hasBad (out)
+                     && h > 0.55f && fr < 0.45f && cf > 0.2f
+                     && std::abs (o1) <= 2.0f && std::abs (o2) <= 3.0f
+                     && std::abs (o3) <= 1.5f && std::abs (o1) > 0.05f
+                     && std::abs (dDb) < 1.5;
+        std::printf ("vowel coordinate + bounded offsets: %s\n", ok ? "PASS" : "FAIL");
+        if (! ok) ++vaFail;
+    }
+
+    // (c) adaptivity + smoothing: /a/ then /i/-like vowel. The offsets must
+    // differ between the vowels (that is the point of the feature) and must
+    // never jump between blocks, even across the abrupt vowel switch.
+    // Afterwards silence: the offsets must release smoothly to ~0.
+    {
+        auto seq = makeVowel (120.0, 120.0, 1.5);                        // /a/
+        const auto iv = makeVowelF (120.0, 300.0, 2300.0, 3100.0, 1.5);  // /i/
+        seq.insert (seq.end(), iv.begin(), iv.end());
+        seq.insert (seq.end(), (size_t) FS, 0.0f);                       // silence
+        PsolaEngine eng;
+        eng.prepare (FS);
+        P p; p.pitchSemi = 7.0f; p.vowelAdapt = true; p.vowelAdaptAmt = 1.0f;
+        eng.setParams (p);
+        std::vector<float> out (seq.size(), 0.0f);
+        float prev[3] = { 0, 0, 0 }, jump = 0.0f;
+        float offA1 = 0.0f, offI1 = 0.0f, offEnd = 0.0f;
+        for (size_t i = 0; i < seq.size(); i += 256)
+        {
+            eng.process (seq.data() + i, out.data() + i,
+                         (int) std::min ((size_t) 256, seq.size() - i));
+            for (int k = 0; k < 3; ++k)
+            {
+                const float o = eng.vowelOffsetSemi (k);
+                if (i > (size_t) (FS / 2))
+                    jump = std::max (jump, std::abs (o - prev[k]));
+                prev[k] = o;
+            }
+            if (i / 256 == (size_t) (1.4 * FS) / 256) offA1 = eng.vowelOffsetSemi (0);
+            if (i / 256 == (size_t) (2.9 * FS) / 256) offI1 = eng.vowelOffsetSemi (0);
+        }
+        offEnd = std::max ({ std::abs (eng.vowelOffsetSemi (0)),
+                             std::abs (eng.vowelOffsetSemi (1)),
+                             std::abs (eng.vowelOffsetSemi (2)) });
+        std::printf ("/a/->/i/->silence: F1 offset a=%+.2f i=%+.2f st  "
+                     "max block jump=%.3f st  after 1 s silence=%.3f st\n",
+                     offA1, offI1, jump, offEnd);
+        const bool ok = ! hasBad (out)
+                     && (offA1 - offI1) > 0.3f     // open vowel gets more F1
+                     && jump < 0.35f               // no per-block steps
+                     && offEnd < 0.06f;            // released on unvoiced
+        std::printf ("adaptivity + smoothing + unvoiced release: %s\n",
+                     ok ? "PASS" : "FAIL");
+        if (! ok) ++vaFail;
+    }
+
+    // (d) estimator robustness: garbage inputs (NaN/Inf/zero/reversed
+    // ordering) must keep every output finite and decay the offsets to 0
+    {
+        VowelAdaptiveWarp w;
+        w.prepare (FS, 512);
+        w.setAmount (1.0f);
+        VowelAdaptiveWarp::Input good { 700.0f, 1220.0f, 2600.0f, 1.0f, true };
+        for (int i = 0; i < 200; ++i) w.process (good);   // establish an offset
+        const float est = w.offsetSemi (0);
+        const VowelAdaptiveWarp::Input bad[] =
+        {
+            { 0.0f, 0.0f, 0.0f, 1.0f, true },
+            { std::nanf (""), 1500.0f, 2500.0f, 1.0f, true },
+            { 500.0f, INFINITY, 2500.0f, 1.0f, true },
+            { 2000.0f, 500.0f, 2500.0f, 1.0f, true },     // F1 >= F2
+            { 500.0f, 520.0f, 2500.0f, 1.0f, true },      // F2 too close
+            { -100.0f, 1500.0f, 2500.0f, INFINITY, true },
+        };
+        bool finiteAll = true;
+        for (int r = 0; r < 100; ++r)
+            for (const auto& b : bad)
+            {
+                w.process (b);
+                for (int k = 0; k < 3; ++k)
+                    finiteAll = finiteAll && std::isfinite (w.offsetSemi (k));
+                finiteAll = finiteAll && std::isfinite (w.vowelHeight())
+                                      && std::isfinite (w.vowelFrontness())
+                                      && std::isfinite (w.confidence());
+            }
+        const float rem = std::abs (w.offsetSemi (0));
+        const bool ok = finiteAll && est > 0.05f && rem < 0.01f;
+        std::printf ("garbage-input robustness: est=%.2f -> residual=%.4f st, "
+                     "all finite=%s  %s\n", est, rem, finiteAll ? "yes" : "NO",
+                     ok ? "PASS" : "FAIL");
+        if (! ok) ++vaFail;
+    }
+
+    // (e) no allocation in process() after warm-up with the warp engaged,
+    // and mode coexistence (Low Voice + GCI + Natural Air + adaptive warp;
+    // Low Latency separately) — outputs must stay finite
+    {
+        PsolaEngine eng;
+        eng.prepare (FS);
+        P p; p.pitchSemi = 7.0f; p.vowelAdapt = true; p.vowelAdaptAmt = 1.0f;
+        p.lowVoice = true; p.gciSync = true; p.airPreserve = 1.0f;
+        eng.setParams (p);
+        const auto creaky = makeCreaky (55.0, 3.0);
+        std::vector<float> out (creaky.size(), 0.0f);
+        size_t i = 0;
+        for (; i + 256 <= (size_t) FS; i += 256)
+            eng.process (creaky.data() + i, out.data() + i, 256);
+        g_allocCount = 0;  g_countAlloc = true;
+        for (; i + 256 <= creaky.size(); i += 256)
+            eng.process (creaky.data() + i, out.data() + i, 256);
+        g_countAlloc = false;
+
+        P pl; pl.pitchSemi = 7.0f; pl.vowelAdapt = true; pl.vowelAdaptAmt = 1.0f;
+        pl.lowLatency = true;
+        const auto oL = run (makeVowel (120.0, 120.0, 2.0), pl);
+        const bool ok = g_allocCount == 0 && ! hasBad (out) && ! hasBad (oL);
+        std::printf ("allocations after warm-up=%ld, LowVoice+GCI+Air ok=%s, "
+                     "LowLatency ok=%s  %s\n", g_allocCount,
+                     hasBad (out) ? "NO" : "yes", hasBad (oL) ? "NO" : "yes",
+                     ok ? "PASS" : "FAIL");
+        if (! ok) ++vaFail;
+    }
+
+    std::printf ("Vowel-Adaptive Warp checks: %s (%d failure(s))\n",
+                 vaFail == 0 ? "ALL PASS" : "FAILURES", vaFail);
+
     std::puts ("done");
-    return naFail == 0 ? 0 : 1;
+    return (naFail + vaFail) == 0 ? 0 : 1;
 }

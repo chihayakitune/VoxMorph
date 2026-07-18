@@ -22,6 +22,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
+#include "VowelAdaptiveWarp.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846   // MSVC (Windows) では未定義のため
@@ -63,6 +64,15 @@ public:
         // Low Latency Mode: halves the lookahead (43 -> ~21 ms). Pitch
         // tracking floor rises to ~90 Hz. Ignored while lowVoice is on.
         bool  lowLatency = false;
+
+        // Vowel-Adaptive Formant Warp (Beta): estimates the current vowel
+        // (continuous height/frontness coordinate from the tracked F1/F2)
+        // and ADDS small per-vowel offsets to the F1/F2/F3 shifts above,
+        // so each vowel is nudged toward the target speaker's version of
+        // that same vowel. The manual shifts stay the base values. Off (or
+        // amount 0) = bit-identical to previous versions.
+        bool  vowelAdapt    = false;
+        float vowelAdaptAmt = 0.0f;   // 0..1 overall strength
 
         // Natural Air (standard since v0.24.0): keeps the voice's own
         // breath / aperiodic detail while suppressing old-pitch leakage.
@@ -176,6 +186,9 @@ public:
         airP   = curP;
         airK   = 1.0f - std::exp ((float) (-1.0 / (0.005 * fs)));          // ~5 ms gate
 
+        vaw.prepare (sampleRate, 512);        // vowel-adaptive warp (control rate)
+        vaHiScale = 1.0f;
+
         airSplit.setup (sampleRate);
         airSplit.reset();
         airCombT = 0.0f;
@@ -286,6 +299,16 @@ public:
         fShiftRatio[1] = std::pow (2.0f, q.f2Shift / 12.0f);
         fShiftRatio[2] = std::pow (2.0f, q.f3Shift / 12.0f);
         fGainDb[0] = q.f1Gain;  fGainDb[1] = q.f2Gain;  fGainDb[2] = q.f3Gain;
+
+        // Vowel-Adaptive Formant Warp: off (or amount 0) must be a perfect
+        // no-op, so the enable flag collapses into the amount
+        const float vaAmt = q.vowelAdapt
+                          ? std::clamp (q.vowelAdaptAmt, 0.0f, 1.0f) : 0.0f;
+        vaw.setAmount (vaAmt);
+        const bool vaOnNew = vaAmt > 1.0e-4f;
+        if (vaOn && ! vaOnNew)
+            vaw.reset();          // instant off, like the manual F1-F3 knobs
+        vaOn = vaOnNew;
         perFmt = std::abs (q.f1Shift) > 0.01f || std::abs (q.f2Shift) > 0.01f
               || std::abs (q.f3Shift) > 0.01f || std::abs (q.f1Gain) > 0.05f
               || std::abs (q.f2Gain)  > 0.05f || std::abs (q.f3Gain) > 0.05f;
@@ -447,6 +470,8 @@ public:
             detectPitch();
             if (airAmt > 0.001f)
                 updateAirBands();
+            if (vaOn)
+                updateVowelAdapt();
             sinceDetect = 0;
         }
 
@@ -500,6 +525,13 @@ public:
 
     bool  isVoiced()  const { return voiced; }
     float currentF0() const { return voiced ? (float) fs / curP : 0.0f; }
+
+    // Vowel-Adaptive Formant Warp debug taps (Phase 1 observability; safe to
+    // read from any thread — plain floats, display only)
+    float vowelHeight()          const { return vaw.vowelHeight(); }
+    float vowelFrontness()       const { return vaw.vowelFrontness(); }
+    float vowelConfidence()      const { return vaw.confidence(); }
+    float vowelOffsetSemi (int i) const { return vaw.offsetSemi (i); }
 
 private:
     static constexpr int kRing = 1 << 15;
@@ -899,6 +931,26 @@ private:
             nNotch = 0;
     }
 
+    // ------------- Vowel-Adaptive Formant Warp (control rate) -------------
+    // Runs right after detectPitch every 512 samples, only while the
+    // feature is on. Feeds the estimator the tracked formants converted
+    // back to the INPUT domain: trackF[] follows the resampled grain
+    // content, i.e. input formants x the global formant ratio, so divide
+    // by the smoothed ratio. (While the High Range guard is reducing the
+    // effective formant ratio this de-scale is approximate; the applied
+    // offsets are scaled down by the same guard anyway, see vaHiScale.)
+    void updateVowelAdapt()
+    {
+        VowelAdaptiveWarp::Input vi;
+        const float fr1 = std::max (0.25f, frSm);
+        vi.f1Hz = trackF[0] > 0.0f ? trackF[0] / fr1 : -1.0f;
+        vi.f2Hz = trackF[1] > 0.0f ? trackF[1] / fr1 : -1.0f;
+        vi.f3Hz = trackF[2] > 0.0f ? trackF[2] / fr1 : -1.0f;
+        vi.pitchConf = pitchConf;
+        vi.voiced    = voiced;
+        vaw.process (vi);
+    }
+
     // ---------------- Natural Air v2: spectral air cleanup ----------------
     // The bypassed air is delayed by D samples before it reaches the output,
     // which leaves room to run a windowed FFT pass over it with NO added
@@ -994,6 +1046,11 @@ private:
         if (wHi > 0.0f)
             fRat = std::pow (frSm, 1.0f - wHi * (1.0f - hiFAmt));
         const float f = std::max (0.25f, fRat);
+
+        // the vowel-adaptive offsets follow the guard's formant reduction,
+        // so a laugh/squeal never keeps the full adaptive correction while
+        // the global formant amount is being pulled back
+        vaHiScale = 1.0f - wHi * (1.0f - hiFAmt);
 
         float Ts;
         if (robotize)
@@ -1110,7 +1167,9 @@ private:
 
         // pass 2: optional spectral processing (per-formant warp + breath),
         // then overlap-add. The spectral path windows the grain itself.
-        const bool spectral = v && (perFmt || breath > 0.001f);
+        // vaOn keeps the path (and with it the F1-F3 tracking the vowel
+        // estimator depends on) alive even when every manual value is 0.
+        const bool spectral = v && (perFmt || breath > 0.001f || vaOn);
         if (spectral)
             spectralProcess (2 * Hout + 1, f);
 
@@ -1226,11 +1285,20 @@ private:
         sBin[1] = std::max (sBin[1], sBin[0] + binOf (150.0 * f));
         sBin[2] = std::max (sBin[2], sBin[1] + binOf (200.0 * f));
 
+        // effective per-formant ratios: the user's fixed shifts times the
+        // vowel-adaptive offsets (semitone-additive, i.e. ratio product).
+        // The offsets are smoothed at control rate, clamped inside the
+        // estimator, and scaled by the High Range guard (vaHiScale).
+        float fEffRatio[3] = { fShiftRatio[0], fShiftRatio[1], fShiftRatio[2] };
+        if (vaOn)
+            for (int i = 0; i < 3; ++i)
+                fEffRatio[i] *= std::exp2 (vaHiScale * vaw.offsetSemi (i) / 12.0f);
+
         // warp anchors: 0, F1, F2, F3, (F3 + 900*f Hz), Nyquist
         const int tail = std::min (NB - 2, sBin[2] + binOf (900.0 * f));
         int dBin[3];
         for (int i = 0; i < 3; ++i)
-            dBin[i] = std::clamp ((int) std::lround (sBin[i] * fShiftRatio[i]),
+            dBin[i] = std::clamp ((int) std::lround (sBin[i] * fEffRatio[i]),
                                   binOf (120.0 * f), tail - 1);
         dBin[1] = std::max (dBin[1], dBin[0] + binOf (120.0 * f));
         dBin[2] = std::max (dBin[2], dBin[1] + binOf (150.0 * f));
@@ -1461,6 +1529,11 @@ private:
     float fShiftRatio[3] = { 1.0f, 1.0f, 1.0f };
     float fGainDb[3] = { 0.0f, 0.0f, 0.0f };
     bool  perFmt = false;
+
+    // Vowel-Adaptive Formant Warp (Beta) state
+    VowelAdaptiveWarp vaw;
+    bool  vaOn      = false;   // enabled AND amount > 0
+    float vaHiScale = 1.0f;    // High Range guard scale on the offsets
 
     int64_t writePos = 0;
     double  nextMarkF = 0.0, lastInMark = 0.0;

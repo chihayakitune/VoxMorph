@@ -8,6 +8,7 @@ TD-PSOLA方式で、ピッチとフォルマントを完全に独立して操作
 
 - **Pitch / Formant** — fully independent shifting (TD-PSOLA), ±24 st
 - **Per-formant control** — F1/F2/F3 individual shift & gain (spectral envelope warping)
+- **Vowel Adaptive Warp (Beta)** — estimates the current vowel and adds small adaptive F1–F3 offsets on top of your manual settings
 - **Intonation** — scale the pitch movement around a pivot (natural male-to-female)
 - **Consonant Shift** — unvoiced consonants shifted separately
 - **Natural Air** — keeps the voice's own breath & aperiodic detail while
