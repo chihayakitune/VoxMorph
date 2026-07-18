@@ -86,7 +86,7 @@ lo0 = band_ratio(load("out_p0_f0.wav"), 0, 1000);  hi0 = band_ratio(load("out_p0
 lo6 = band_ratio(load("out_tilt6.wav"), 0, 1000);  hi6 = band_ratio(load("out_tilt6.wav"), 2000, 8000)
 print(f"tilt 0: low={lo0:.3f} high={hi0:.3f}   tilt+6: low={lo6:.3f} high={hi6:.3f} (low up, high down)")
 
-print("== air preserve v0.6 (breathy vowel 120Hz, pitch+7st) ==")
+print("== Natural Air (breathy vowel 120Hz, pitch+7st) ==")
 def hf_periodicity(x, f0_out, hp=3000):
     """Normalized autocorrelation of the >hp band at the OUTPUT pitch lag.
     High = aspiration was made periodic (metallic buzz); low = natural."""
@@ -105,7 +105,7 @@ f0out = 120.0 * 2**(7/12)
 dry_p = hf_periodicity(load("out_air_dry.wav"), f0out)
 mx = load("out_air_max.wav")
 print(f"HF periodicity @f0out lag: dry={dry_p:.3f}  off={hf_periodicity(off, f0out):.3f}  "
-      f"on(1.0)={hf_periodicity(on, f0out):.3f}  max(1.5,band700)={hf_periodicity(mx, f0out):.3f}"
+      f"on(1.0)={hf_periodicity(on, f0out):.3f}  max(1.5)={hf_periodicity(mx, f0out):.3f}"
       f"   (on/max should approach dry)")
 print(f"max setting: f0={f0_autocorr(mx):6.1f}  "
       f"HF 3-10k={band_ratio(mx, 3000, 10000):.4f}   (breath boosted ~2.6x expected)")
@@ -151,7 +151,7 @@ print(f"creaky+7st f0: off={f0_autocorr(co):5.1f}  on={f0_autocorr(cn):5.1f}  "
       f"r(T): off={periodicity(co, 82.4):.4f}  on={periodicity(cn, 82.4):.4f}"
       f"   (compare by listening too)")
 
-print("== Natural Air v2 (band-adaptive comb) vs legacy Air Preserve ==")
+print("== Natural Air (standard path) vs air OFF ==")
 def ghost_db(x, f0in, f0out, n=32768, at=None):
     """Energy on the ORIGINAL pitch's harmonic grid, excluding bins shared
     with the shifted grid: the audible 'old-pitch ghost'. Lower is better."""
@@ -181,49 +181,49 @@ for name, base in [("steady harmonics", "out_nav2_harm"),
                    ("vibrato 5.5Hz   ", "out_nav2_vib"),
                    ("harm + white    ", "out_nav2_hw"),
                    ("harm + pink     ", "out_nav2_hp")]:
-    gl = ghost_db(load(base + "_leg.wav"), f0i, f0o)
+    gl = ghost_db(load(base + "_off.wav"), f0i, f0o)
     gb = ghost_db(load(base + "_bac.wav"), f0i, f0o)
-    print(f"  {name}: legacy={gl:6.1f} dB  v2={gb:6.1f} dB  (v2 lower = less leakage)")
+    print(f"  {name}: air off={gl:6.1f} dB  air on={gb:6.1f} dB  (on <= off+1 dB = no added leakage)")
 
 print("known-noise retention (HF 4-16k energy ratio, want v2 ~= dry's noise):")
 for name, base in [("white -15dB", "out_nav2_hw"), ("pink  -12dB", "out_nav2_hp")]:
     d = band_ratio(load(base + "_dry.wav"), 4000, 16000)
-    l = band_ratio(load(base + "_leg.wav"), 4000, 16000)
+    l = band_ratio(load(base + "_off.wav"), 4000, 16000)
     b = band_ratio(load(base + "_bac.wav"), 4000, 16000)
-    print(f"  {name}: dry={d:.4f}  legacy={l:.4f}  v2={b:.4f}")
+    print(f"  {name}: dry={d:.4f}  air off={l:.4f}  air on={b:.4f}")
 
 print("aspiration naturalness on the breathy vowel (HF periodicity @ output lag):")
-bb  = load("out_nav2_breathy_bac.wav")
-bl  = load("out_nav2_breathy_leg.wav")
+bb  = load("out_nav2_breathy_on.wav")
+bl  = load("out_nav2_breathy_off.wav")
 f0o2 = 120.0 * 2**(7/12)
-print(f"  dry={hf_periodicity(load('out_air_dry.wav'), f0o2):.3f}  off={hf_periodicity(off, f0o2):.3f}  "
-      f"legacy={hf_periodicity(bl, f0o2):.3f}  v2={hf_periodicity(bb, f0o2):.3f}  (closer to dry = better)")
-print(f"  f0: legacy={f0_autocorr(bl):6.1f}  v2={f0_autocorr(bb):6.1f}  (both ~{f0o2:.0f})")
+print(f"  dry={hf_periodicity(load('out_air_dry.wav'), f0o2):.3f}  "
+      f"air off={hf_periodicity(bl, f0o2):.3f}  air on={hf_periodicity(bb, f0o2):.3f}  (closer to dry = better)")
+print(f"  f0: off={f0_autocorr(bl):6.1f}  on={f0_autocorr(bb):6.1f}  (both ~{f0o2:.0f})")
 fl_ = " ".join(f"{p:5.0f}" for p in formants_lpc(bl))
 fb_ = " ".join(f"{p:5.0f}" for p in formants_lpc(bb))
-print(f"  formants: legacy={fl_}   v2={fb_}   (should match)")
+print(f"  formants: off={fl_}   on={fb_}   (should match)")
 
 print("sibilant-only input (unvoiced: air path is gated, both should match):")
 sd = band_ratio(load("out_nav2_sib_dry.wav"), 5000, 12000)
-sl = band_ratio(load("out_nav2_sib_leg.wav"), 5000, 12000)
+sl = band_ratio(load("out_nav2_sib_off.wav"), 5000, 12000)
 sb = band_ratio(load("out_nav2_sib_bac.wav"), 5000, 12000)
-rl = np.sqrt((load("out_nav2_sib_leg.wav")**2).mean())
+rl = np.sqrt((load("out_nav2_sib_off.wav")**2).mean())
 rb = np.sqrt((load("out_nav2_sib_bac.wav")**2).mean())
-print(f"  5-12k ratio: dry={sd:.3f}  legacy={sl:.3f}  v2={sb:.3f}   RMS legacy={rl:.4f} v2={rb:.4f}")
+print(f"  5-12k ratio: dry={sd:.3f}  air off={sl:.3f}  air on={sb:.3f}   RMS off={rl:.4f} on={rb:.4f}")
 
 print("low-pitch ghost, 90 Hz pulse rate +7st (subharmonic structure lives on")
 print("the 45 Hz half-grid; energy there excluding the shifted grid = ghost):")
 f0o90 = 90.0 * 2**(7/12)
 for name, base in [("alternating +-1% ", "out_nav2_alt"),
                    ("subharmonic -15% ", "out_nav2_sub")]:
-    gl = ghost_db(load(base + "_leg.wav"), 45.0, f0o90)
+    gl = ghost_db(load(base + "_off.wav"), 45.0, f0o90)
     gb = ghost_db(load(base + "_bac.wav"), 45.0, f0o90)
-    print(f"  {name}: legacy={gl:6.1f} dB  v2={gb:6.1f} dB  (v2 <= legacy is good)")
+    print(f"  {name}: air off={gl:6.1f} dB  air on={gb:6.1f} dB  (on <= off is good)")
 g90 = ghost_db(load("out_nav2_low90_bac.wav"), 90.0, f0o90)
 print(f"  90Hz steady, v2: old-grid energy={g90:6.1f} dB (compare across versions)")
 
 print("Air Shine (top-band bypass gain only, breathy vowel +7st):")
-for db, path in [(0, "out_nav2_breathy_bac.wav"),
+for db, path in [(0, "out_nav2_breathy_on.wav"),
                  (3, "out_nav2_shine3.wav"),
                  (6, "out_nav2_shine6.wav")]:
     x = load(path)
@@ -244,5 +244,5 @@ def onset_ms(path):
     steady = np.median(env[(t > 1.6) & (t < 2.6)])
     after = np.where((t > 1.0) & (env > 0.8 * steady))[0]
     return (t[after[0]] - 1.0) * 1000 if len(after) else float('nan')
-print(f"  time to 80% of steady HF: legacy={onset_ms('out_nav2_trans_leg.wav'):.0f} ms  "
-      f"v2={onset_ms('out_nav2_trans_bac.wav'):.0f} ms  (v2 - legacy = added tracking lag)")
+print(f"  time to 80% of steady HF: air off={onset_ms('out_nav2_trans_off.wav'):.0f} ms  "
+      f"air on={onset_ms('out_nav2_trans_bac.wav'):.0f} ms  (on - off = air onset lag)")

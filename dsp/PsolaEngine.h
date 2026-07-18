@@ -12,10 +12,10 @@
 //   * Consonant shift  = separate formant ratio for unvoiced segments
 //   * Breath           = pitch-synchronous aspiration noise (glottal source model)
 //   * Tilt             = source spectral tilt (low/high balance around 1 kHz)
-//   * Air preserve     = mixed harmonic+noise handling: the natural breath
-//                        component bypasses the pitch shifter un-pitched
-//                        (v2 "Natural Air": band-adaptive residual split
-//                        driven by per-band aperiodicity, see airV2)
+//   * Natural Air      = band-adaptive harmonic/noise split: the natural
+//                        breath component bypasses the pitch shifter
+//                        un-pitched, with spectral + notch cleanup of any
+//                        old-pitch residue (see airPreserve)
 
 #pragma once
 #include <vector>
@@ -64,60 +64,27 @@ public:
         // tracking floor rises to ~90 Hz. Ignored while lowVoice is on.
         bool  lowLatency = false;
 
-        // Air Preserve (mixed harmonic+noise processing for breathy vowels):
-        // the aperiodic breath component above ~1.4 kHz is separated from the
-        // harmonics BEFORE grain cutting and passed through to the output
-        // un-pitched. Re-spacing grains imposes the new pitch period on any
-        // noise inside them (worst when an upward shift reuses a grain and
-        // repeats its noise verbatim), which is what makes breathy voices
-        // turn metallic; routing the breath around the shifter keeps it a
-        // continuous natural noise. 0 = off (identical to previous versions).
+        // Natural Air (standard since v0.24.0): keeps the voice's own
+        // breath / aperiodic detail while suppressing old-pitch leakage.
+        // The comb residual is split into 4 complementary bands
+        // (~700 / 2500 / 6000 Hz, fixed weights 0/1/1/1) whose keep gains
+        // follow the measured per-band aperiodicity (control rate, with
+        // confidence gating — see updateAirBands); the kept air bypasses
+        // the pitch shifter un-pitched. Two always-on cleanup stages remove
+        // leftover input-f0 residue from the bypassed air: an FFT
+        // floor-clamp for f0 >= ~130 Hz (processAirFx) and an adaptive
+        // notch bank below it (odd input-f0 lines, 100-2500 Hz, gated to
+        // confident sustained phonation). 0 = off (bit-identical bypass);
         // 0..1 scales the split up to its variance-optimal maximum (energy
-        // neutral); 1..1.5 additionally boosts the bypassed breath (up to
-        // ~+4 dB at 1.5) so the effect is clearly audible.
+        // neutral); 1..1.5 additionally boosts the bypassed air (~+4 dB max).
         float airPreserve = 0.0f;   // 0..1.5
 
-        // Separation crossover for Air Preserve: everything above this is
-        // treated as breath. Lower reaches further into the mids (stronger,
-        // but pitch movement may leak a ghost of the original pitch);
-        // higher keeps only the top "air".
-        float airFreqHz   = 1000.0f;   // 300..4000
-
-        // Natural Air v2 (Beta): band-adaptive residual split. Instead of
-        // one fixed high-pass, the comb residual is divided into 4
-        // complementary bands (~700 / 2500 / 6000 Hz crossovers) and each
-        // band's keep gain follows its measured aperiodicity, updated every
-        // 512 samples with confidence gating (see updateAirBands). Strongly
-        // periodic bands stay out of the air path — much less harmonic
-        // leakage / old-pitch ghost — while genuinely noisy bands (breath,
-        // fricatives, whisper) are kept in full, including the presence
-        // region the legacy high-pass threw away. airFreqHz acts as a bias
-        // on the band weights (legacy-compatible reach into the mids).
-        // false = legacy Air Preserve path, bit-identical to previous
-        // versions.
-        bool  airV2 = false;
-
-        // Natural Air low cleanup (Beta, v2 only, default on). Below f0
-        // ~130 Hz the FFT cleanup window cannot resolve the harmonic grid
-        // (mainlobe wider than the spacing), so it is disabled there — which
-        // let comb-residual harmonics of low voices ride into the air path
-        // (measured +1..3 dB on the input-f0 odd lines in real recordings).
-        // This applies a WEAK time-domain second comb to the presence
-        // band's (2.5-6 kHz) bypassed air instead: notches sit exactly on
-        // every input-f0 multiple regardless of FFT resolution, the
-        // inter-harmonic midpoints are untouched by construction (true air
-        // survives), depth is mild (~-7 dB), and it only engages on
-        // confident, pitch-still sustained vowels — onsets, fricatives and
-        // unvoiced stretches are unaffected. >6 kHz stays untouched (Air
-        // Shine). false = v0.22.0 behaviour.
-        bool  airLowClean = true;
-
-        // Air Shine (Beta, Natural Air v2 only): extra gain on the TOP
-        // band's (>6 kHz) bypassed air, on top of the knob's boost. Only
-        // the re-addition into the output is raised — the subtraction from
-        // the grain path is untouched, so the mids/presence balance and the
-        // harmonic content stay exactly as before; the top "air" simply
-        // comes back louder. 0 = neutral.
+        // Air Shine (standard): extra gain on the TOP band's (>6 kHz)
+        // bypassed air, on top of the knob's boost. Only the re-addition
+        // into the output is raised — the subtraction from the grain path
+        // is untouched, so the mids/presence balance and the harmonic
+        // content stay exactly as before; the top "air" simply comes back
+        // louder. Neither cleanup stage ever touches this band. 0 = neutral.
         float airShineDb = 0.0f;   // 0..6
 
         // High Range guard (Babisei-style variable pitch): when the INPUT
@@ -203,14 +170,11 @@ public:
         tiltLp      = 0.0f;
         tiltK       = 1.0f - std::exp ((float) (-2.0 * M_PI * 1000.0 / fs));
 
-        airG   = airB = 0.0f;
-        airLp1 = airLp2 = 0.0f;
         lastGci = -1;
         gciHold = 0;
         gciE.reserve ((size_t) (maxLagLow / 3 + 8));
         airP   = curP;
         airK   = 1.0f - std::exp ((float) (-1.0 / (0.005 * fs)));          // ~5 ms gate
-        hpAirK = 1.0f - std::exp ((float) (-2.0 * M_PI * 1400.0 / fs));    // breath band HP
 
         airSplit.setup (sampleRate);
         airSplit.reset();
@@ -302,8 +266,6 @@ public:
         lowVoice       = q.lowVoice;
         floorHz        = std::clamp (q.pitchFloorHz, 0.0f, 400.0f);
         airAmt         = std::clamp (q.airPreserve, 0.0f, 1.5f);
-        hpAirK         = 1.0f - std::exp ((float) (-2.0 * M_PI
-                             * std::clamp (q.airFreqHz, 300.0f, 4000.0f) / fs));
         // 0..1 -> split amount up to the variance-optimal 2/3 (beyond it,
         // subtracting more noise puts anti-correlated copies back into the
         // grains); 1..1.5 -> boost the bypassed breath instead, which both
@@ -312,24 +274,6 @@ public:
         airKSplit      = 0.6667f * std::min (1.0f, airAmt);
         airBoost       = 1.0f + 1.2f * std::max (0.0f, airAmt - 1.0f);
         airShineLin    = std::pow (10.0f, std::clamp (q.airShineDb, 0.0f, 6.0f) / 20.0f);
-        airLowCleanOn  = q.airLowClean;
-        if (airV2On != q.airV2)          // mode switch: clear both paths' states
-        {
-            airV2On = q.airV2;
-            airSplit.reset();
-            airLp1 = airLp2 = 0.0f;
-            airG = airB = 0.0f;
-            gCmb = 0.0f;
-            for (int b = 0; b < 4; ++b) { gS2[b] = 0.0f; gB2[b] = 0.0f; }
-        }
-        {   // v2 band weights from the airband knob: bands whose centre sits
-            // above the knob frequency keep full weight, lower bands fade
-            // out over one octave (legacy-compatible reach into the mids)
-            static constexpr float fcB[4] = { 350.0f, 1450.0f, 4000.0f, 10000.0f };
-            const float afq = std::clamp (q.airFreqHz, 300.0f, 4000.0f);
-            for (int b = 0; b < 4; ++b)
-                wBand[b] = std::clamp (0.5f + std::log2 (fcB[b] / afq), 0.0f, 1.0f);
-        }
         gciOn          = q.gciSync;
         grainHalfPOv   = std::clamp (q.grainHalfP, 0.0f, 1.5f);
         grainBlendOn   = q.grainBlend;
@@ -402,63 +346,23 @@ public:
             inBuf[(size_t) ((start + i) & kMask)] = in[i];
         writePos += n;
 
-        // ---- harmonic/noise split (Air Preserve) ----
-        // A causal 2-tap pitch comb predicts the periodic part; the high-
-        // passed residual is the natural breath. Grains are cut from
-        // harmBuf (= input minus breath) and noiseBuf is added back to the
-        // output un-pitched, D samples later. At the optimal split (2/3 of
-        // the residual) total noise energy is preserved exactly. airG gates
-        // on voicing and dezippers knob moves; when it is fully off the
-        // buffers are a plain copy and the comb is skipped (no CPU cost).
+        // ---- Natural Air: harmonic/noise split (standard path) ----
+        // A causal 2-tap pitch comb predicts the periodic part; the
+        // residual is split into 4 complementary bands whose keep gains
+        // follow the measured per-band aperiodicity (control rate, see
+        // updateAirBands). Grains are cut from harmBuf (= input minus air)
+        // and noiseBuf is added back to the output un-pitched, D samples
+        // later. While the knob is <= 1.0 the bypass gains equal the split
+        // gains, so harmBuf + noiseBuf reconstructs the input exactly.
+        // With the knob at 0 the buffers are a plain copy and everything
+        // here is skipped (bit-identical bypass, no CPU cost).
         {
             const bool on = voiced && airAmt > 0.001f;
-            if (! airV2On)
             {
-                // ---- legacy path (v0.6.x): single high-passed residual ----
-                const float tSplit  = on ? airKSplit            : 0.0f;
-                const float tBypass = on ? airKSplit * airBoost : 0.0f;
-                if (tSplit > 0.0f || airG > 1.0e-4f)
-                {
-                    for (int i = 0; i < n; ++i)
-                    {
-                        const int64_t pos = start + i;
-                        const size_t  idx = (size_t) (pos & kMask);
-                        airG += airK * (tSplit  - airG);
-                        airB += airK * (tBypass - airB);
-                        airP += 0.002f * (curP - airP);        // ~10 ms period glide
-                        const double P = (double) std::max (32.0f, airP);
-                        const float per = 0.5f * (readCubic ((double) pos - P)
-                                                + readCubic ((double) pos - 2.0 * P));
-                        float res = inBuf[idx] - per;
-                        airLp1 += hpAirK * (res - airLp1);  res -= airLp1;
-                        airLp2 += hpAirK * (res - airLp2);  res -= airLp2;
-                        noiseBuf[idx] = airB * res;
-                        harmBuf[idx]  = inBuf[idx] - airG * res;
-                    }
-                }
-                else
-                {
-                    for (int i = 0; i < n; ++i)
-                    {
-                        const size_t idx = (size_t) ((start + i) & kMask);
-                        harmBuf[idx]  = inBuf[idx];
-                        noiseBuf[idx] = 0.0f;
-                    }
-                    airG = airB = 0.0f;  airLp1 = airLp2 = 0.0f;  airP = curP;
-                }
-            }
-            else
-            {
-                // ---- Natural Air v2: band-adaptive comb ----
-                // Same causal comb residual, but split into 4 complementary
-                // bands whose keep gains follow the measured per-band
-                // aperiodicity (control rate, see updateAirBands). While the
-                // knob is <= 1.0 the bypass gains equal the split gains, so
-                // harmBuf + noiseBuf reconstructs the input exactly.
                 float tS[4], tB[4], tMax = 0.0f, gMax = 0.0f;
                 for (int b = 0; b < 4; ++b)
                 {
-                    tS[b] = on ? airKSplit * wBand[b] * aB[b] : 0.0f;
+                    tS[b] = on ? airKSplit * kWBand[b] * aB[b] : 0.0f;
                     tB[b] = tS[b] * airBoost;
                     if (b == 3) tB[b] *= airShineLin;   // Air Shine: bypass only
                     tMax  = std::max (tMax, tB[b]);
@@ -541,15 +445,15 @@ public:
         if (sinceDetect >= 512 && writePos >= kDetN + maxLag)
         {
             detectPitch();
-            if (airV2On && airAmt > 0.001f)
+            if (airAmt > 0.001f)
                 updateAirBands();
             sinceDetect = 0;
         }
 
-        // Natural Air v2 spectral cleanup: runs inside the air path's
+        // Natural Air spectral cleanup: runs inside the air path's
         // D-sample delay slack, so it adds no latency. Needs D >= window;
-        // in Low Latency mode the air passes through raw as before.
-        const bool airFxOn = airV2On && D >= kFxN + 8;
+        // in Low Latency mode the air passes through raw instead.
+        const bool airFxOn = D >= kFxN + 8;
         if (airFxOn)
         {
             while (airFxHop <= writePos)
@@ -962,7 +866,7 @@ private:
         // gate on the SMOOTHED f0 motion (a low voice's natural jitter must
         // not keep the bank released; glides and onsets still release it)
         // and on YIN clarity; fricatives/unvoiced never reach this point
-        if (airLowCleanOn && (float) kFxN / P < 3.0f)
+        if ((float) kFxN / P < 3.0f)
         {
             airCombT = std::clamp ((pitchConf - 0.2f) / 0.2f, 0.0f, 1.0f)
                      * std::clamp (1.0f - airDRelSm / 0.04f, 0.0f, 1.0f);
@@ -1573,20 +1477,19 @@ private:
     bool  robotize = false, lowVoice = false;
     float hiFreq = 0.0f, hiPAmt = 0.5f, hiFAmt = 1.0f;   // High Range guard
 
-    // Air Preserve (harmonic/noise split) state
+    // Natural Air (harmonic/noise split) state
     float airAmt    = 0.0f;               // knob value
     float airKSplit = 0.0f;               // split coefficient (<= 2/3)
     float airBoost  = 1.0f;               // bypass emphasis (knob > 0.7)
-    float airG   = 0.0f, airB = 0.0f;     // smoothed, voicing-gated gains
     float airP   = 320.0f;                // per-sample smoothed comb period
-    float airLp1 = 0.0f, airLp2 = 0.0f;   // HP filter states (2x one-pole)
-    float airK   = 0.004f, hpAirK = 0.17f;
+    float airK   = 0.004f;                // ~5 ms gain smoothing
 
-    // Natural Air v2 (band-adaptive comb) state
+    // Natural Air (band-adaptive comb) state
     static constexpr int kAirN = 2048;    // aperiodicity frame cap (samples)
-    bool     airV2On = false;
     AirBands airSplit;                    // residual splitter (audio path)
-    float    wBand[4] { 0.0f, 1.0f, 1.0f, 1.0f };   // airband-knob weights
+    // fixed band weights (frozen at the former airband=1000 Hz default when
+    // the Air Preserve Band knob was retired in v0.24.0: b0 shut, b1-b3 full)
+    static constexpr float kWBand[4] { 0.0f, 1.0f, 1.0f, 1.0f };
     float    aB[4]    { 0.0f, 0.0f, 0.0f, 0.0f };   // smoothed aperiodicity
     double   airFloorE[4] { 0.0, 0.0, 0.0, 0.0 };   // background floor (min stats)
     float    gS2[4] { 0.0f, 0.0f, 0.0f, 0.0f };     // smoothed split gains
@@ -1600,7 +1503,6 @@ private:
 
     // Natural Air v2 low-f0 cleanup (adaptive notch bank on bands 1-2 air)
     static constexpr int kMaxNotch = 12;
-    bool  airLowCleanOn = true;
     float airCombT = 0.0f;                // control-rate blend target
     float airDRelSm = 0.0f;               // smoothed |df0| per frame
     float gCmb     = 0.0f;                // per-sample smoothed blend gain

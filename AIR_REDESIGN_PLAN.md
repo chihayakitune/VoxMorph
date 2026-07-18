@@ -1,8 +1,8 @@
 # AIR セクション再設計計画（調査・比較・提案）
 
 対象: Air Preserve 高性能化 + AIR セクション統合
-状態: **v0.23.0 = Natural Air改善フェーズの安定候補（2026-07-18ユーザー確定）。
-数値追い込み停止・安全マージン維持。air2low標準統合は6実声条件の副作用確認後。**
+状態: **完了（v0.24.0, 2026-07-18）。Natural Air v2＋Low Cleanupを常時使用の
+標準機能として統合、旧Air Preserve経路は削除。本書はアーカイブ。**
 作成: 2026-07-16
 
 ## Phase 1 実装結果（v0.20.0, 2026-07-16）
@@ -418,3 +418,25 @@ Natural Air 完成後に着手。
   フライ由来の低周期成分の残存は仕様上のトレードオフ）。
 - grainBlend / grainAvg / grainHalfP は実験フックのまま保留（実聴差なし）。
 - 次フェーズ候補: Phase 3（AIRセクションUI化・Natural Air改名）、実機CPU計測。
+
+## フェーズ完了・標準化（v0.24.0, 2026-07-18）
+
+実聴確認（6実声条件）で副作用なし → 標準統合を実施。
+
+- Natural Air v2（帯域適応コム＋FFTクリーンアップ＋低F0ノッチバンク）を
+  **常時使用の標準経路**に。旧Air Preserve経路（単一HP残差）はエンジンから削除。
+- airband は旧既定1000Hz時の帯域ウェイト **{0, 1, 1, 1}** を内部定数 kWBand に
+  凍結（スライダー撤去で音は不変）。DSPの q.airFreqHz 依存を除去。
+- APVTS互換: `airband`/`air2`/`air2low` は非表示no-opとして登録維持
+  （旧セッション/プリセット/オートメーション互換。deprecatedコメント付き、
+  ホスト互換確認まで物理削除しない）。公開は `air`（Natural Air）と
+  `airshine`（Air Shine）のみ。
+- UI: VOICE QUALITY は Natural Air ＋ Air Shine の2行のみ。Beta表記・方式切替
+  記述は撤去。Low Voice Mode は ADVANCED の独立オプション（ツールチップを
+  機能目的＋トレードオフ明記に更新）。
+- 実験フック（grainBlend/grainAvg/grainHalfP/PSOLA_GRAIN_LOG）は既定オフのまま温存。
+- テストは「air OFF vs ON」基準へ再構成し全PASS（bit-identicalバイパス、
+  Shine 0/3/6dB特性、>6kHz不変、alloc 0、レイテンシ不変、
+  CPUオフライン代理 off 0.92% / air on 1.93%）。
+- 方針: 低音ゴーストは実用範囲まで改善済み。これ以上の強い抑制は音色保護のため
+  行わない。

@@ -448,7 +448,7 @@ int main()
         P p; p.pitchSemi = 7.0f;
         p.airPreserve = 0.0f;  writeWav ("out_air_off.wav", run (breathy, p));
         p.airPreserve = 1.0f;  writeWav ("out_air_on.wav",  run (breathy, p));
-        p.airPreserve = 1.5f;  p.airFreqHz = 700.0f;
+        p.airPreserve = 1.5f;
                                writeWav ("out_air_max.wav", run (breathy, p));
         P q;                   writeWav ("out_air_id0.wav", run (breathy, q));
         q.airPreserve = 1.0f;  writeWav ("out_air_id.wav",  run (breathy, q));
@@ -515,18 +515,19 @@ int main()
         if (! ok) ++naFail;
     }
 
-    // (b) OFF bypass: v2 selected but knob 0 must equal legacy off bit-for-bit
+    // (b) OFF bypass: with Natural Air at 0 the air path must be inert —
+    // output bit-identical no matter what the other air settings are
     {
         const auto breathy = makeBreathy (120.0, 2.0);
-        P p0; p0.pitchSemi = 7.0f;              // air fully off, legacy
-        P p2 = p0; p2.airV2 = true;             // v2 selected, knob still 0
+        P p0; p0.pitchSemi = 7.0f;              // air fully off
+        P p2 = p0; p2.airShineDb = 6.0f;        // shine has nothing to boost
         const auto o0 = run (breathy, p0);
         const auto o2 = run (breathy, p2);
         double dmax = 0.0;
         for (size_t i = 0; i < o0.size(); ++i)
             dmax = std::max (dmax, (double) std::abs (o0[i] - o2[i]));
         const bool ok = dmax == 0.0;
-        std::printf ("air off, v2 toggle on vs legacy: max diff=%.2e  %s\n",
+        std::printf ("air off, shine 6 dB vs default: max diff=%.2e  %s\n",
                      dmax, ok ? "PASS (bit-identical)" : "FAIL");
         if (! ok) ++naFail;
     }
@@ -545,7 +546,7 @@ int main()
                              (int) std::min ((size_t) 256, in.size() - i));
             for (int b = 0; b < 4; ++b) a4[b] = eng.airBandAperiodicity (b);
         };
-        P p; p.pitchSemi = 7.0f; p.airV2 = true; p.airPreserve = 1.0f;
+        P p; p.pitchSemi = 7.0f; p.airPreserve = 1.0f;
 
         float aH[4], aN[4], aV[4], aG[4], aBr[4];
         const auto harm  = makeHarm (150.0, 150.0, 2.0);
@@ -590,20 +591,21 @@ int main()
         if (! ok) ++naFail;
     }
 
-    // (d) level neutrality + NaN/Inf on the breathy vowel (steady voiced)
+    // (d) level neutrality + NaN/Inf on the breathy vowel (steady voiced):
+    // Natural Air fully up must not change the overall level vs air off
     {
         const auto breathy = makeBreathy (120.0, 2.0);
-        P pl; pl.pitchSemi = 7.0f; pl.airPreserve = 1.0f;
-        P pb = pl; pb.airV2 = true;
+        P pl; pl.pitchSemi = 7.0f;              // air off (reference)
+        P pb = pl; pb.airPreserve = 1.0f;       // Natural Air up
         const auto ol = run (breathy, pl);
         const auto ob = run (breathy, pb);
-        writeWav ("out_nav2_breathy_leg.wav", ol);
-        writeWav ("out_nav2_breathy_bac.wav", ob);
+        writeWav ("out_nav2_breathy_off.wav", ol);
+        writeWav ("out_nav2_breathy_on.wav", ob);
         const bool bad = hasBad (ol) || hasBad (ob);
         const double rl = rmsOf (ol), rb = rmsOf (ob);
         const double dDb = 20.0 * std::log10 (std::max (rb, 1e-12)
                                             / std::max (rl, 1e-12));
-        std::printf ("breathy +7st: RMS legacy=%.4f v2=%.4f (%+.2f dB)  "
+        std::printf ("breathy +7st: RMS off=%.4f air1.0=%.4f (%+.2f dB)  "
                      "peak=%.3f/%.3f  NaN/Inf=%s\n",
                      rl, rb, dDb, peakOf (ol), peakOf (ob), bad ? "FOUND" : "none");
         const bool ok = ! bad && std::abs (dDb) < 1.5;
@@ -615,7 +617,7 @@ int main()
     {
         PsolaEngine eng;
         eng.prepare (FS);
-        P p; p.pitchSemi = 7.0f; p.airV2 = true; p.airPreserve = 1.2f;
+        P p; p.pitchSemi = 7.0f; p.airPreserve = 1.2f;
         p.f2Shift = 3.0f; p.breath = 0.5f; p.gciSync = true;
         eng.setParams (p);
         const auto breathy = makeBreathy (120.0, 3.0);
@@ -636,37 +638,37 @@ int main()
     // vibrato, glide, known white/pink noise retention, sibilant,
     // unvoiced->voiced transition (also checked for step discontinuities)
     {
-        P leg; leg.pitchSemi = 7.0f; leg.airPreserve = 1.0f;
-        P bac = leg; bac.airV2 = true;
+        P leg; leg.pitchSemi = 7.0f;            // air off (reference)
+        P bac = leg; bac.airPreserve = 1.0f;    // Natural Air (standard path)
 
         const auto harm = makeHarm (150.0, 150.0, 2.5);
         writeWav ("out_nav2_harm_dry.wav", harm);
-        writeWav ("out_nav2_harm_leg.wav", run (harm, leg));
+        writeWav ("out_nav2_harm_off.wav", run (harm, leg));
         writeWav ("out_nav2_harm_bac.wav", run (harm, bac));
 
         const auto vib = makeHarm (150.0, 150.0, 3.0, 5.5, 0.35);
-        writeWav ("out_nav2_vib_leg.wav", run (vib, leg));
+        writeWav ("out_nav2_vib_off.wav", run (vib, leg));
         writeWav ("out_nav2_vib_bac.wav", run (vib, bac));
 
         const auto glide = makeHarm (110.0, 220.0, 3.0);
-        writeWav ("out_nav2_glide_leg.wav", run (glide, leg));
+        writeWav ("out_nav2_glide_off.wav", run (glide, leg));
         writeWav ("out_nav2_glide_bac.wav", run (glide, bac));
 
         auto hw = makeHarm (150.0, 150.0, 2.5);
         addNoise (hw, -15.0, false, 111u);
         writeWav ("out_nav2_hw_dry.wav", hw);
-        writeWav ("out_nav2_hw_leg.wav", run (hw, leg));
+        writeWav ("out_nav2_hw_off.wav", run (hw, leg));
         writeWav ("out_nav2_hw_bac.wav", run (hw, bac));
 
         auto hp = makeHarm (150.0, 150.0, 2.5);
         addNoise (hp, -12.0, true, 222u);
         writeWav ("out_nav2_hp_dry.wav", hp);
-        writeWav ("out_nav2_hp_leg.wav", run (hp, leg));
+        writeWav ("out_nav2_hp_off.wav", run (hp, leg));
         writeWav ("out_nav2_hp_bac.wav", run (hp, bac));
 
         const auto sib = makeSibilant (2.0);
         writeWav ("out_nav2_sib_dry.wav", sib);
-        writeWav ("out_nav2_sib_leg.wav", run (sib, leg));
+        writeWav ("out_nav2_sib_off.wav", run (sib, leg));
         writeWav ("out_nav2_sib_bac.wav", run (sib, bac));
 
         // Air Shine: top-band bypass gain comparison (0/3/6 dB; 0 dB is
@@ -682,7 +684,7 @@ int main()
         std::vector<float> tr = makeNoiseCons (1.0);
         const auto bre = makeBreathy (120.0, 2.0);
         tr.insert (tr.end(), bre.begin(), bre.end());
-        writeWav ("out_nav2_trans_leg.wav", run (tr, leg));
+        writeWav ("out_nav2_trans_off.wav", run (tr, leg));
         const auto tb = run (tr, bac);
         writeWav ("out_nav2_trans_bac.wav", tb);
 
@@ -726,8 +728,8 @@ int main()
             voicedFrac = tot > 0 ? (double) vo / (double) tot : 0.0;
             return out;
         };
-        P pv2; pv2.pitchSemi = 7.0f; pv2.airV2 = true; pv2.airPreserve = 1.0f;
-        P leg = pv2; leg.airV2 = false;
+        P pv2; pv2.pitchSemi = 7.0f; pv2.airPreserve = 1.0f;
+        P leg = pv2; leg.airPreserve = 0.0f;    // air-off reference for analyze
 
         const auto low90 = makeVowel   (90.0, 90.0, 6.0);
         const auto altp  = makeAltPulse (90.0, 0.01, 1.0,  6.0);   // stronger and YIN drops to unvoiced
@@ -741,8 +743,8 @@ int main()
         writeWav ("out_nav2_low90_bac.wav", oLow);
         writeWav ("out_nav2_alt_bac.wav",   oAlt);
         writeWav ("out_nav2_sub_bac.wav",   oSub);
-        writeWav ("out_nav2_alt_leg.wav",   run (altp, leg));
-        writeWav ("out_nav2_sub_leg.wav",   run (subh, leg));
+        writeWav ("out_nav2_alt_off.wav",   run (altp, leg));
+        writeWav ("out_nav2_sub_off.wav",   run (subh, leg));
 
         std::printf ("low-pitch keep amounts (max over time / at 6 s), voiced%%:\n");
         std::printf ("  90Hz steady     : max %.2f/%.2f/%.2f/%.2f  end %.2f/%.2f/%.2f/%.2f  v=%.0f%%\n",
@@ -781,7 +783,7 @@ int main()
         auto hv = makeHarm (182.0, 182.0, 2.5);
         addNoise (hv, -25.0, false, 333u);
         P off12; off12.pitchSemi = 12.0f;
-        P v212 = off12; v212.airV2 = true; v212.airPreserve = 1.0f;
+        P v212 = off12; v212.airPreserve = 1.0f;
         P v2sh = v212; v2sh.airShineDb = 6.0f;
         const auto o0 = run (hv, off12);
         const auto o1 = run (hv, v212);

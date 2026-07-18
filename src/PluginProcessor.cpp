@@ -31,16 +31,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "breath2", 1 }, "Breath",
                 juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
-    layout.add (std::make_unique<P> (juce::ParameterID { "air", 1 }, "Air Preserve",
+    layout.add (std::make_unique<P> (juce::ParameterID { "air", 1 }, "Natural Air",
                 juce::NormalisableRange<float> (0.0f, 1.5f, 0.001f), 0.0f));
-    layout.add (std::make_unique<P> (juce::ParameterID { "airband", 1 }, "Air Preserve Band (Hz)",
+    // DEPRECATED / legacy compatibility (since v0.24.0): "airband", "air2"
+    // and "air2low" stay registered so old DAW sessions, presets and
+    // automation lanes still load, but the DSP ignores them entirely —
+    // Natural Air always uses the standard path (band-adaptive comb + both
+    // cleanup stages, fixed band weights). Not shown in the UI. Remove only
+    // after confirming hosts tolerate the id/order change.
+    layout.add (std::make_unique<P> (juce::ParameterID { "airband", 1 }, "Air Preserve Band (deprecated)",
                 juce::NormalisableRange<float> (500.0f, 3000.0f, 1.0f, 0.5f), 1000.0f));
     layout.add (std::make_unique<juce::AudioParameterBool> (
-                juce::ParameterID { "air2", 1 }, "Natural Air v2 (Beta)", false));
+                juce::ParameterID { "air2", 1 }, "Natural Air v2 (deprecated)", false));
     layout.add (std::make_unique<P> (juce::ParameterID { "airshine", 1 }, "Air Shine (dB)",
                 juce::NormalisableRange<float> (0.0f, 6.0f, 0.1f), 0.0f));
     layout.add (std::make_unique<juce::AudioParameterBool> (
-                juce::ParameterID { "air2low", 1 }, "Natural Air Low Cleanup", true));
+                juce::ParameterID { "air2low", 1 }, "Air Low Cleanup (deprecated)", true));
     layout.add (std::make_unique<P> (juce::ParameterID { "range", 1 }, "Intonation Amount (%)",
                 juce::NormalisableRange<float> (50.0f, 200.0f, 1.0f), 100.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "center", 1 }, "Intonation Pivot (Hz)",
@@ -116,10 +122,8 @@ VoxMorphProcessor::VoxMorphProcessor()
     pF3G = apvts.getRawParameterValue ("f3gain");
     pBreath2 = apvts.getRawParameterValue ("breath2");
     pAir     = apvts.getRawParameterValue ("air");
-    pAirBand = apvts.getRawParameterValue ("airband");
-    pAir2    = apvts.getRawParameterValue ("air2");
     pAirShine = apvts.getRawParameterValue ("airshine");
-    pAir2Low  = apvts.getRawParameterValue ("air2low");
+    // (deprecated "airband"/"air2"/"air2low" are intentionally not read)
     pGci     = apvts.getRawParameterValue ("gci");
     pHiFreq  = apvts.getRawParameterValue ("hifreq");
     pHiPitch = apvts.getRawParameterValue ("hipitch");
@@ -358,11 +362,8 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.pitchRange    = pRange->load() * 0.01f;   // % -> ratio
     p.pitchCenterHz = pCenter->load();
     p.breath        = pBreath2->load();      // spectral (noise-excited envelope)
-    p.airPreserve   = pAir->load();          // mixed harmonic+noise split
-    p.airFreqHz     = pAirBand->load();
-    p.airV2         = pAir2->load() > 0.5f;  // band-adaptive comb (Beta)
-    p.airShineDb    = pAirShine->load();     // top-band bypass gain (Beta)
-    p.airLowClean   = pAir2Low->load() > 0.5f;
+    p.airPreserve   = pAir->load();          // Natural Air (standard path)
+    p.airShineDb    = pAirShine->load();     // Air Shine
     p.gciSync       = pGci->load() > 0.5f;
     p.hiRangeHz     = pHiFreq->load();       // high-range guard (laughs)
     p.hiPitchAmt    = pHiPitch->load() * 0.01f;

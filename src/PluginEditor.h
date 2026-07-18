@@ -1755,51 +1755,19 @@ public:
         addSliderRow ("jitter", "Natural Jitter",
             tip ("Adds tiny natural pitch fluctuations to reduce the 'machine' feel. Try around 0.1.",
                  "ごく小さな音程の揺らぎを加え、変換の機械っぽさを和らげます。0.1前後から。"));
-        addSliderRow ("air", "Air Preserve",
-            tip ("Separates the natural breath (air) in your voice from the harmonics and passes it "
-                 "through WITHOUT pitch shifting. Fixes the metallic 'buzzy' texture that appears on "
-                 "breathy or whispery vowels when shifting pitch. Up to 1.0 the separation increases "
-                 "at natural loudness; from 1.0 to 1.5 the preserved breath is also emphasized for a "
-                 "clearly audible airy character. 0 = off.",
-                 "声に含まれる自然な息(気息)成分を倍音成分から分離し、息だけはピッチ変換せずに"
-                 "そのまま通します。息混じりの声をピッチシフトしたときに出る金属的なジャリジャリ感を"
-                 "軽減します。1.0までは自然な音量のまま分離が増え(1.0=分離最大)、1.0〜1.5では"
-                 "息成分を強調して効果がはっきり聴こえるようになります。0=オフ(従来どおり)。"));
-        addSliderRow ("airband", "Air Preserve Band (Hz)",
-            tip ("The frequency above which the voice is treated as breath (used only while Air "
-                 "Preserve is up). Lower = stronger, reaching into the mids: try 700-900 if the "
-                 "effect feels too subtle. If you hear roughness or a ghost of your original pitch "
-                 "during pitch slides, raise it.",
-                 "この周波数より上を「息」として扱います(Air Preserve使用時のみ有効)。"
-                 "下げるほど中音域まで効いて効果が強くなります。効きが弱いと感じたら700〜900に。"
-                 "音程を動かしたときにザラつきや元の声の高さの残りが聴こえる場合は上げてください。"));
-        addToggleRow ("air2", "Natural Air v2 (Beta)",
-            tip ("Upgraded Air Preserve engine. The breath separation is split into four frequency "
-                 "bands and each band passes only as much as is genuinely noise-like right now, so "
-                 "sliding or vibrato pitch no longer leaks a ghost of your original pitch into the "
-                 "preserved breath, and fricative/whisper texture in the presence region is kept. "
-                 "Uses the same Air Preserve amount and Band knobs. Off = the original algorithm.",
-                 "Air Preserveの改良版エンジン(ベータ)。息の分離を4つの帯域に分け、いま実際に"
-                 "ノイズ的な帯域だけを通します。音程を動かしたときに元の声の高さの残り(ゴースト)が"
-                 "息側に漏れにくくなり、ささやきや摩擦音の質感も保持されます。量やBandのつまみは"
-                 "共通です。オフ=従来アルゴリズム。"));
-        addSliderRow ("airshine", "Air Shine (dB, Beta)",
-            tip ("Natural Air v2 only: extra level for the preserved top air (above ~6 kHz) on its "
-                 "way back into the output. Adds open, airy sparkle without touching the mids or "
-                 "the harmonic body — only the highest breath band comes back louder. Try 2-4 dB.",
-                 "Natural Air v2専用。保持された最上段の空気感(約6kHz以上)を出力へ戻すときだけ"
-                 "音量を持ち上げます。中音域や声の芯には一切触れず、高域の抜け・きらめきを"
-                 "強められます。まずは2〜4dBがおすすめ。"));
-        addToggleRow ("air2low", "Natural Air Low Cleanup (Beta)",
-            tip ("Natural Air v2 only. On low-pitched sustained vowels (below ~130 Hz) a trace of "
-                 "the original pitch could ride along in the preserved breath; this notches exactly "
-                 "those leftover lines out of the mid-band air while leaving the breath between "
-                 "them, the top air (Air Shine) and consonants untouched. Off = previous behaviour, "
-                 "for A/B comparison.",
-                 "Natural Air v2専用。約130Hzより低い持続母音では、保持された息の中に元の声の高さの"
-                 "痕跡がわずかに残ることがあります。その残留線だけを中音域の息からピンポイントで"
-                 "除去し、線の間の息・高域(Air Shine)・子音には触れません。オフ=従来動作"
-                 "(A/B比較用)。"));
+        addSliderRow ("air", "Natural Air",
+            tip ("Preserves the natural breath and aperiodic detail of the voice while suppressing "
+                 "old-pitch harmonic leakage. Up to 1.0 the preserved amount increases at natural "
+                 "loudness; from 1.0 to 1.5 the preserved air is also emphasized. 0 = off.",
+                 "声に含まれる自然な息や非周期成分を保ちながら、元のピッチ成分が重なって聞こえる"
+                 "ゴーストを抑えます。1.0までは自然な音量のまま保持量が増え、1.0〜1.5では"
+                 "息成分を強調します。0=オフ。"));
+        addSliderRow ("airshine", "Air Shine (dB)",
+            tip ("Adds high-frequency openness and air above the preserved natural breath. Only "
+                 "the highest air band (above ~6 kHz) comes back louder; the mids and the "
+                 "harmonic body are untouched. Try 2-4 dB.",
+                 "Natural Airの高域に抜け感と明るさを加えます。約6kHz以上の空気感だけが"
+                 "持ち上がり、中音域や声の芯には触れません。まずは2〜4dBがおすすめ。"));
 
         addSection ("ADVANCED");
         addToggleRow ("gci", "GCI Grain Sync (Beta)",
@@ -1815,14 +1783,10 @@ public:
                  "戻ります。オンにしてガタつき・ロボットっぽさを感じる場合はオフのままにして"
                  "ください(オフ=従来どおり)。"));
         addToggleRow ("lowvoice", "Low Voice Mode",
-            tip ("For deep or creaky voices (vocal fry). Extends pitch tracking down to 40 Hz and "
-                 "holds the last stable pitch through irregular, gravelly stretches - this prevents "
-                 "the converted/unconverted flutter on low 'mm' or 'eh' sounds. "
-                 "Leave off unless you need it.",
-                 "低くガラガラした声(ボーカルフライ)向けのモード。ピッチ検出を40Hzまで拡張し、"
-                 "不規則な区間では直前の安定ピッチを保持します。低い「んー」「えー」で"
-                 "変換/未変換が交互に切り替わってロボット的になる現象を防ぎます。"
-                 "必要な場合のみオンにしてください。"));
+            tip ("Extends pitch tracking for very low voices and vocal fry. It may retain more of "
+                 "the original low-period texture depending on the voice.",
+                 "非常に低い声やボーカルフライでもピッチ追跡を継続します。発声によっては、"
+                 "元の低周期の質感が強く残る場合があります。"));
 
         addToggleRow ("lowlat", "Low Latency Mode",
             tip ("Halves the conversion delay (43 ms -> about 21 ms) for live streaming and "

@@ -10,6 +10,8 @@ TD-PSOLA方式で、ピッチとフォルマントを完全に独立して操作
 - **Per-formant control** — F1/F2/F3 individual shift & gain (spectral envelope warping)
 - **Intonation** — scale the pitch movement around a pivot (natural male-to-female)
 - **Consonant Shift** — unvoiced consonants shifted separately
+- **Natural Air** — keeps the voice's own breath & aperiodic detail while
+  suppressing old-pitch leakage; **Air Shine** adds high-frequency openness
 - **Robotize / Pitch Floor / Natural Jitter / Softness (Tilt)**
 - **Low Voice Mode** — vocal-fry tracking down to 40 Hz with pitch hold
 - **Low Latency Mode** — ~21 ms conversion delay for live use (normal: ~43 ms)
