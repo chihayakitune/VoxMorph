@@ -37,7 +37,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "vadapt", 1 }, "AEIOU Character", false));
     layout.add (std::make_unique<P> (juce::ParameterID { "vamount", 1 }, "AEIOU Amount (%)",
-                juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 60.0f));
+                juce::NormalisableRange<float> (0.0f, 200.0f, 1.0f), 60.0f));
     layout.add (std::make_unique<juce::AudioParameterChoice> (
                 juce::ParameterID { "vcharacter", 1 }, "AEIOU Character Type",
                 juce::StringArray { "Natural", "Soft", "Active", "Loli",

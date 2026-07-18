@@ -74,7 +74,7 @@ public:
         // Character preset or the user's Custom values (15 plain floats,
         // resolved by the host wrapper — the engine never looks up presets).
         bool  vowelAdapt    = false;
-        float vowelAdaptAmt = 0.0f;   // 0..1 overall strength
+        float vowelAdaptAmt = 0.0f;   // 0..2 overall strength (1 = map as written)
         AEIOUCharacterMap vowelMap = getAEIOUCharacterMap (AEIOUCharacter::natural);
 
         // Natural Air (standard since v0.24.0): keeps the voice's own
@@ -308,7 +308,7 @@ public:
         // this control-rate call (15 floats, clamped inside setMap).
         vaw.setMap (q.vowelMap.offset);
         const float vaAmt = q.vowelAdapt
-                          ? std::clamp (q.vowelAdaptAmt, 0.0f, 1.0f) : 0.0f;
+                          ? std::clamp (q.vowelAdaptAmt, 0.0f, 2.0f) : 0.0f;
         vaw.setAmount (vaAmt);
         const bool vaOnNew = vaAmt > 1.0e-4f;
         if (vaOn && ! vaOnNew)

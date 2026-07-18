@@ -1614,6 +1614,20 @@ public:
     explicit AEIOUCharacterPanel (VoxMorphProcessor& p)
         : proc (p), pChar (p.apvts.getRawParameterValue ("vcharacter"))
     {
+        // the DocumentWindow is outside the editor's LookAndFeel scope, so
+        // give the panel the same pastel-mint light theme (otherwise JUCE's
+        // default dark scheme paints labels/values white on white)
+        lnf.setColour (juce::Slider::trackColourId,             juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::Slider::backgroundColourId,        juce::Colour (0xffe9e9e9));
+        lnf.setColour (juce::Slider::thumbColourId,             juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::Slider::textBoxTextColourId,       juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::white);
+        lnf.setColour (juce::Slider::textBoxOutlineColourId,    juce::Colour (0xffdedede));
+        lnf.setColour (juce::Label::textColourId,               juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::TextButton::buttonColourId,        juce::Colours::white);
+        lnf.setColour (juce::TextButton::textColourOffId,       juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::ComboBox::textColourId,            juce::Colour (0xff2e2e32));
+        setLookAndFeel (&lnf);
         charLbl.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
         charLbl.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
         addAndMakeVisible (charLbl);
@@ -1676,9 +1690,14 @@ public:
         addAndMakeVisible (closeBtn);
 
         setSize (620, 420);
+        // slider text boxes are created before the LnF applies (same issue
+        // as the main editor, see HANDOVER): force a refresh
+        sendLookAndFeelChange();
         sync (true);
         startTimerHz (4);
     }
+
+    ~AEIOUCharacterPanel() override { setLookAndFeel (nullptr); }
 
     void resized() override
     {
@@ -1812,6 +1831,7 @@ private:
 
     VoxMorphProcessor& proc;
     std::atomic<float>* pChar = nullptr;
+    juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
     juce::Label charLbl, note, colLbl[3], vowLbl[5];
     juce::TextButton copyBtn { "Copy to Custom" }, resetBtn { "Reset Custom" },
                      closeBtn { "Close" };
@@ -1983,9 +2003,11 @@ public:
                  "Uni=中性声 / Custom=詳細モード(DETAIL...の母音別設定を使用)。"));
         addSliderRow ("vamount", "AEIOU Amount (%)",
             tip ("Strength of the selected character's per-vowel offsets. 0 % = identical "
-                 "to the feature being off. Around 40-70 % is a good starting range.",
-                 "選択したキャラクター補正の強さ。0%=機能オフと完全に同じ音。"
-                 "まず40〜70%あたりから試してください。"));
+                 "to the feature being off, 100 % = the character map as designed, up to "
+                 "200 % emphasizes it further (larger internal limits apply above 100 %).",
+                 "選択したキャラクター補正の強さ。0%=機能オフと完全に同じ音、"
+                 "100%=設計どおりのキャラクター、200%まで上げるとさらに強調されます"
+                 "(100%超は内部上限を広げて適用)。"));
         addButtonRow ("Vowel Detail", "DETAIL...",
             tip ("Opens a window to view and edit the per-vowel F1-F3 settings. Built-in "
                  "Characters are shown read-only; \"Copy to Custom\" makes them editable.",

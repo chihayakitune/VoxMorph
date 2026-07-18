@@ -25,8 +25,14 @@ class VowelAdaptiveWarp
 {
 public:
     static constexpr int kAnchors = 5;            // a, i, u, e, o
-    // safety caps for the final offsets (semitones)
-    static constexpr float kMaxOff[3] = { 2.0f, 3.0f, 1.5f };
+    // safety caps for the FINAL offsets (semitones). Larger than the map
+    // value range (+-2/+-3/+-1.5) so an Amount above 100 % (up to 200 %)
+    // has room to actually emphasize the character instead of flattening
+    // every vowel onto the same ceiling; still well inside the +-6 st the
+    // manual F1-F3 shifts already allow.
+    static constexpr float kMaxOff[3] = { 3.0f, 4.5f, 2.25f };
+    // map VALUES are still entered/stored in the original safe range
+    static constexpr float kMaxMap[3] = { 2.0f, 3.0f, 1.5f };
 
     VowelAdaptiveWarp()
     {
@@ -58,9 +64,9 @@ public:
         motSm = 0.0f;  prevL1 = 0.0f;  prevL2 = 0.0f;  havePrev = false;
     }
 
-    void setAmount (float a01)
+    void setAmount (float a)   // 0..2 (100 % = the map as written, 200 % = doubled)
     {
-        amount = std::isfinite (a01) ? std::clamp (a01, 0.0f, 1.0f) : 0.0f;
+        amount = std::isfinite (a) ? std::clamp (a, 0.0f, 2.0f) : 0.0f;
     }
 
     // Replace the whole per-vowel map at once (AEIOU Character presets /
@@ -71,7 +77,7 @@ public:
         for (int a = 0; a < kAnchors; ++a)
             for (int i = 0; i < 3; ++i)
                 mapOff[a][i] = std::isfinite (m[a][i])
-                             ? std::clamp (m[a][i], -kMaxOff[i], kMaxOff[i]) : 0.0f;
+                             ? std::clamp (m[a][i], -kMaxMap[i], kMaxMap[i]) : 0.0f;
     }
 
     // Per-anchor variant (kept for the planned measured-target flow).
@@ -82,7 +88,7 @@ public:
         const float v[3] = { f1Semi, f2Semi, f3Semi };
         for (int i = 0; i < 3; ++i)
             mapOff[anchor][i] = std::isfinite (v[i])
-                              ? std::clamp (v[i], -kMaxOff[i], kMaxOff[i]) : 0.0f;
+                              ? std::clamp (v[i], -kMaxMap[i], kMaxMap[i]) : 0.0f;
     }
 
     // one call per control frame; smoothed offsets then read via offsetSemi()
