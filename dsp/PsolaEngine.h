@@ -97,6 +97,21 @@ public:
         // versions.
         bool  airV2 = false;
 
+        // Natural Air low cleanup (Beta, v2 only, default on). Below f0
+        // ~130 Hz the FFT cleanup window cannot resolve the harmonic grid
+        // (mainlobe wider than the spacing), so it is disabled there — which
+        // let comb-residual harmonics of low voices ride into the air path
+        // (measured +1..3 dB on the input-f0 odd lines in real recordings).
+        // This applies a WEAK time-domain second comb to the presence
+        // band's (2.5-6 kHz) bypassed air instead: notches sit exactly on
+        // every input-f0 multiple regardless of FFT resolution, the
+        // inter-harmonic midpoints are untouched by construction (true air
+        // survives), depth is mild (~-7 dB), and it only engages on
+        // confident, pitch-still sustained vowels — onsets, fricatives and
+        // unvoiced stretches are unaffected. >6 kHz stays untouched (Air
+        // Shine). false = v0.22.0 behaviour.
+        bool  airLowClean = true;
+
         // Air Shine (Beta, Natural Air v2 only): extra gain on the TOP
         // band's (>6 kHz) bypassed air, on top of the knob's boost. Only
         // the re-addition into the output is raised — the subtraction from
@@ -199,6 +214,11 @@ public:
 
         airSplit.setup (sampleRate);
         airSplit.reset();
+        airCombT = 0.0f;
+        gCmb     = 0.0f;
+        airDRelSm = 0.0f;
+        nNotch = 0;
+        for (int j = 0; j < kMaxNotch; ++j) { nZ1[j] = 0.0f; nZ2[j] = 0.0f; }
         noiseFx.assign (kRing, 0.0f);
         hannFx.resize ((size_t) kFxN);
         for (int i = 0; i < kFxN; ++i)
@@ -245,6 +265,8 @@ public:
     // smoothed per-band aperiodicity estimate (0 = periodic, 1 = noise);
     // exposed for the offline harness and future UI metering
     float airBandAperiodicity (int b) const { return aB[std::clamp (b, 0, 3)]; }
+    float airCombGain()  const { return gCmb; }        // low-f0 comb (debug)
+    float pitchClarity() const { return pitchConf; }   // YIN clarity (debug)
 
 #ifdef PSOLA_GRAIN_LOG
     // offline instrumentation (never compiled into the plugin): one row per
@@ -290,12 +312,14 @@ public:
         airKSplit      = 0.6667f * std::min (1.0f, airAmt);
         airBoost       = 1.0f + 1.2f * std::max (0.0f, airAmt - 1.0f);
         airShineLin    = std::pow (10.0f, std::clamp (q.airShineDb, 0.0f, 6.0f) / 20.0f);
+        airLowCleanOn  = q.airLowClean;
         if (airV2On != q.airV2)          // mode switch: clear both paths' states
         {
             airV2On = q.airV2;
             airSplit.reset();
             airLp1 = airLp2 = 0.0f;
             airG = airB = 0.0f;
+            gCmb = 0.0f;
             for (int b = 0; b < 4; ++b) { gS2[b] = 0.0f; gB2[b] = 0.0f; }
         }
         {   // v2 band weights from the airband knob: bands whose centre sits
@@ -459,8 +483,31 @@ public:
                             gS2[b] += airK * (tS[b] - gS2[b]);
                             gB2[b] += airK * (tB[b] - gB2[b]);
                             sub += gS2[b] * bnd[b];
-                            air += gB2[b] * bnd[b];
+                            if (b == 0 || b == 3) air += gB2[b] * bnd[b];
                         }
+                        // low-f0 cleanup: adaptive notch bank on the mid +
+                        // presence air (bands 1-2). Real-voice measurements
+                        // put the leaked odd input-f0 lines at ~0.3-2.5 kHz;
+                        // a repeated comb misses them by the SAME period
+                        // error that let them through, so the notches are
+                        // placed at the absolute line frequencies instead
+                        // (odd k * f0, retuned every frame, ~25-75 Hz wide).
+                        // Even multiples are left alone — they sit under the
+                        // resynthesized harmonics and are masked anyway.
+                        // gCmb blends the filtered path in only when
+                        // updateAirBands armed it (low f0, confident,
+                        // pitch-steady voiced). >6 kHz never touched.
+                        const float b12c = gB2[1] * bnd[1] + gB2[2] * bnd[2];
+                        gCmb += airK * (airCombT - gCmb);
+                        float yn = b12c;
+                        for (int j = 0; j < nNotch; ++j)
+                        {
+                            const float t0n = yn;
+                            yn = nB0[j] * t0n + nZ1[j];
+                            nZ1[j] = nB1[j] * t0n - nA1[j] * yn + nZ2[j];
+                            nZ2[j] = nB2[j] * t0n - nA2[j] * yn;
+                        }
+                        air += b12c + gCmb * (yn - b12c);
                         noiseBuf[idx] = air;
                         harmBuf[idx]  = inBuf[idx] - sub;
                     }
@@ -476,6 +523,7 @@ public:
                     airSplit.reset();
                     for (int b = 0; b < 4; ++b) { gS2[b] = 0.0f; gB2[b] = 0.0f; }
                     airP = curP;
+                    gCmb = 0.0f;
                 }
             }
         }
@@ -754,8 +802,10 @@ private:
     // ever subtracted from the signal itself).
     void updateAirBands()
     {
+        airCombT = 0.0f;               // re-armed below on suitable frames
         const float dRel = std::abs (curP - airPrevP) / std::max (curP, 1.0f);
         airPrevP = curP;
+        airDRelSm += 0.15f * (dRel - airDRelSm);   // ~10-frame motion average
 
         const float P    = std::clamp (curP, (float) minLag, (float) maxLagLow);
         const int   lag  = (int) std::lround (P);
@@ -903,6 +953,46 @@ private:
                              : 0.5f * rel * (b < 2 ? lowCons : 1.0f);
             aB[b] += rate * (a1 - aB[b]);
         }
+
+        // arm the low-f0 second comb (see the sample loop): only where the
+        // FFT cleanup cannot resolve the harmonic grid, and only on
+        // confident, pitch-still sustained phonation (rel is pitchConf x
+        // f0 stillness x motion hold, so onsets, glides and shaky frames
+        // keep it released; unvoiced frames never reach this point)
+        // gate on the SMOOTHED f0 motion (a low voice's natural jitter must
+        // not keep the bank released; glides and onsets still release it)
+        // and on YIN clarity; fricatives/unvoiced never reach this point
+        if (airLowCleanOn && (float) kFxN / P < 3.0f)
+        {
+            airCombT = std::clamp ((pitchConf - 0.2f) / 0.2f, 0.0f, 1.0f)
+                     * std::clamp (1.0f - airDRelSm / 0.04f, 0.0f, 1.0f);
+            // retune: notches on the ODD input-f0 multiples inside
+            // ~0.3-2.5 kHz (where the leaked lines measure), tracking f0
+            const float f0n = (float) (fs / (double) P);
+            int j = 0;
+            for (int k = 1; j < kMaxNotch; k += 2)
+            {
+                const float fc = k * f0n;
+                if (fc < 100.0f) continue;
+                if (fc > 2500.0f) break;
+                const float w  = 2.0f * (float) M_PI * fc / (float) fs;
+                const float bw = std::max (25.0f, 0.03f * fc);
+                const float Q  = fc / bw;
+                const float al = std::sin (w) / (2.0f * Q);
+                const float a0 = 1.0f + al;
+                const float c2 = -2.0f * std::cos (w);
+                if (j >= nNotch) { nZ1[j] = 0.0f; nZ2[j] = 0.0f; }
+                nB0[j] = 1.0f / a0;
+                nB1[j] = c2   / a0;
+                nB2[j] = 1.0f / a0;
+                nA1[j] = c2   / a0;
+                nA2[j] = (1.0f - al) / a0;
+                ++j;
+            }
+            nNotch = j;
+        }
+        else
+            nNotch = 0;
     }
 
     // ---------------- Natural Air v2: spectral air cleanup ----------------
@@ -1507,6 +1597,17 @@ private:
     float    pitchConf = 0.0f;            // YIN clarity 0..1
     std::vector<float> airBandScr[4];     // control-rate band scratch
     std::vector<double> airPfx;           // prefix band energies (scratch)
+
+    // Natural Air v2 low-f0 cleanup (adaptive notch bank on bands 1-2 air)
+    static constexpr int kMaxNotch = 12;
+    bool  airLowCleanOn = true;
+    float airCombT = 0.0f;                // control-rate blend target
+    float airDRelSm = 0.0f;               // smoothed |df0| per frame
+    float gCmb     = 0.0f;                // per-sample smoothed blend gain
+    int   nNotch   = 0;
+    float nB0[kMaxNotch] {}, nB1[kMaxNotch] {}, nB2[kMaxNotch] {};
+    float nA1[kMaxNotch] {}, nA2[kMaxNotch] {};
+    float nZ1[kMaxNotch] {}, nZ2[kMaxNotch] {};
 
     // Natural Air v2 spectral cleanup state
     static constexpr int kFxN = 1024;     // cleanup FFT window (hop = /2)

@@ -39,6 +39,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::ParameterID { "air2", 1 }, "Natural Air v2 (Beta)", false));
     layout.add (std::make_unique<P> (juce::ParameterID { "airshine", 1 }, "Air Shine (dB)",
                 juce::NormalisableRange<float> (0.0f, 6.0f, 0.1f), 0.0f));
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "air2low", 1 }, "Natural Air Low Cleanup", true));
     layout.add (std::make_unique<P> (juce::ParameterID { "range", 1 }, "Intonation Amount (%)",
                 juce::NormalisableRange<float> (50.0f, 200.0f, 1.0f), 100.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "center", 1 }, "Intonation Pivot (Hz)",
@@ -117,6 +119,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pAirBand = apvts.getRawParameterValue ("airband");
     pAir2    = apvts.getRawParameterValue ("air2");
     pAirShine = apvts.getRawParameterValue ("airshine");
+    pAir2Low  = apvts.getRawParameterValue ("air2low");
     pGci     = apvts.getRawParameterValue ("gci");
     pHiFreq  = apvts.getRawParameterValue ("hifreq");
     pHiPitch = apvts.getRawParameterValue ("hipitch");
@@ -359,6 +362,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.airFreqHz     = pAirBand->load();
     p.airV2         = pAir2->load() > 0.5f;  // band-adaptive comb (Beta)
     p.airShineDb    = pAirShine->load();     // top-band bypass gain (Beta)
+    p.airLowClean   = pAir2Low->load() > 0.5f;
     p.gciSync       = pGci->load() > 0.5f;
     p.hiRangeHz     = pHiFreq->load();       // high-range guard (laughs)
     p.hiPitchAmt    = pHiPitch->load() * 0.01f;

@@ -1790,6 +1790,16 @@ public:
                  "Natural Air v2専用。保持された最上段の空気感(約6kHz以上)を出力へ戻すときだけ"
                  "音量を持ち上げます。中音域や声の芯には一切触れず、高域の抜け・きらめきを"
                  "強められます。まずは2〜4dBがおすすめ。"));
+        addToggleRow ("air2low", "Natural Air Low Cleanup (Beta)",
+            tip ("Natural Air v2 only. On low-pitched sustained vowels (below ~130 Hz) a trace of "
+                 "the original pitch could ride along in the preserved breath; this notches exactly "
+                 "those leftover lines out of the mid-band air while leaving the breath between "
+                 "them, the top air (Air Shine) and consonants untouched. Off = previous behaviour, "
+                 "for A/B comparison.",
+                 "Natural Air v2専用。約130Hzより低い持続母音では、保持された息の中に元の声の高さの"
+                 "痕跡がわずかに残ることがあります。その残留線だけを中音域の息からピンポイントで"
+                 "除去し、線の間の息・高域(Air Shine)・子音には触れません。オフ=従来動作"
+                 "(A/B比較用)。"));
 
         addSection ("ADVANCED");
         addToggleRow ("gci", "GCI Grain Sync (Beta)",
