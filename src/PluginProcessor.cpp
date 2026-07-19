@@ -42,9 +42,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::ParameterID { "vcharacter", 1 }, "AEIOU Character Type",
                 juce::StringArray { "Natural", "Soft", "Active", "Loli",
                                     "Anime", "Lily", "Elegant", "Uni", "Custom" }, 0));
-    // Custom map: 15 fixed ids (vowel a/i/u/e/o x F1/F2/F3, semitones),
-    // defaults = the Natural preset. Kept in the state even while a
-    // built-in Character is selected.
+    // Custom map: 15 shift ids (vowel a/i/u/e/o x F1/F2/F3, semitones) +
+    // 15 gain ids (dB, v0.27.0), defaults = the Natural preset. Kept in
+    // the state even while a built-in Character is selected.
     {
         static const char* vw[5] = { "a", "i", "u", "e", "o" };
         static constexpr float rng[3] = { 2.0f, 3.0f, 1.5f };
@@ -58,6 +58,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 layout.add (std::make_unique<P> (juce::ParameterID { id, 1 }, nm,
                             juce::NormalisableRange<float> (-rng[f], rng[f], 0.01f),
                             nat.offset[v][f]));
+            }
+        for (int v = 0; v < 5; ++v)
+            for (int f = 0; f < 3; ++f)
+            {
+                const auto id = juce::String ("va_") + vw[v] + "_g" + juce::String (f + 1);
+                const auto nm = juce::String ("AEIOU ") + juce::String (vw[v]).toUpperCase()
+                              + " F" + juce::String (f + 1) + " Gain (dB)";
+                layout.add (std::make_unique<P> (juce::ParameterID { id, 1 }, nm,
+                            juce::NormalisableRange<float> (-3.0f, 3.0f, 0.1f),
+                            nat.gainDb[v][f]));
             }
     }
     layout.add (std::make_unique<P> (juce::ParameterID { "breath2", 1 }, "Breath",
@@ -158,8 +168,12 @@ VoxMorphProcessor::VoxMorphProcessor()
         static const char* vw[5] = { "a", "i", "u", "e", "o" };
         for (int v = 0; v < 5; ++v)
             for (int f = 0; f < 3; ++f)
+            {
                 pVCustom[v][f] = apvts.getRawParameterValue (
                     juce::String ("va_") + vw[v] + "_f" + juce::String (f + 1));
+                pVCustomG[v][f] = apvts.getRawParameterValue (
+                    juce::String ("va_") + vw[v] + "_g" + juce::String (f + 1));
+            }
     }
     pBreath2 = apvts.getRawParameterValue ("breath2");
     pAir     = apvts.getRawParameterValue ("air");
@@ -423,7 +437,10 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         if (ch == AEIOUCharacter::custom)
             for (int v = 0; v < 5; ++v)
                 for (int f = 0; f < 3; ++f)
+                {
                     p.vowelMap.offset[v][f] = pVCustom[v][f]->load();
+                    p.vowelMap.gainDb[v][f] = pVCustomG[v][f]->load();
+                }
         else
             p.vowelMap = getAEIOUCharacterMap (ch);
     }

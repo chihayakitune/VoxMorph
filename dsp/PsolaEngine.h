@@ -305,8 +305,8 @@ public:
 
         // AEIOU Character: off (or amount 0) must be a perfect no-op, so
         // the enable flag collapses into the amount. The map is copied at
-        // this control-rate call (15 floats, clamped inside setMap).
-        vaw.setMap (q.vowelMap.offset);
+        // this control-rate call (30 floats, clamped inside setMap).
+        vaw.setMap (q.vowelMap);
         const float vaAmt = q.vowelAdapt
                           ? std::clamp (q.vowelAdaptAmt, 0.0f, 2.0f) : 0.0f;
         vaw.setAmount (vaAmt);
@@ -540,6 +540,7 @@ public:
     float vowelFrontness()       const { return vaw.vowelFrontness(); }
     float vowelConfidence()      const { return vaw.confidence(); }
     float vowelOffsetSemi (int i) const { return vaw.offsetSemi (i); }
+    float vowelGainDb (int i)     const { return vaw.gainDb (i); }
 
 private:
     static constexpr int kRing = 1 << 15;
@@ -1293,14 +1294,30 @@ private:
         sBin[1] = std::max (sBin[1], sBin[0] + binOf (150.0 * f));
         sBin[2] = std::max (sBin[2], sBin[1] + binOf (200.0 * f));
 
-        // effective per-formant ratios: the user's fixed shifts times the
-        // vowel-adaptive offsets (semitone-additive, i.e. ratio product).
-        // The offsets are smoothed at control rate, clamped inside the
-        // estimator, and scaled by the High Range guard (vaHiScale).
+        // effective per-formant ratios and gains: the user's fixed values
+        // plus the vowel-adaptive offsets (shift = ratio product, gain =
+        // dB additive). Both are smoothed at control rate, clamped inside
+        // the estimator, and scaled by the High Range guard (vaHiScale).
         float fEffRatio[3] = { fShiftRatio[0], fShiftRatio[1], fShiftRatio[2] };
+        float fEffGain[3]  = { fGainDb[0], fGainDb[1], fGainDb[2] };
+        float vaComp = 0.0f;
         if (vaOn)
+        {
+            float vg[3];
             for (int i = 0; i < 3; ++i)
+            {
                 fEffRatio[i] *= std::exp2 (vaHiScale * vaw.offsetSemi (i) / 12.0f);
+                vg[i] = vaHiScale * vaw.gainDb (i);
+                fEffGain[i] += vg[i];
+            }
+            // light energy compensation: the adaptive gains shape the
+            // RELATIVE resonance balance, so take back part of their net
+            // loudness change (F1 region carries most vowel energy) —
+            // keeps loud/quiet vowels from drifting apart. Broadband,
+            // small and derived from the already-smoothed gains.
+            vaComp = std::clamp (-0.6f * (0.5f * vg[0] + 0.3f * vg[1] + 0.2f * vg[2]),
+                                 -2.0f, 2.0f);
+        }
 
         // warp anchors: 0, F1, F2, F3, (F3 + 900*f Hz), Nyquist
         const int tail = std::min (NB - 2, sBin[2] + binOf (900.0 * f));
@@ -1344,11 +1361,11 @@ private:
                                   + env[(size_t)std::min (si + 1, NB)] * fracb;
                 float R = eSrc / std::max (env[(size_t)k], 1.0e-9f);
 
-                float gDb = 0.0f;
+                float gDb = vaComp;   // broadband energy make-up (0 when off)
                 for (int i = 0; i < 3; ++i)
                 {
                     const float z = (float)(k - dBin[i]) * bwInv[i];
-                    gDb += fGainDb[i] * std::exp (-0.5f * z * z);
+                    gDb += fEffGain[i] * std::exp (-0.5f * z * z);
                 }
                 R *= std::pow (10.0f, gDb / 20.0f);
                 R = std::clamp (R, 0.08f, 12.0f);

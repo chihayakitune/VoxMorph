@@ -1653,7 +1653,7 @@ public:
         note.setColour (juce::Label::textColourId, juce::Colours::grey);
         addAndMakeVisible (note);
 
-        static const char* colTxt[3] = { "F1 Shift (st)", "F2 Shift (st)", "F3 Shift (st)" };
+        static const char* colTxt[3] = { "F1", "F2", "F3" };
         for (int f = 0; f < 3; ++f)
         {
             colLbl[f].setText (colTxt[f], juce::dontSendNotification);
@@ -1661,24 +1661,42 @@ public:
             colLbl[f].setJustificationType (juce::Justification::centred);
             addAndMakeVisible (colLbl[f]);
         }
+        static const char* secTxt[2] = { "Formant Shift (st)", "Formant Gain (dB)" };
+        for (int s = 0; s < 2; ++s)
+        {
+            secLbl[s].setText (secTxt[s], juce::dontSendNotification);
+            secLbl[s].setFont (juce::Font (juce::FontOptions (12.5f, juce::Font::bold)));
+            secLbl[s].setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+            addAndMakeVisible (secLbl[s]);
+        }
         static const char* vowTxt[5] = { "A / \xe3\x81\x82", "I / \xe3\x81\x84",
                                          "U / \xe3\x81\x86", "E / \xe3\x81\x88",
                                          "O / \xe3\x81\x8a" };
         static constexpr float rng[3] = { 2.0f, 3.0f, 1.5f };
+        const auto& nat = getAEIOUCharacterMap (AEIOUCharacter::natural);
         for (int v = 0; v < 5; ++v)
         {
-            vowLbl[v].setText (juce::String::fromUTF8 (vowTxt[v]), juce::dontSendNotification);
-            vowLbl[v].setFont (juce::Font (juce::FontOptions (13.0f)));
+            vowLbl[v] .setText (juce::String::fromUTF8 (vowTxt[v]), juce::dontSendNotification);
+            vowLblG[v].setText (juce::String::fromUTF8 (vowTxt[v]), juce::dontSendNotification);
+            vowLbl[v] .setFont (juce::Font (juce::FontOptions (13.0f)));
+            vowLblG[v].setFont (juce::Font (juce::FontOptions (13.0f)));
             addAndMakeVisible (vowLbl[v]);
+            addAndMakeVisible (vowLblG[v]);
             for (int f = 0; f < 3; ++f)
             {
                 auto& s = cell[v][f];
                 s.setSliderStyle (juce::Slider::LinearHorizontal);
                 s.setTextBoxStyle (juce::Slider::TextBoxRight, false, 52, 18);
                 s.setRange (-rng[f], rng[f], 0.01);
-                s.setDoubleClickReturnValue (true,
-                    getAEIOUCharacterMap (AEIOUCharacter::natural).offset[v][f]);
+                s.setDoubleClickReturnValue (true, nat.offset[v][f]);
                 addAndMakeVisible (s);
+
+                auto& g = cellG[v][f];
+                g.setSliderStyle (juce::Slider::LinearHorizontal);
+                g.setTextBoxStyle (juce::Slider::TextBoxRight, false, 52, 18);
+                g.setRange (-3.0, 3.0, 0.1);
+                g.setDoubleClickReturnValue (true, nat.gainDb[v][f]);
+                addAndMakeVisible (g);
             }
         }
 
@@ -1689,7 +1707,7 @@ public:
         };
         addAndMakeVisible (closeBtn);
 
-        setSize (620, 420);
+        setSize (700, 640);
         // slider text boxes are created before the LnF applies (same issue
         // as the main editor, see HANDOVER): force a refresh
         sendLookAndFeelChange();
@@ -1710,21 +1728,31 @@ public:
         r.removeFromTop (2);
         note.setBounds (r.removeFromTop (20));
         r.removeFromTop (6);
+        r.removeFromBottom (32);   // reserve for the Close button
 
-        auto hdr = r.removeFromTop (18);
-        hdr.removeFromLeft (76);
-        const int cw = hdr.getWidth() / 3;
-        for (int f = 0; f < 3; ++f)
-            colLbl[f].setBounds (hdr.removeFromLeft (cw));
-
-        for (int v = 0; v < 5; ++v)
+        auto laySection = [&] (int sectionIdx,
+                               juce::Slider (&arr)[5][3], juce::Label (&vl)[5])
         {
-            auto row = r.removeFromTop (46);
-            vowLbl[v].setBounds (row.removeFromLeft (76));
-            const int cw2 = row.getWidth() / 3;
+            secLbl[sectionIdx].setBounds (r.removeFromTop (20));
+            auto hdr = r.removeFromTop (18);
+            hdr.removeFromLeft (76);
+            const int cw = hdr.getWidth() / 3;
             for (int f = 0; f < 3; ++f)
-                cell[v][f].setBounds (row.removeFromLeft (cw2).reduced (4, 8));
-        }
+                colLbl[f].setBounds (hdr.removeFromLeft (cw));   // shared labels: F1/F2/F3
+
+            for (int v = 0; v < 5; ++v)
+            {
+                auto row = r.removeFromTop (40);
+                vl[v].setBounds (row.removeFromLeft (76));
+                const int cw2 = row.getWidth() / 3;
+                for (int f = 0; f < 3; ++f)
+                    arr[v][f].setBounds (row.removeFromLeft (cw2).reduced (4, 6));
+            }
+            r.removeFromTop (8);
+        };
+        laySection (0, cell,  vowLbl);
+        laySection (1, cellG, vowLblG);
+
         closeBtn.setBounds (getLocalBounds().reduced (14, 10)
                                 .removeFromBottom (26).removeFromRight (90));
     }
@@ -1734,6 +1762,11 @@ private:
     {
         static const char* vw[5] = { "a", "i", "u", "e", "o" };
         return juce::String ("va_") + vw[v] + "_f" + juce::String (f + 1);
+    }
+    static juce::String customIdG (int v, int f)
+    {
+        static const char* vw[5] = { "a", "i", "u", "e", "o" };
+        return juce::String ("va_") + vw[v] + "_g" + juce::String (f + 1);
     }
 
     void timerCallback() override { sync (false); }
@@ -1751,29 +1784,39 @@ private:
                                             "Anime", "Lily", "Elegant", "Uni", "Custom" };
             charLbl.setText (juce::String ("Character: ") + names[ch],
                              juce::dontSendNotification);
+            const auto& mm = getAEIOUCharacterMap ((AEIOUCharacter) ch);
             for (int v = 0; v < 5; ++v)
                 for (int f = 0; f < 3; ++f)
                 {
                     auto& s = cell[v][f];
+                    auto& g = cellG[v][f];
                     if (custom)
                     {
                         if (att[v][f] == nullptr)
                             att[v][f] = std::make_unique<
                                 juce::AudioProcessorValueTreeState::SliderAttachment> (
                                     proc.apvts, customId (v, f), s);
+                        if (attG[v][f] == nullptr)
+                            attG[v][f] = std::make_unique<
+                                juce::AudioProcessorValueTreeState::SliderAttachment> (
+                                    proc.apvts, customIdG (v, f), g);
                     }
                     else
                     {
                         att[v][f].reset();
-                        s.setValue (getAEIOUCharacterMap ((AEIOUCharacter) ch).offset[v][f],
-                                    juce::dontSendNotification);
+                        attG[v][f].reset();
+                        s.setValue (mm.offset[v][f], juce::dontSendNotification);
+                        g.setValue (mm.gainDb[v][f], juce::dontSendNotification);
                     }
                 }
             lastCh = ch;
         }
         for (int v = 0; v < 5; ++v)
             for (int f = 0; f < 3; ++f)
-                cell[v][f].setEnabled (custom && ! proc.isParamLocked (customId (v, f)));
+            {
+                cell[v][f] .setEnabled (custom && ! proc.isParamLocked (customId  (v, f)));
+                cellG[v][f].setEnabled (custom && ! proc.isParamLocked (customIdG (v, f)));
+            }
         copyBtn.setEnabled (! custom);
         resetBtn.setEnabled (custom);
     }
@@ -1786,17 +1829,21 @@ private:
         const auto& m = getAEIOUCharacterMap ((AEIOUCharacter) ch);
         proc.history.group ([&]
         {
+            auto applyOne = [&] (const juce::String& id, float val)
+            {
+                if (proc.isParamLocked (id)) return;
+                if (auto* rp = proc.apvts.getParameter (id))
+                {
+                    rp->beginChangeGesture();
+                    rp->setValueNotifyingHost (rp->convertTo0to1 (val));
+                    rp->endChangeGesture();
+                }
+            };
             for (int v = 0; v < 5; ++v)
                 for (int f = 0; f < 3; ++f)
                 {
-                    const auto id = customId (v, f);
-                    if (proc.isParamLocked (id)) continue;
-                    if (auto* rp = proc.apvts.getParameter (id))
-                    {
-                        rp->beginChangeGesture();
-                        rp->setValueNotifyingHost (rp->convertTo0to1 (m.offset[v][f]));
-                        rp->endChangeGesture();
-                    }
+                    applyOne (customId  (v, f), m.offset[v][f]);
+                    applyOne (customIdG (v, f), m.gainDb[v][f]);
                 }
             if (! proc.isParamLocked ("vcharacter"))
                 if (auto* cp = proc.apvts.getParameter ("vcharacter"))
@@ -1814,17 +1861,21 @@ private:
     {
         proc.history.group ([&]
         {
+            auto resetOne = [&] (const juce::String& id)
+            {
+                if (proc.isParamLocked (id)) return;
+                if (auto* rp = proc.apvts.getParameter (id))
+                {
+                    rp->beginChangeGesture();
+                    rp->setValueNotifyingHost (rp->getDefaultValue());
+                    rp->endChangeGesture();
+                }
+            };
             for (int v = 0; v < 5; ++v)
                 for (int f = 0; f < 3; ++f)
                 {
-                    const auto id = customId (v, f);
-                    if (proc.isParamLocked (id)) continue;
-                    if (auto* rp = proc.apvts.getParameter (id))
-                    {
-                        rp->beginChangeGesture();
-                        rp->setValueNotifyingHost (rp->getDefaultValue());
-                        rp->endChangeGesture();
-                    }
+                    resetOne (customId  (v, f));
+                    resetOne (customIdG (v, f));
                 }
         });
     }
@@ -1832,11 +1883,12 @@ private:
     VoxMorphProcessor& proc;
     std::atomic<float>* pChar = nullptr;
     juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
-    juce::Label charLbl, note, colLbl[3], vowLbl[5];
+    juce::Label charLbl, note, colLbl[3], vowLbl[5], vowLblG[5], secLbl[2];
     juce::TextButton copyBtn { "Copy to Custom" }, resetBtn { "Reset Custom" },
                      closeBtn { "Close" };
-    juce::Slider cell[5][3];
+    juce::Slider cell[5][3], cellG[5][3];
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> att[5][3];
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attG[5][3];
     int lastCh = -1;
 };
 

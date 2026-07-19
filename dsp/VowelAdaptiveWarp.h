@@ -33,10 +33,14 @@ public:
     static constexpr float kMaxOff[3] = { 3.0f, 4.5f, 2.25f };
     // map VALUES are still entered/stored in the original safe range
     static constexpr float kMaxMap[3] = { 2.0f, 3.0f, 1.5f };
+    // per-vowel resonance gain (v0.27.0): map input range and the final
+    // cap after Amount (200 % of the +-3 dB map values, limited to +-4.5)
+    static constexpr float kMaxMapGain = 3.0f;   // dB, map values
+    static constexpr float kMaxGain    = 4.5f;   // dB, smoothed output
 
     VowelAdaptiveWarp()
     {
-        setMap (getAEIOUCharacterMap (AEIOUCharacter::natural).offset);
+        setMap (getAEIOUCharacterMap (AEIOUCharacter::natural));
     }
 
     struct Input
@@ -59,7 +63,8 @@ public:
 
     void reset()
     {
-        off[0] = off[1] = off[2] = 0.0f;
+        off[0]  = off[1]  = off[2]  = 0.0f;
+        offG[0] = offG[1] = offG[2] = 0.0f;
         height = 0.5f;  frontness = 0.5f;  conf = 0.0f;
         motSm = 0.0f;  prevL1 = 0.0f;  prevL2 = 0.0f;  havePrev = false;
     }
@@ -70,14 +75,18 @@ public:
     }
 
     // Replace the whole per-vowel map at once (AEIOU Character presets /
-    // Custom values, copied at control rate — 15 plain floats, RT-safe).
+    // Custom values, copied at control rate — 30 plain floats, RT-safe).
     // Values are clamped to the safety caps.
-    void setMap (const float (&m)[kAnchors][3])
+    void setMap (const AEIOUCharacterMap& m)
     {
         for (int a = 0; a < kAnchors; ++a)
             for (int i = 0; i < 3; ++i)
-                mapOff[a][i] = std::isfinite (m[a][i])
-                             ? std::clamp (m[a][i], -kMaxMap[i], kMaxMap[i]) : 0.0f;
+            {
+                mapOff[a][i] = std::isfinite (m.offset[a][i])
+                             ? std::clamp (m.offset[a][i], -kMaxMap[i], kMaxMap[i]) : 0.0f;
+                mapGain[a][i] = std::isfinite (m.gainDb[a][i])
+                              ? std::clamp (m.gainDb[a][i], -kMaxMapGain, kMaxMapGain) : 0.0f;
+            }
     }
 
     // Per-anchor variant (kept for the planned measured-target flow).
@@ -136,24 +145,36 @@ public:
         conf = gate;
 
         // ---- map lookup: inverse-square-distance blend over the anchors --
-        float target[3] = { 0.0f, 0.0f, 0.0f };
+        // (shifts and gains share the same weights and gate)
+        float target[3]  = { 0.0f, 0.0f, 0.0f };
+        float targetG[3] = { 0.0f, 0.0f, 0.0f };
         if (gate > 0.0f)
         {
-            float wSum = 0.0f, acc[3] = { 0.0f, 0.0f, 0.0f };
+            float wSum = 0.0f;
+            float acc[3]  = { 0.0f, 0.0f, 0.0f };
+            float accG[3] = { 0.0f, 0.0f, 0.0f };
             for (int a = 0; a < kAnchors; ++a)
             {
                 const float dh = height    - kAnchorH[a];
                 const float df = frontness - kAnchorF[a];
                 const float w  = 1.0f / (dh * dh + df * df + 0.02f);
                 wSum += w;
-                for (int i = 0; i < 3; ++i) acc[i] += w * mapOff[a][i];
+                for (int i = 0; i < 3; ++i)
+                {
+                    acc[i]  += w * mapOff[a][i];
+                    accG[i] += w * mapGain[a][i];
+                }
             }
             for (int i = 0; i < 3; ++i)
-                target[i] = std::clamp (gate * acc[i] / wSum,
-                                        -kMaxOff[i], kMaxOff[i]);
+            {
+                target[i]  = std::clamp (gate * acc[i]  / wSum,
+                                         -kMaxOff[i], kMaxOff[i]);
+                targetG[i] = std::clamp (gate * accG[i] / wSum,
+                                         -kMaxGain, kMaxGain);
+            }
         }
 
-        // ---- per-formant attack/release smoothing toward the target ------
+        // ---- per-formant attack/release smoothing toward the targets -----
         for (int i = 0; i < 3; ++i)
         {
             const float a = gate <= 0.0f ? aGone
@@ -161,10 +182,17 @@ public:
             off[i] += a * (target[i] - off[i]);
             if (! std::isfinite (off[i])) off[i] = 0.0f;
             off[i] = std::clamp (off[i], -kMaxOff[i], kMaxOff[i]);
+
+            const float ag = gate <= 0.0f ? aGone
+                           : (std::abs (targetG[i]) > std::abs (offG[i]) ? aAtk : aRel);
+            offG[i] += ag * (targetG[i] - offG[i]);
+            if (! std::isfinite (offG[i])) offG[i] = 0.0f;
+            offG[i] = std::clamp (offG[i], -kMaxGain, kMaxGain);
         }
     }
 
     float offsetSemi (int i) const { return off[std::clamp (i, 0, 2)]; }
+    float gainDb (int i)     const { return offG[std::clamp (i, 0, 2)]; }
     float vowelHeight()      const { return height; }
     float vowelFrontness()   const { return frontness; }
     float confidence()       const { return conf; }
@@ -187,11 +215,13 @@ private:
     // Set through setMap() — the AEIOU Character presets or the user's
     // Custom values (see dsp/AEIOUCharacterPresets.h); the constructor
     // starts on the Natural map.
-    float mapOff[kAnchors][3] = {};
+    float mapOff[kAnchors][3]  = {};
+    float mapGain[kAnchors][3] = {};   // per-vowel resonance gains (dB)
 
     float amount = 0.0f;
     float aAtk = 0.3f, aRel = 0.12f, aGone = 0.07f;
-    float off[3] = { 0.0f, 0.0f, 0.0f };
+    float off[3]  = { 0.0f, 0.0f, 0.0f };
+    float offG[3] = { 0.0f, 0.0f, 0.0f };   // smoothed gains (dB)
     float height = 0.5f, frontness = 0.5f, conf = 0.0f;
     float motSm = 0.0f, prevL1 = 0.0f, prevL2 = 0.0f;
     bool  havePrev = false;

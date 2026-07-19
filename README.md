@@ -8,7 +8,7 @@ TD-PSOLA方式で、ピッチとフォルマントを完全に独立して操作
 
 - **Pitch / Formant** — fully independent shifting (TD-PSOLA), ±24 st
 - **Per-formant control** — F1/F2/F3 individual shift & gain (spectral envelope warping)
-- **AEIOU Character** — nine vowel-character profiles dynamically shape F1–F3 according to the estimated A/E/I/O/U region. Includes eight built-in Characters and a fully editable Custom map / 発音中の母音領域に応じてF1〜F3を動的に調整。8種類の内蔵Characterと、母音別に編集できるCustomを搭載
+- **AEIOU Character** — nine vowel-character profiles dynamically shape both F1–F3 shift AND resonance gain according to the estimated A/E/I/O/U region. Includes eight built-in Characters and a fully editable Custom map / 発音中の母音領域に応じてF1〜F3のシフトと共鳴ゲインを同時に動的調整。8種類の内蔵Characterと、母音別に編集できるCustomを搭載
 - **Intonation** — scale the pitch movement around a pivot (natural male-to-female)
 - **Consonant Shift** — unvoiced consonants shifted separately
 - **Natural Air** — keeps the voice's own breath & aperiodic detail while
