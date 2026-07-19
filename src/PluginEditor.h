@@ -1747,8 +1747,8 @@ private:
         const bool custom = ch == (int) AEIOUCharacter::custom;
         if (force || ch != lastCh)
         {
-            static const char* names[8] = { "Natural", "Soft", "Active", "Loli",
-                                            "Anime", "Elegant", "Uni", "Custom" };
+            static const char* names[9] = { "Natural", "Soft", "Active", "Loli",
+                                            "Anime", "Lily", "Elegant", "Uni", "Custom" };
             charLbl.setText (juce::String ("Character: ") + names[ch],
                              juce::dontSendNotification);
             for (int v = 0; v < 5; ++v)
@@ -1995,11 +1995,12 @@ public:
             tip ("Choose the voice character:\n"
                  "Natural - natural feminine balance / Soft - soft and rounded / "
                  "Active - bright and energetic / Loli - small and youthful / "
-                 "Anime - exaggerated vowel contrast / Elegant - calm and refined / "
-                 "Uni - neutral and androgynous / Custom - your own A-I-U-E-O map (DETAIL...).",
+                 "Anime - exaggerated vowel contrast / Lily - clear, sweet feminine / "
+                 "Elegant - calm and refined / Uni - neutral and androgynous / "
+                 "Custom - your own A-I-U-E-O map (DETAIL...).",
                  "声のキャラクターを選びます:\n"
                  "Natural=自然な女性声 / Soft=柔らかい声 / Active=元気な声 / "
-                 "Loli=幼な声 / Anime=アニメ声 / Elegant=お姉さん声 / "
+                 "Loli=幼な声 / Anime=アニメ声 / Lily=百合声 / Elegant=お姉さん声 / "
                  "Uni=中性声 / Custom=詳細モード(DETAIL...の母音別設定を使用)。"));
         addSliderRow ("vamount", "AEIOU Amount (%)",
             tip ("Strength of the selected character's per-vowel offsets. 0 % = identical "

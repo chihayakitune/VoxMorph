@@ -41,7 +41,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     layout.add (std::make_unique<juce::AudioParameterChoice> (
                 juce::ParameterID { "vcharacter", 1 }, "AEIOU Character Type",
                 juce::StringArray { "Natural", "Soft", "Active", "Loli",
-                                    "Anime", "Elegant", "Uni", "Custom" }, 0));
+                                    "Anime", "Lily", "Elegant", "Uni", "Custom" }, 0));
     // Custom map: 15 fixed ids (vowel a/i/u/e/o x F1/F2/F3, semitones),
     // defaults = the Natural preset. Kept in the state even while a
     // built-in Character is selected.

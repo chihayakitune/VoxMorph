@@ -20,12 +20,13 @@ enum class AEIOUCharacter
     active,        // 元気な声     / Bright and energetic
     loli,          // 幼な声       / Small and youthful
     anime,         // アニメ声     / Exaggerated vowel contrast
+    lily,          // 百合声       / Clear, sweet feminine (v0.26.2)
     elegant,       // お姉さん声   / Calm and refined
     uni,           // 中性声       / Neutral and androgynous
     custom         // 詳細モード   / User-defined A-I-U-E-O map
 };
 
-constexpr int kAEIOUNumCharacters = 8;   // including custom
+constexpr int kAEIOUNumCharacters = 9;   // including custom
 
 struct AEIOUCharacterMap
 {
@@ -35,52 +36,60 @@ struct AEIOUCharacterMap
 inline const AEIOUCharacterMap& getAEIOUCharacterMap (AEIOUCharacter c)
 {
     // one immutable table; custom falls back to natural (the DSP never
-    // asks for custom — the processor substitutes the 15 APVTS values)
-    static const AEIOUCharacterMap maps[7] =
+    // asks for custom — the processor substitutes the 15 APVTS values).
+    // Values revised in v0.26.2 (プリセット更新指示) for clearer contrast
+    // BETWEEN the characters.
+    static const AEIOUCharacterMap maps[8] =
     {
         // natural: 一般的な女性寄りの母音バランス(誇張なし)
-        {{ {  1.40f, 0.80f, 0.10f },     // A
-           {  0.20f, 1.20f, 0.60f },     // I
-           {  0.50f, 1.40f, 0.40f },     // U
-           {  0.90f, 1.10f, 0.40f },     // E
-           {  1.00f, 0.60f, 0.10f } }},  // O
-        // soft: 母音差とF3を抑えて丸く穏やかに
-        {{ {  0.80f, 0.35f, -0.30f },
-           { -0.10f, 0.55f, -0.20f },
-           {  0.25f, 0.55f, -0.30f },
-           {  0.45f, 0.50f, -0.20f },
-           {  0.55f, 0.20f, -0.40f } }},
+        {{ {  1.20f, 0.55f, 0.10f },     // A
+           {  0.10f, 1.10f, 0.45f },     // I
+           {  0.35f, 1.05f, 0.25f },     // U
+           {  0.70f, 0.95f, 0.30f },     // E
+           {  0.80f, 0.35f, 0.05f } }},  // O
+        // soft: 母音差とF2/F3を抑えて丸く穏やかに
+        {{ {  0.55f, -0.25f, -0.65f },
+           { -0.35f,  0.15f, -0.75f },
+           {  0.05f, -0.20f, -0.70f },
+           {  0.15f,  0.05f, -0.70f },
+           {  0.35f, -0.45f, -0.80f } }},
         // active: 口の開きと前方共鳴を強めて明るく
-        {{ {  1.70f, 1.10f, 0.45f },
-           {  0.35f, 1.75f, 0.90f },
-           {  0.75f, 1.60f, 0.65f },
-           {  1.20f, 1.55f, 0.75f },
-           {  1.30f, 0.85f, 0.40f } }},
+        {{ {  2.00f, 1.20f, 0.45f },
+           {  0.45f, 1.80f, 0.65f },
+           {  0.90f, 1.35f, 0.45f },
+           {  1.55f, 1.70f, 0.60f },
+           {  1.75f, 0.80f, 0.30f } }},
         // loli: 短い声道風の高共鳴(通常利用40〜70%想定)
-        {{ {  1.85f, 1.45f, 0.85f },
-           {  0.75f, 2.20f, 1.20f },
-           {  1.10f, 2.00f, 1.00f },
-           {  1.55f, 2.05f, 1.10f },
-           {  1.55f, 1.20f, 0.75f } }},
+        {{ {  1.10f, 1.85f, 1.10f },
+           {  0.25f, 2.75f, 1.45f },
+           {  0.50f, 2.35f, 1.30f },
+           {  0.80f, 2.65f, 1.45f },
+           {  0.85f, 1.60f, 1.00f } }},
         // anime: 母音間コントラストを誇張(Loliとの差別化)
-        {{ {  1.75f, 0.50f, 0.35f },
-           { -0.10f, 2.55f, 1.25f },
-           {  0.30f, 1.85f, 0.80f },
-           {  0.80f, 2.35f, 1.10f },
-           {  1.45f, 0.20f, 0.20f } }},
+        {{ {  1.85f, -0.20f, 0.30f },
+           { -0.55f,  3.00f, 1.50f },
+           { -0.20f,  1.65f, 0.55f },
+           {  0.35f,  2.85f, 1.35f },
+           {  1.65f, -0.55f, 0.10f } }},
+        // lily: 百合声(前方共鳴強めの澄んだ甘い響き)
+        {{ {  1.20f, 1.40f, 0.60f },
+           {  0.20f, 2.60f, 1.20f },
+           {  0.45f, 2.20f, 0.95f },
+           {  0.85f, 2.40f, 1.10f },
+           {  0.95f, 1.30f, 0.50f } }},
         // elegant: F1控えめ、F2/F3で落ち着いた明瞭感
-        {{ {  0.85f, 0.65f, 0.35f },
-           { -0.20f, 1.05f, 0.70f },
-           {  0.10f, 0.90f, 0.45f },
-           {  0.45f, 1.00f, 0.60f },
-           {  0.55f, 0.45f, 0.25f } }},
+        {{ {  0.25f, -0.20f, 0.45f },
+           { -0.65f,  0.55f, 0.75f },
+           { -0.45f,  0.20f, 0.55f },
+           { -0.20f,  0.45f, 0.70f },
+           { -0.10f, -0.45f, 0.35f } }},
         // uni: 女性化方向を限定しない均整の取れた微補正
-        {{ {  0.35f, 0.15f,  0.00f },
-           { -0.15f, 0.35f,  0.15f },
-           {  0.05f, 0.25f,  0.00f },
-           {  0.15f, 0.30f,  0.10f },
-           {  0.20f, 0.05f, -0.05f } }},
+        {{ { -0.35f, -0.35f, -0.15f },
+           { -0.65f,  0.10f,  0.05f },
+           { -0.45f, -0.20f, -0.15f },
+           { -0.50f,  0.05f,  0.00f },
+           { -0.25f, -0.55f, -0.20f } }},
     };
     const int i = (int) c;
-    return maps[(i >= 0 && i < 7) ? i : 0];
+    return maps[(i >= 0 && i < 8) ? i : 0];
 }
