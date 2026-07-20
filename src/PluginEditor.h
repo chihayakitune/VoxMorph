@@ -1338,6 +1338,18 @@ public:
         refreshList();
     }
 
+    // Re-scan the presets folder whenever the tab becomes visible again --
+    // MatchingPanel writes the same .vmpreset format into the same folder,
+    // and without this the PRESETS list would only pick up new files at
+    // panel construction / an explicit local Save. Cheap directory listing;
+    // safe on the message thread (JUCE flips visibility during tab
+    // switches).
+    void visibilityChanged() override
+    {
+        if (isVisible())
+            refreshList();
+    }
+
     void resized() override
     {
         auto r = getLocalBounds().reduced (16, 12);
