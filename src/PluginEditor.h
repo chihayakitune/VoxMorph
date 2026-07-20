@@ -667,7 +667,7 @@ public:
 
         addAndMakeVisible (recBtn);
         addAndMakeVisible (myVoiceFileBtn);
-        for (auto* b : { &playBtn, &saveProfBtn,
+        for (auto* b : { &playBtn, &saveTargetProfBtn, &saveMyVoiceProfBtn,
                          &matchBtn, &savePresetBtn, &savePresetOkBtn,
                          &savePresetCancelBtn })
             addAndMakeVisible (*b);
@@ -716,7 +716,7 @@ public:
             btn->onClick = [this]
             {
                 restoreTargetSelectionUi();
-                loadFile();
+                loadTargetFile();
             };
             addAndMakeVisible (*btn);
             targetButtons.push_back (std::move (btn));
@@ -756,10 +756,14 @@ public:
         playBtn.setTooltip (juce::String::fromUTF8 (
             "Preview the loaded target audio through the plugin output.\n"
             "読み込んだファイルを出力から再生します。"));
-        saveProfBtn.setButtonText ("Save Profile...");
-        saveProfBtn.setTooltip (juce::String::fromUTF8 (
+        saveTargetProfBtn.setButtonText ("Save Profile...");
+        saveTargetProfBtn.setTooltip (juce::String::fromUTF8 (
             "Save the currently selected target as a .vmprofile (audio-less).\n"
             "現在のターゲットを.vmprofile(音声なし)として保存します。"));
+        saveMyVoiceProfBtn.setButtonText ("Save Profile...");
+        saveMyVoiceProfBtn.setTooltip (juce::String::fromUTF8 (
+            "Save your last analysed MyVoice as a .vmprofile.\n"
+            "直前に測定/読込したMyVoiceを.vmprofileとして保存します。"));
         matchBtn.setButtonText ("MATCH");
         matchBtn.setTooltip (juce::String::fromUTF8 (
             "Auto-Set: derive parameters from the Current -> Target difference. "
@@ -788,7 +792,8 @@ public:
             if (proc.prevPos.load() >= 0) proc.prevPos = -1;
             else if (proc.prevLen.load() > 0) proc.prevPos = 0;
         };
-        saveProfBtn.onClick   = [this] { saveTargetProfile(); };
+        saveTargetProfBtn.onClick   = [this] { saveTargetProfile(); };
+        saveMyVoiceProfBtn.onClick  = [this] { saveMyVoiceProfile(); };
         matchBtn.onClick      = [this] { doMatch(); };
         savePresetBtn.onClick = [this] { showSavePreset (true); };
         savePresetOkBtn.onClick     = [this] { savePreset(); };
@@ -839,7 +844,7 @@ public:
         r.removeFromTop (4);
         auto arow = r.removeFromTop (28);
         playBtn.setBounds     (arow.removeFromLeft (72).withHeight (26));
-        saveProfBtn.setBounds (arow.removeFromLeft (140).withHeight (26).translated (8, 0));
+        saveTargetProfBtn.setBounds (arow.removeFromLeft (140).withHeight (26).translated (8, 0));
         p2Lbl.setBounds (r.removeFromTop (32).withTrimmedLeft (2));
 
         r.removeFromTop (6);
@@ -854,9 +859,9 @@ public:
         }
         r.removeFromTop (4);
         auto vopts = r.removeFromTop (28);
-        durBox.setBounds     (vopts.removeFromLeft (72).withHeight (26));
-        recPlayChk.setBounds (vopts.removeFromLeft (150).withHeight (26).translated (8, 0));
-        // Save Profile for MyVoice lands here in Commit 3 (feat: load/save)
+        durBox.setBounds             (vopts.removeFromLeft (72) .withHeight (26));
+        recPlayChk.setBounds         (vopts.removeFromLeft (150).withHeight (26).translated (8, 0));
+        saveMyVoiceProfBtn.setBounds (vopts.removeFromLeft (140).withHeight (26).translated (12, 0));
         p1Lbl.setBounds (r.removeFromTop (32).withTrimmedLeft (2));
 
         r.removeFromTop (6);
@@ -930,13 +935,12 @@ private:
             waitingCapture = false;
             stopPlayIfStartedByCapture();
             recBtn.setButtonText ("Record");
-            prof1 = analyzeCapture();
-            proc.lastMyVoice = prof1;
-            p1Lbl.setText (juce::String::fromUTF8 ("MyVoice: ") + fmt (prof1),
-                           juce::dontSendNotification);
-            refreshEstimated();
-            graph.repaint();
-            updateMatchStatus();
+            const auto captured = analyzeCapture();
+            if (captured.valid())
+                applyMyVoiceProfile (captured, juce::String::fromUTF8 ("Recorded"));
+            else
+                status (juce::String::fromUTF8 (
+                    "録音の解析に失敗しました(有声区間が不足)。もう一度お試しください。"));
         }
         playBtn.setButtonText (proc.prevPos.load() >= 0 ? "Stop" : "Play");
         playBtn.setEnabled (proc.prevLen.load() > 0);
@@ -1022,22 +1026,88 @@ private:
         clearTargetButtonSelection();
     }
 
-    void loadFile()
+    // ── shared audio-file helper (used by Target and MyVoice loads) ──
+    struct DecodedMono
     {
-        chooser = std::make_unique<juce::FileChooser> ("Select the target voice file or profile",
-                      juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg;*.vmprofile");
-        chooser->launchAsync (juce::FileBrowserComponent::openMode
-                            | juce::FileBrowserComponent::canSelectFiles,
+        std::vector<float> samples;
+        double             sampleRate = 0.0;
+        juce::String       error;      // empty on success
+    };
+
+    static DecodedMono decodeMonoForAnalysis (const juce::File& file,
+                                              double outputSampleRate,
+                                              double maxSeconds)
+    {
+        DecodedMono r;
+        r.sampleRate = outputSampleRate;
+        juce::AudioFormatManager fm;
+        fm.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> rd (fm.createReaderFor (file));
+        if (rd == nullptr || rd->sampleRate <= 0
+            || rd->numChannels == 0 || rd->lengthInSamples < 3)
+        {
+            r.error = "Could not read: " + file.getFileName();
+            return r;
+        }
+        const int nIn = (int) std::min<juce::int64> (
+            rd->lengthInSamples, (juce::int64) (rd->sampleRate * maxSeconds));
+        juce::AudioBuffer<float> tb ((int) rd->numChannels, nIn);
+        if (! rd->read (&tb, 0, nIn, 0, true, true))
+        {
+            r.error = "Could not decode: " + file.getFileName();
+            return r;
+        }
+        const double ratio = rd->sampleRate / outputSampleRate;
+        const int nOut = std::max (0, (int) std::floor ((nIn - 2) / ratio));
+        if (nOut <= 0)
+        {
+            r.error = juce::String::fromUTF8 ("音声が短すぎます: ") + file.getFileName();
+            return r;
+        }
+        r.samples.assign ((size_t) nOut, 0.0f);
+        const int nch = tb.getNumChannels();
+        for (int i = 0; i < nOut; ++i)
+        {
+            const double pos = i * ratio;
+            const int    i0  = (int) pos;
+            const float  t   = (float) (pos - i0);
+            float sum = 0.0f;
+            for (int c = 0; c < nch; ++c)
+                sum += tb.getSample (c, i0) * (1.0f - t)
+                     + tb.getSample (c, std::min (i0 + 1, nIn - 1)) * t;
+            r.samples[(size_t) i] = sum / (float) nch;
+        }
+        return r;
+    }
+
+    void applyMyVoiceProfile (const VoiceProfile& profile, const juce::String& sourceName)
+    {
+        if (! profile.valid()) return;
+        prof1 = profile;
+        proc.lastMyVoice = profile;
+        p1Lbl.setText (juce::String::fromUTF8 ("MyVoice: ") + sourceName
+                       + "\n" + fmt (profile), juce::dontSendNotification);
+        nSet = nLocked = 0;
+        refreshEstimated();
+        graph.repaint();
+        updateMatchStatus();
+    }
+
+    void loadTargetFile()
+    {
+        targetChooser = std::make_unique<juce::FileChooser> (
+            "Select the target voice file or profile", juce::File(),
+            "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg;*.vmprofile");
+        targetChooser->launchAsync (juce::FileBrowserComponent::openMode
+                                  | juce::FileBrowserComponent::canSelectFiles,
             [this] (const juce::FileChooser& fc)
         {
             const auto file = fc.getResult();
             if (file == juce::File())
             {
-                // Chooser cancelled -- keep whatever was selected before
                 restoreTargetSelectionUi();
                 return;
             }
-            proc.prevPos = -1;
 
             if (file.hasFileExtension ("vmprofile"))
             {
@@ -1047,7 +1117,8 @@ private:
                 {
                     prof2 = p;
                     proc.lastTarget = p;
-                    proc.prevLen = 0;
+                    proc.prevPos = -1;
+                    proc.prevLen = 0;      // profile-only target has no audio
                     currentTargetName = file.getFileNameWithoutExtension() + " (.vmprofile)";
                     p2Lbl.setText (juce::String::fromUTF8 ("Target: ") + currentTargetName
                                    + "\n" + fmt (prof2), juce::dontSendNotification);
@@ -1059,43 +1130,31 @@ private:
                             + file.getFileName());
                 return;
             }
-            juce::AudioFormatManager fm;
-            fm.registerBasicFormats();
-            std::unique_ptr<juce::AudioFormatReader> rd (fm.createReaderFor (file));
-            if (rd == nullptr || rd->sampleRate <= 0)
+
+            const double sr = proc.getSampleRate() > 0 ? proc.getSampleRate() : 48000.0;
+            auto decoded = decodeMonoForAnalysis (file, sr, 60.0);
+            if (! decoded.error.isEmpty())
             {
-                status ("Could not read: " + file.getFileName());
+                status (decoded.error);
                 return;
             }
-            const int nIn = (int) std::min<juce::int64> (rd->lengthInSamples,
-                                                         (juce::int64) (rd->sampleRate * 60.0));
-            juce::AudioBuffer<float> tb ((int) rd->numChannels, nIn);
-            rd->read (&tb, 0, nIn, 0, true, true);
-
-            const double sr    = proc.getSampleRate() > 0 ? proc.getSampleRate() : 48000.0;
-            const double ratio = rd->sampleRate / sr;
-            const int nOut = std::min ((int) proc.prevBuf.size(),
-                                       (int) ((nIn - 2) / ratio));
-            const int nch = tb.getNumChannels();
-            for (int i = 0; i < nOut; ++i)
-            {
-                const double pos = i * ratio;
-                const int   i0 = (int) pos;
-                const float t  = (float) (pos - i0);
-                float sum = 0.0f;
-                for (int c = 0; c < nch; ++c)
-                    sum += tb.getSample (c, i0) * (1.0f - t)
-                         + tb.getSample (c, std::min (i0 + 1, nIn - 1)) * t;
-                proc.prevBuf[(size_t) i] = sum / (float) nch;
-            }
-            proc.prevLen = nOut;
-            auto analysed = VoiceAnalyzer::analyze (proc.prevBuf.data(), nOut, sr);
+            auto analysed = VoiceAnalyzer::analyze (decoded.samples.data(),
+                                                    (int) decoded.samples.size(), sr);
             if (! analysed.valid())
             {
+                // do NOT overwrite proc.prevBuf on analysis failure
                 status (juce::String::fromUTF8 (
-                    "解析に失敗しました(有声区間が不足): ") + file.getFileName());
+                    "Target解析に失敗しました(有声区間が不足): ") + file.getFileName());
                 return;
             }
+
+            // commit to Processor buffers only after a successful analysis
+            const int copyN = std::min ((int) decoded.samples.size(),
+                                        (int) proc.prevBuf.size());
+            std::copy_n (decoded.samples.data(), copyN, proc.prevBuf.data());
+            proc.prevLen = copyN;
+            proc.prevPos = -1;
+
             prof2 = analysed;
             proc.lastTarget = prof2;
             currentTargetName = file.getFileName();
@@ -1106,37 +1165,98 @@ private:
         });
     }
 
-    // stub -- filled in in Commit 3 (feat: load and save MyVoice profiles)
+    // MyVoice audio / .vmprofile load: touches ONLY prof1 / lastMyVoice.
+    // proc.prevBuf, prof2, Target selection and Target preview are kept
+    // intact (spec 5.6).
     void loadMyVoiceFile()
     {
-        status (juce::String::fromUTF8 (
-            "MyVoiceFile: 次のコミットで実装します。"));
+        myVoiceChooser = std::make_unique<juce::FileChooser> (
+            "Select the MyVoice audio file or profile", juce::File(),
+            "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg;*.vmprofile");
+        myVoiceChooser->launchAsync (juce::FileBrowserComponent::openMode
+                                   | juce::FileBrowserComponent::canSelectFiles,
+            [this] (const juce::FileChooser& fc)
+        {
+            const auto file = fc.getResult();
+            if (file == juce::File()) return;
+
+            if (file.hasFileExtension ("vmprofile"))
+            {
+                VoiceProfile p;
+                if (auto xml = juce::XmlDocument::parse (file); xml != nullptr
+                    && profileFromXml (*xml, p) && p.valid())
+                    applyMyVoiceProfile (p, file.getFileNameWithoutExtension()
+                                              + " (.vmprofile)");
+                else
+                    status (juce::String::fromUTF8 (
+                        "MyVoiceプロファイルを読み込めませんでした: ") + file.getFileName());
+                return;
+            }
+
+            const double sr = proc.getSampleRate() > 0 ? proc.getSampleRate() : 48000.0;
+            auto decoded = decodeMonoForAnalysis (file, sr, 60.0);
+            if (! decoded.error.isEmpty())
+            {
+                status (decoded.error);
+                return;
+            }
+            auto analysed = VoiceAnalyzer::analyze (decoded.samples.data(),
+                                                    (int) decoded.samples.size(), sr);
+            if (! analysed.valid())
+            {
+                status (juce::String::fromUTF8 (
+                    "MyVoiceの解析に失敗しました(有声区間が不足): ") + file.getFileName());
+                return;
+            }
+            applyMyVoiceProfile (analysed, file.getFileName());
+        });
     }
 
-    void saveTargetProfile()
+    // ── save profile (shared by Target / MyVoice) ────────────────────
+    void saveProfileImpl (const VoiceProfile& profile,
+                          const juce::String& defaultName,
+                          const juce::String& successPrefix)
     {
-        if (! prof2.valid())
+        if (! profile.valid())
         {
-            status (juce::String::fromUTF8 ("有効なターゲットプロファイルがありません。"));
+            status (juce::String::fromUTF8 ("有効なプロファイルがありません。"));
             return;
         }
-        profChooser = std::make_unique<juce::FileChooser> (
-            "Save target profile", juce::File(), "*.vmprofile");
-        profChooser->launchAsync (juce::FileBrowserComponent::saveMode
-                                | juce::FileBrowserComponent::canSelectFiles
-                                | juce::FileBrowserComponent::warnAboutOverwriting,
-            [this] (const juce::FileChooser& fc)
+        // snapshot the profile at click time -- prof1/prof2 could change
+        // while the async chooser is up
+        const VoiceProfile snapshot = profile;
+        profileSaveChooser = std::make_unique<juce::FileChooser> (
+            "Save profile",
+            juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+                .getChildFile (defaultName + ".vmprofile"),
+            "*.vmprofile");
+        profileSaveChooser->launchAsync (juce::FileBrowserComponent::saveMode
+                                       | juce::FileBrowserComponent::canSelectFiles
+                                       | juce::FileBrowserComponent::warnAboutOverwriting,
+            [this, snapshot, successPrefix] (const juce::FileChooser& fc)
         {
             auto file = fc.getResult();
             if (file == juce::File()) return;
             if (! file.hasFileExtension ("vmprofile"))
                 file = file.withFileExtension (".vmprofile");
-            if (profileToXml (prof2)->writeTo (file))
-                status (juce::String::fromUTF8 ("ターゲットプロファイルを保存しました: ")
+            if (profileToXml (snapshot)->writeTo (file))
+                status (successPrefix + juce::String::fromUTF8 ("を保存しました: ")
                         + file.getFileName());
             else
                 status (juce::String::fromUTF8 ("保存に失敗しました。"));
         });
+    }
+
+    void saveTargetProfile()
+    {
+        saveProfileImpl (prof2, "Target Profile",
+                         juce::String::fromUTF8 ("ターゲットプロファイル"));
+    }
+
+    void saveMyVoiceProfile()
+    {
+        saveProfileImpl (prof1, "MyVoice Profile",
+                         juce::String::fromUTF8 ("MyVoiceプロファイル"));
     }
 
     // ── Match (calls MatchingEngine, applies through history.group) ──
@@ -1276,6 +1396,8 @@ private:
     {
         const bool canMatch = prof1.valid() && prof2.valid();
         matchBtn.setEnabled (canMatch);
+        saveTargetProfBtn.setEnabled  (prof2.valid());
+        saveMyVoiceProfBtn.setEnabled (prof1.valid());
         auto s = juce::String::fromUTF8 (canMatch ? "READY TO MATCH" : "RECORD MYVOICE");
         if (nSet + nLocked > 0)
             s = juce::String (nSet) + juce::String::fromUTF8 (" APPLIED")
@@ -1308,12 +1430,19 @@ private:
 
     VoiceTileButton recBtn         { "record_my_voice", "Record",       TileIconKind::record, /*clickingToggles*/ false };
     VoiceTileButton myVoiceFileBtn { "my_voice_file",   "MyVoiceFile",  TileIconKind::file,   /*clickingToggles*/ false };
-    juce::TextButton playBtn { "Play" }, saveProfBtn { "Save Profile..." },
+    juce::TextButton playBtn { "Play" },
+                     saveTargetProfBtn  { "Save Profile..." },
+                     saveMyVoiceProfBtn { "Save Profile..." },
                      matchBtn { "MATCH" }, savePresetBtn { "SAVE PRESET" },
                      savePresetOkBtn { "Save" }, savePresetCancelBtn { "Cancel" };
     juce::TextEditor saveNameEdit;
 
-    std::unique_ptr<juce::FileChooser> chooser, profChooser;
+    // one chooser per role -- they never overlap in the same session but
+    // keeping them separate makes it obvious which async callback belongs
+    // to which action (target load / MyVoice load / profile save)
+    std::unique_ptr<juce::FileChooser> targetChooser;
+    std::unique_ptr<juce::FileChooser> myVoiceChooser;
+    std::unique_ptr<juce::FileChooser> profileSaveChooser;
 };
 
 // PRESETS tab: file-based parameter snapshots, shared between the
