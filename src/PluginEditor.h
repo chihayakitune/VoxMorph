@@ -521,28 +521,36 @@ private:
     }
 };
 
-// Square button used in the Matching tab's TargetCharacter row: one per
-// built-in profile plus one "TargetFile" tile. Selection is exclusive
-// through a shared radio group. Top ~60% of the tile is reserved for a
-// future icon (drawn as a placeholder rounded rectangle for now); the
-// bottom carries a short label. Selected/unselected states differ in
-// fill AND outline so the state is visible without depending on colour.
-class TargetCharacterButton : public juce::TextButton
+// Square tile shared by the Matching tab's TargetCharacter row and the
+// MyVoice section (Record, MyVoiceFile). Top ~60 % of the tile is
+// reserved for a future icon (a placeholder shape stands in for now);
+// the bottom carries a short label. Selected / unselected states differ
+// in both fill AND outline so the state is visible without colour.
+//
+// TargetCharacter tiles set clickingToggles = true and share a radio
+// group; MyVoice tiles are momentary and never light up "selected"
+// (they trigger an action instead).
+enum class TileIconKind { character, file, record };
+
+class VoiceTileButton : public juce::TextButton
 {
 public:
-    TargetCharacterButton (juce::String stableIdIn,
-                           juce::String labelIn,
-                           bool         isFileTarget = false)
-        : targetId (std::move (stableIdIn)),
-          fileTarget (isFileTarget),
-          labelText (std::move (labelIn))
+    VoiceTileButton (juce::String stableIdIn,
+                     juce::String labelIn,
+                     TileIconKind iconKindIn,
+                     bool         clickingToggles = true)
+        : juce::TextButton (labelIn),           // so setButtonText() updates the tile label
+          targetId (std::move (stableIdIn)),
+          fileTarget (iconKindIn == TileIconKind::file),
+          iconKind (iconKindIn)
     {
-        setClickingTogglesState (true);
+        setClickingTogglesState (clickingToggles);
         setTriggeredOnMouseDown (false);
     }
 
     const juce::String targetId;
     const bool         fileTarget;
+    const TileIconKind iconKind;
 
     void paintButton (juce::Graphics& g, bool hover, bool /*down*/) override
     {
@@ -568,29 +576,38 @@ public:
         auto iconR = b.reduced (10.0f).withHeight (iconH);
         g.setColour (selected ? juce::Colour (0xfffcfaf9)
                               : juce::Colour (0xffbfd9d2));
-        if (fileTarget)
+        switch (iconKind)
         {
-            // folder-ish rounded square hint
-            g.drawRoundedRectangle (iconR.reduced (iconR.getWidth() * 0.18f,
-                                                    iconR.getHeight() * 0.12f),
-                                    4.0f, 1.6f);
-            g.drawLine (iconR.getX() + iconR.getWidth() * 0.30f,
-                        iconR.getY() + iconR.getHeight() * 0.18f,
-                        iconR.getX() + iconR.getWidth() * 0.55f,
-                        iconR.getY() + iconR.getHeight() * 0.18f, 1.6f);
-        }
-        else
-        {
-            // voice-print hint: three stacked arcs
-            for (int i = 0; i < 3; ++i)
+            case TileIconKind::file:
+                g.drawRoundedRectangle (iconR.reduced (iconR.getWidth() * 0.18f,
+                                                        iconR.getHeight() * 0.12f),
+                                        4.0f, 1.6f);
+                g.drawLine (iconR.getX() + iconR.getWidth() * 0.30f,
+                            iconR.getY() + iconR.getHeight() * 0.18f,
+                            iconR.getX() + iconR.getWidth() * 0.55f,
+                            iconR.getY() + iconR.getHeight() * 0.18f, 1.6f);
+                break;
+            case TileIconKind::record:
             {
-                juce::Path arc;
-                const float rad = 5.0f + (float) i * 5.0f;
-                arc.addCentredArc (iconR.getCentreX(), iconR.getCentreY(),
-                                   rad, rad, 0.0f,
-                                   -0.9f, 0.9f, true);
-                g.strokePath (arc, juce::PathStrokeType (1.4f));
+                // record dot: solid circle in the accent colour
+                const float rad = std::min (iconR.getWidth(), iconR.getHeight()) * 0.28f;
+                g.setColour (juce::Colour (0xffd65a7a));   // Error/record red
+                g.fillEllipse (iconR.getCentreX() - rad, iconR.getCentreY() - rad,
+                               rad * 2.0f, rad * 2.0f);
+                break;
             }
+            case TileIconKind::character:
+            default:
+                for (int i = 0; i < 3; ++i)
+                {
+                    juce::Path arc;
+                    const float rad = 5.0f + (float) i * 5.0f;
+                    arc.addCentredArc (iconR.getCentreX(), iconR.getCentreY(),
+                                       rad, rad, 0.0f,
+                                       -0.9f, 0.9f, true);
+                    g.strokePath (arc, juce::PathStrokeType (1.4f));
+                }
+                break;
         }
 
         // label: bottom area
@@ -599,13 +616,16 @@ public:
         g.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
         auto textR = b.withY (b.getY() + iconH + 4.0f)
                       .withHeight (b.getHeight() - iconH - 6.0f);
-        g.drawFittedText (labelText, textR.toNearestInt(),
+        // read via getButtonText() so recBtn.setButtonText("Recording...")
+        // during a capture updates the tile visibly
+        g.drawFittedText (getButtonText(), textR.toNearestInt(),
                           juce::Justification::centred, 2);
     }
-
-private:
-    juce::String labelText;
 };
+
+// Old name kept as an alias so the TargetCharacterButton member/vector
+// types in MatchingPanel don't have to change in this commit.
+using TargetCharacterButton = VoiceTileButton;
 
 // MATCHING tab (v0.28.x). Sections top to bottom:
 //   1) TargetCharacter -- pick a built-in target voice profile, or load a
@@ -645,10 +665,20 @@ public:
         initHeading (hMyVoice,         "MyVoice");
         initHeading (hAutoMatching,    "AutoMatching");
 
-        for (auto* b : { &recBtn, &playBtn, &saveProfBtn,
+        addAndMakeVisible (recBtn);
+        addAndMakeVisible (myVoiceFileBtn);
+        for (auto* b : { &playBtn, &saveProfBtn,
                          &matchBtn, &savePresetBtn, &savePresetOkBtn,
                          &savePresetCancelBtn })
             addAndMakeVisible (*b);
+        recBtn.setTooltip (juce::String::fromUTF8 (
+            "Records your microphone input for the CURRENT profile.\n"
+            "マイク入力を録音してMyVoiceプロファイルにします。"));
+        myVoiceFileBtn.setTooltip (juce::String::fromUTF8 (
+            "Load an audio file or .vmprofile as MyVoice (does not touch "
+            "the Target selection).\n音声ファイルまたは.vmprofileを"
+            "MyVoiceとして読み込みます(Target選択は変更されません)。"));
+        myVoiceFileBtn.onClick = [this] { loadMyVoiceFile(); };
         recPlayChk.setTooltip (juce::String::fromUTF8 (
             "When checked, the target file plays while you record.\n"
             "チェックすると録音と同時にターゲットを再生します。"));
@@ -661,8 +691,9 @@ public:
         const auto* samples = getSampleTargets (nSamples);
         for (int i = 0; i < nSamples; ++i)
         {
-            auto btn = std::make_unique<TargetCharacterButton> (
-                juce::String (samples[i].id), juce::String (samples[i].displayEn), false);
+            auto btn = std::make_unique<VoiceTileButton> (
+                juce::String (samples[i].id), juce::String (samples[i].displayEn),
+                TileIconKind::character, /*clickingToggles*/ true);
             btn->setRadioGroupId (kTargetRadioGroup, juce::dontSendNotification);
             btn->setTooltip (juce::String::fromUTF8 (samples[i].displayJp));
             btn->onClick = [this, i] { selectSampleTarget (i); };
@@ -670,8 +701,9 @@ public:
             targetButtons.push_back (std::move (btn));
         }
         {
-            auto btn = std::make_unique<TargetCharacterButton> (
-                juce::String ("target_file"), juce::String ("TargetFile"), true);
+            auto btn = std::make_unique<VoiceTileButton> (
+                juce::String ("target_file"), juce::String ("TargetFile"),
+                TileIconKind::file, /*clickingToggles*/ true);
             targetFileButton = btn.get();
             btn->setRadioGroupId (kTargetRadioGroup, juce::dontSendNotification);
             btn->setTooltip (juce::String::fromUTF8 (
@@ -720,10 +752,6 @@ public:
         };
         addAndMakeVisible (graph);
 
-        recBtn.setButtonText ("Record");
-        recBtn.setTooltip (juce::String::fromUTF8 (
-            "Records your microphone input for the CURRENT profile.\n"
-            "マイク入力を録音してCurrentプロファイルにします。"));
         playBtn.setButtonText ("Play");
         playBtn.setTooltip (juce::String::fromUTF8 (
             "Preview the loaded target audio through the plugin output.\n"
@@ -786,25 +814,26 @@ public:
     {
         auto r = getLocalBounds().reduced (16, 10);
 
+        // shared tile size for both TargetCharacter and MyVoice rows so
+        // Record / MyVoiceFile match the Target tiles pixel-for-pixel.
+        const int tileGap  = 8;
+        const int cols     = getWidth() >= 650 ? (int) targetButtons.size() : 3;
+        const int tileSize = std::clamp ((r.getWidth() - tileGap * (cols - 1)) / cols,
+                                         72, 96);
+
         // ── TargetCharacter (top) ──
         hTargetCharacter.setBounds (r.removeFromTop (20));
         {
-            // 6 tiles: 6x1 above ~650 px wide, 3x2 otherwise. Tiles are
-            // strictly square; grid width is derived from tile size.
-            const int nb    = (int) targetButtons.size();
-            const int cols  = (getWidth() >= 650 ? nb : 3);
-            const int rows  = (nb + cols - 1) / cols;
-            const int gap   = 8;
-            const int avail = r.getWidth();
-            const int size  = std::clamp ((avail - gap * (cols - 1)) / cols, 72, 96);
-            auto grid = r.removeFromTop (rows * size + (rows - 1) * gap);
+            const int nb   = (int) targetButtons.size();
+            const int rows = (nb + cols - 1) / cols;
+            auto grid = r.removeFromTop (rows * tileSize + (rows - 1) * tileGap);
             for (int i = 0; i < nb; ++i)
             {
                 const int col = i % cols;
                 const int row = i / cols;
-                targetButtons[(size_t) i]->setBounds (grid.getX() + col * (size + gap),
-                                                      grid.getY() + row * (size + gap),
-                                                      size, size);
+                targetButtons[(size_t) i]->setBounds (grid.getX() + col * (tileSize + tileGap),
+                                                      grid.getY() + row * (tileSize + tileGap),
+                                                      tileSize, tileSize);
             }
         }
         r.removeFromTop (4);
@@ -815,12 +844,19 @@ public:
 
         r.removeFromTop (6);
 
-        // ── MyVoice (middle) ──
+        // ── MyVoice (middle): Record + MyVoiceFile as square tiles ──
         hMyVoice.setBounds (r.removeFromTop (20));
-        auto vrow = r.removeFromTop (30);
-        recBtn.setBounds (vrow.removeFromLeft (150).withHeight (26));
-        durBox.setBounds (vrow.removeFromLeft (72).withHeight (26).translated (8, 0));
-        recPlayChk.setBounds (vrow.removeFromLeft (150).withHeight (26).translated (12, 0));
+        {
+            auto tiles = r.removeFromTop (tileSize);
+            recBtn.setBounds (tiles.removeFromLeft (tileSize));
+            tiles.removeFromLeft (tileGap);
+            myVoiceFileBtn.setBounds (tiles.removeFromLeft (tileSize));
+        }
+        r.removeFromTop (4);
+        auto vopts = r.removeFromTop (28);
+        durBox.setBounds     (vopts.removeFromLeft (72).withHeight (26));
+        recPlayChk.setBounds (vopts.removeFromLeft (150).withHeight (26).translated (8, 0));
+        // Save Profile for MyVoice lands here in Commit 3 (feat: load/save)
         p1Lbl.setBounds (r.removeFromTop (32).withTrimmedLeft (2));
 
         r.removeFromTop (6);
@@ -861,7 +897,7 @@ private:
         proc.capturing = true;
         waitFlag = true;
         savedButtonText = b.getButtonText();
-        b.setButtonText ("Recording... speak!");
+        b.setButtonText ("REC...");   // short enough for the square tile
     }
 
     bool startPlayForCapture()
@@ -1070,6 +1106,13 @@ private:
         });
     }
 
+    // stub -- filled in in Commit 3 (feat: load and save MyVoice profiles)
+    void loadMyVoiceFile()
+    {
+        status (juce::String::fromUTF8 (
+            "MyVoiceFile: 次のコミットで実装します。"));
+    }
+
     void saveTargetProfile()
     {
         if (! prof2.valid())
@@ -1263,8 +1306,9 @@ private:
     juce::ComboBox durBox;
     juce::ToggleButton recPlayChk { "With target play" };
 
-    juce::TextButton recBtn { "Record" },
-                     playBtn { "Play" }, saveProfBtn { "Save Profile..." },
+    VoiceTileButton recBtn         { "record_my_voice", "Record",       TileIconKind::record, /*clickingToggles*/ false };
+    VoiceTileButton myVoiceFileBtn { "my_voice_file",   "MyVoiceFile",  TileIconKind::file,   /*clickingToggles*/ false };
+    juce::TextButton playBtn { "Play" }, saveProfBtn { "Save Profile..." },
                      matchBtn { "MATCH" }, savePresetBtn { "SAVE PRESET" },
                      savePresetOkBtn { "Save" }, savePresetCancelBtn { "Cancel" };
     juce::TextEditor saveNameEdit;
