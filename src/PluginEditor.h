@@ -665,7 +665,7 @@ public:
                 juce::String (samples[i].id), juce::String (samples[i].displayEn), false);
             btn->setRadioGroupId (kTargetRadioGroup, juce::dontSendNotification);
             btn->setTooltip (juce::String::fromUTF8 (samples[i].displayJp));
-            btn->onClick = [this, i] { selectSampleTarget (i, true); };
+            btn->onClick = [this, i] { selectSampleTarget (i); };
             addAndMakeVisible (*btn);
             targetButtons.push_back (std::move (btn));
         }
@@ -683,7 +683,7 @@ public:
             // where it was, then re-select TargetFile on load success.
             btn->onClick = [this]
             {
-                restoreLastNonFileSelectionUi();
+                restoreTargetSelectionUi();
                 loadFile();
             };
             addAndMakeVisible (*btn);
@@ -766,7 +766,17 @@ public:
         savePresetOkBtn.onClick     = [this] { savePreset(); };
         savePresetCancelBtn.onClick = [this] { showSavePreset (false); };
 
-        selectSampleTarget (0, /*fromUser*/ false);  // initial: Feminine Standard
+        // Start with NO target selected -- the user picks a Character
+        // tile or loads a TargetFile first, then MATCH becomes available.
+        clearTargetButtonSelection();
+        selectedSampleIndex = -1;
+        targetFileActive    = false;
+        prof2                = VoiceProfile{};
+        proc.lastTarget      = VoiceProfile{};
+        currentTargetName    .clear();
+        p2Lbl.setText ("Target: --", juce::dontSendNotification);
+        proc.prevPos = -1;
+        proc.prevLen = 0;
         showSavePreset (false); // hide the name editor
         updateMatchStatus();
         startTimerHz (10);
@@ -904,19 +914,39 @@ private:
         updateMatchStatus();
     }
 
-    void selectSampleTarget (int index, bool /*fromUser*/)
+    // ── target selection: single source of truth for tile toggle state ──
+    // Radio-group behaviour alone can't cover every path (initial pre-
+    // populate, FileChooser cancel, re-click on the already selected
+    // tile). All of them go through these two helpers so the visible
+    // state and (selectedSampleIndex / targetFileActive) stay in sync.
+    void clearTargetButtonSelection()
+    {
+        for (auto& b : targetButtons)
+        {
+            b->setToggleState (false, juce::dontSendNotification);
+            b->repaint();
+        }
+    }
+
+    void selectOnlyTargetButton (TargetCharacterButton* selected)
+    {
+        for (auto& b : targetButtons)
+        {
+            const bool on = b.get() == selected;
+            b->setToggleState (on, juce::dontSendNotification);
+            b->repaint();
+        }
+    }
+
+    void selectSampleTarget (int index)
     {
         int n = 0;
         const auto* samples = getSampleTargets (n);
         if (! juce::isPositiveAndBelow (index, n)) return;
+
         selectedSampleIndex = index;
         targetFileActive    = false;
-
-        // radio group already flips buttons when they're clicked, but this
-        // path is also hit by the initial pre-populate call and by the
-        // cancel-restore below -- make selection explicit either way
-        if ((size_t) index < targetButtons.size())
-            targetButtons[(size_t) index]->setToggleState (true, juce::dontSendNotification);
+        selectOnlyTargetButton (targetButtons[(size_t) index].get());
 
         const auto& s = samples[index];
         prof2 = s.profile;
@@ -931,25 +961,29 @@ private:
 
     void selectTargetFileButton()
     {
-        targetFileActive = true;
-        if (targetFileButton != nullptr)
-            targetFileButton->setToggleState (true, juce::dontSendNotification);
+        targetFileActive    = true;
+        selectedSampleIndex = -1;
+        selectOnlyTargetButton (targetFileButton);
     }
 
-    // Called at the start of a TargetFile click so the UI reflects the
-    // previous choice while the FileChooser is up; on load success the
-    // callback re-selects TargetFile via selectTargetFileButton().
-    void restoreLastNonFileSelectionUi()
+    // Called at the start of a TargetFile click (so the UI reflects the
+    // previous choice while the FileChooser is up) and on any load
+    // failure / cancel path. On load success the callback re-selects
+    // TargetFile via selectTargetFileButton().
+    void restoreTargetSelectionUi()
     {
-        if (targetFileActive)
+        if (targetFileActive && targetFileButton != nullptr)
         {
-            // an earlier TargetFile is still in place -- keep the tile lit
-            if (targetFileButton != nullptr)
-                targetFileButton->setToggleState (true, juce::dontSendNotification);
+            selectOnlyTargetButton (targetFileButton);
+            return;
         }
-        else if ((size_t) selectedSampleIndex < targetButtons.size())
-            targetButtons[(size_t) selectedSampleIndex]
-                ->setToggleState (true, juce::dontSendNotification);
+        if (selectedSampleIndex >= 0
+            && (size_t) selectedSampleIndex < targetButtons.size())
+        {
+            selectOnlyTargetButton (targetButtons[(size_t) selectedSampleIndex].get());
+            return;
+        }
+        clearTargetButtonSelection();
     }
 
     void loadFile()
@@ -961,7 +995,12 @@ private:
             [this] (const juce::FileChooser& fc)
         {
             const auto file = fc.getResult();
-            if (file == juce::File()) return;
+            if (file == juce::File())
+            {
+                // Chooser cancelled -- keep whatever was selected before
+                restoreTargetSelectionUi();
+                return;
+            }
             proc.prevPos = -1;
 
             if (file.hasFileExtension ("vmprofile"))
@@ -1218,7 +1257,7 @@ private:
     static constexpr int kTargetRadioGroup = 0x564d01;
     std::vector<std::unique_ptr<TargetCharacterButton>> targetButtons;
     TargetCharacterButton* targetFileButton = nullptr;
-    int  selectedSampleIndex = 0;
+    int  selectedSampleIndex = -1;   // -1 = no built-in target selected
     bool targetFileActive    = false;
 
     juce::ComboBox durBox;
