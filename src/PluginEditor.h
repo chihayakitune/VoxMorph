@@ -445,9 +445,9 @@ private:
         g.setColour (col);
         if (dashed)
         {
+            static constexpr float dashes[2] = { 5.0f, 4.0f };
             juce::Path dp;
-            juce::PathStrokeType (1.5f).createDashedStroke (dp, path,
-                                                             (const float[]) { 5.0f, 4.0f }, 2);
+            juce::PathStrokeType (1.5f).createDashedStroke (dp, path, dashes, 2);
             g.strokePath (dp, juce::PathStrokeType (1.5f));
         }
         else
@@ -1126,7 +1126,6 @@ private:
     void updateMatchStatus()
     {
         const bool canMatch  = prof1.valid() && prof2.valid();
-        const bool canRefine = canMatch && profC.valid();
         matchBtn .setEnabled (canMatch);
         refineBtn.setEnabled (canMatch);   // permits recording converted after MATCH
         auto s = juce::String::fromUTF8 (canMatch ? "READY TO MATCH" : "RECORD CURRENT");
