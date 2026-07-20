@@ -866,29 +866,32 @@ public:
 
         r.removeFromTop (6);
 
-        // ── AutoMatching (bottom): heading, graph, action row, footer ──
+        // ── AutoMatching (bottom): heading, action row, optional save
+        //    editor, THEN the comparison graph, THEN status line ──
         hAutoMatching.setBounds (r.removeFromTop (20));
 
-        // reserve the action row + optional save editor + status at the
-        // BOTTOM of the AutoMatching block so the graph fills the middle
-        auto footer = r.removeFromBottom (savePresetVisible ? 60 : 24);
-        outLbl.setBounds (footer.removeFromTop (24).withTrimmedLeft (2));
+        {
+            auto actionRow = r.removeFromTop (44);
+            matchBtn.setBounds      (actionRow.removeFromLeft (140).withHeight (36));
+            savePresetBtn.setBounds (actionRow.removeFromRight (150).withHeight (36));
+            matchStatus.setBounds   (actionRow.reduced (10, 6));
+        }
+        r.removeFromTop (4);
+
         if (savePresetVisible)
         {
-            auto sr = footer;
+            auto sr = r.removeFromTop (40);
             saveHint.setBounds (sr.removeFromTop (16).withTrimmedLeft (2));
             saveNameEdit.setBounds        (sr.removeFromLeft (240).withHeight (24));
             savePresetOkBtn.setBounds     (sr.removeFromLeft (80) .withHeight (24).translated (10, 0));
             savePresetCancelBtn.setBounds (sr.removeFromLeft (80) .withHeight (24).translated (14, 0));
+            r.removeFromTop (4);
         }
-        r.removeFromBottom (4);
 
-        auto actionRow = r.removeFromBottom (44);
-        matchBtn.setBounds       (actionRow.removeFromLeft (140).withHeight (36));
-        savePresetBtn.setBounds  (actionRow.removeFromRight (150).withHeight (36));
-        matchStatus.setBounds    (actionRow.reduced (10, 6));
-
-        r.removeFromBottom (4);
+        // Status pinned to the very bottom of the AutoMatching block; the
+        // graph fills the rest below the action / save editor.
+        outLbl.setBounds (r.removeFromBottom (24).withTrimmedLeft (2));
+        r.removeFromBottom (2);
         graph.setBounds (r.reduced (0, 2));
     }
 
@@ -949,6 +952,10 @@ private:
     // ── target loading ───────────────────────────────────────────────────
     void invalidateForTargetChange()
     {
+        // stale "N APPLIED" from the previous match no longer describes
+        // the new Target vs the current parameters -- clear it so the
+        // status line matches reality (spec 2.6 / 4.1 / 7.2).
+        nSet = nLocked = 0;
         refreshEstimated();
         graph.repaint();
         updateMatchStatus();
@@ -1398,11 +1405,17 @@ private:
         matchBtn.setEnabled (canMatch);
         saveTargetProfBtn.setEnabled  (prof2.valid());
         saveMyVoiceProfBtn.setEnabled (prof1.valid());
-        auto s = juce::String::fromUTF8 (canMatch ? "READY TO MATCH" : "RECORD MYVOICE");
+        // Only surface an APPLIED/LOCKED count from the LAST match; if
+        // there hasn't been one (or a Target / MyVoice change wiped the
+        // counters), stay silent -- the enabled/disabled MATCH button is
+        // enough of a "not ready yet" signal.
+        juce::String s;
         if (nSet + nLocked > 0)
             s = juce::String (nSet) + juce::String::fromUTF8 (" APPLIED")
               + (nLocked > 0 ? juce::String (" · ") + juce::String (nLocked)
                              + juce::String::fromUTF8 (" LOCKED") : juce::String());
+        else if (canMatch)
+            s = juce::String::fromUTF8 ("READY");
         matchStatus.setText (s, juce::dontSendNotification);
     }
 
