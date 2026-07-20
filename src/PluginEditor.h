@@ -341,20 +341,31 @@ public:
         }
 
         // legend: label + tiny glyph, so viewers who can't tell colours apart
-        // still see which shape belongs to which series (spec 4.4)
-        g.setFont (juce::Font (juce::FontOptions (11.0f)));
-        auto legendItem = [&] (int x, juce::Colour col, Glyph gl, const char* lbl)
-        {
-            const int y = (int) r.getY() + 4;
-            drawLegendGlyph (g, (float) x + 5.5f, (float) y + 6.0f, col, gl);
-            g.setColour (col);
-            g.drawText (lbl, x + 14, y - 1, 80, 14, juce::Justification::left);
+        // still see which shape belongs to which series (spec 4.4). Only
+        // series that are actually valid appear -- the panel can drop a
+        // series entirely (e.g. Matched is not produced without a Refine
+        // step) and the legend follows without leaving a ghost entry.
+        struct LI { juce::Colour col; Glyph gl; const char* lbl; bool on; };
+        const LI items[4] = {
+            { cy, Glyph::filledDot,  "Current",   you       != nullptr && you->valid()       },
+            { ct, Glyph::ring,       "Target",    target    != nullptr && target->valid()    },
+            { ce, Glyph::diamond,    "Estimated", estimated != nullptr && estimated->valid() },
+            { cc, Glyph::concentric, "Matched",   conv      != nullptr && conv->valid()      },
         };
-        const int lx = (int) r.getRight() - 300;
-        legendItem (lx +   0, cy, Glyph::filledDot,  "Current");
-        legendItem (lx +  80, ct, Glyph::ring,       "Target");
-        legendItem (lx + 155, ce, Glyph::diamond,    "Estimated");
-        legendItem (lx + 235, cc, Glyph::concentric, "Matched");
+        g.setFont (juce::Font (juce::FontOptions (11.0f)));
+        const int y = (int) r.getY() + 4;
+        int x = (int) r.getRight() - 4;
+        for (int i = 3; i >= 0; --i)
+        {
+            if (! items[i].on) continue;
+            const int w = 14 + (int) juce::Font (juce::FontOptions (11.0f))
+                                        .getStringWidth (items[i].lbl) + 12;
+            x -= w;
+            drawLegendGlyph (g, (float) x + 5.5f, (float) y + 6.0f,
+                             items[i].col, items[i].gl);
+            g.setColour (items[i].col);
+            g.drawText (items[i].lbl, x + 14, y - 1, w - 14, 14, juce::Justification::left);
+        }
 
         if ((you == nullptr || ! you->valid()) && (target == nullptr || ! target->valid())
             && (estimated == nullptr || ! estimated->valid())
@@ -510,46 +521,31 @@ private:
     }
 };
 
-// MATCHING tab (v0.28.0, Phase 1 of the Matching redesign spec):
-//   1) record CURRENT (your voice, the top action of the panel)
-//   2) pick a built-in sample TARGET or load a target file / .vmprofile
-//   3) MATCH  -> MatchingEngine::autoSet writes the derived parameters
-//   4) MATCH AGAIN  -> record the CONVERTED output, engine.refine nudges
-//      the parameters by the damped residual, iteration counter advances
-//   5) SAVE PRESET -> writes a normal .vmpreset (same file format as the
+// MATCHING tab (v0.28.x). Sections top to bottom:
+//   1) TargetCharacter -- pick a built-in target voice profile, or load a
+//      target file / .vmprofile
+//   2) MyVoice        -- record your own voice for the CURRENT profile
+//   3) AutoMatching   -- MATCH runs MatchingEngine::autoSet and writes the
+//      derived parameters; the graph compares Current, Target and the
+//      Estimated prediction (see MatchingEngine::predictEstimated).
+//      SAVE PRESET writes a normal .vmpreset (same file format as the
 //      PRESETS tab); no separate "matching result" file type.
 //
-// The formulas (auto-set / refine, kPitchBias, kRangeBoost, jlimit ranges,
-// damping) live in dsp/MatchingEngine.h and are byte-exact copies of the
-// v0.27.0 AnalyzePanel behaviour. The panel only sequences the UI, drives
-// captures, applies changes through history.group / isParamLocked, and
-// updates the graph. See VoxMorph_Matching_UI_Design_Spec.txt sections
-// 17 / 18 for the phased plan; Phase 2 (analyzeDetailed + timeline /
-// density / scatter renderers) and Phase 3 (parameter registry, matched
-// AEIOU proposals) are not in this commit and are tracked in HANDOVER.
+// The Auto-Set formulas (kPitchBias, kRangeBoost, jlimit ranges) live in
+// dsp/MatchingEngine.h and are byte-exact copies of the v0.27.0
+// AnalyzePanel behaviour. The panel only sequences the UI, drives the
+// capture, applies changes through history.group / isParamLocked, and
+// updates the graph. MatchingEngine::refine() remains in the header for
+// future use / API compatibility, but MATCH AGAIN was retired from the UI
+// in the v0.28 spec revision -- Matched is not rendered in the graph. See
+// VoxMorph_Matching_UI_Design_Spec.txt and v028 correction instructions
+// for context; Phase 2+ items (analyzeDetailed, GraphCard renderers,
+// parameter registry) are tracked in HANDOVER.
 class MatchingPanel : public juce::Component, private juce::Timer
 {
 public:
     explicit MatchingPanel (VoxMorphProcessor& p) : proc (p)
     {
-        // ── session rail: three tiny phase labels + iteration counter ──
-        auto initRail = [this] (juce::Label& l, const char* txt)
-        {
-            l.setText (txt, juce::dontSendNotification);
-            l.setFont (juce::Font (juce::FontOptions (11.5f, juce::Font::bold)));
-            l.setColour (juce::Label::textColourId, juce::Colour (0xff9aa5a2));
-            l.setJustificationType (juce::Justification::centred);
-            addAndMakeVisible (l);
-        };
-        initRail (railCurrent, "01 CURRENT");
-        initRail (railTarget,  "02 TARGET");
-        initRail (railMatch,   "03 MATCH");
-        railIter.setFont (juce::Font (juce::FontOptions (11.5f)));
-        railIter.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
-        railIter.setJustificationType (juce::Justification::centredRight);
-        addAndMakeVisible (railIter);
-
-        // ── section headings (bilingual short lines) ──
         auto initHeading = [this] (juce::Label& l, const char* t)
         {
             l.setText (t, juce::dontSendNotification);
@@ -557,32 +553,25 @@ public:
             l.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
             addAndMakeVisible (l);
         };
-        initHeading (hCurrent, "Current / あなたの声");
-        initHeading (hTarget,  "Target / 目標の声");
+        // ASCII only -- avoids any codepage confusion on Windows toolchains
+        // and matches the "TargetCharacter / MyVoice / AutoMatching" spec
+        initHeading (hTargetCharacter, "TargetCharacter");
+        initHeading (hMyVoice,         "MyVoice");
+        initHeading (hAutoMatching,    "AutoMatching");
 
         for (auto* b : { &recBtn, &loadBtn, &playBtn, &saveProfBtn,
-                         &matchBtn, &refineBtn, &savePresetBtn, &savePresetOkBtn,
+                         &matchBtn, &savePresetBtn, &savePresetOkBtn,
                          &savePresetCancelBtn })
             addAndMakeVisible (*b);
-        for (auto* c : { &recPlayChk })
-        {
-            c->setTooltip (juce::String::fromUTF8 (
-                "When checked, the target file plays while you record.\n"
-                "チェックすると録音と同時にターゲットを再生します。"));
-            addAndMakeVisible (*c);
-        }
-        srcChip.setJustificationType (juce::Justification::centred);
-        srcChip.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
-        srcChip.setFont (juce::Font (juce::FontOptions (10.5f, juce::Font::bold)));
-        srcChip.setText ("IN", juce::dontSendNotification);
-        srcChip.setTooltip (juce::String::fromUTF8 (
-            "Current source: microphone input (after Pre FX and Noise Gate, "
-            "before VoxMorph conversion). See spec 2.4.\n"
-            "Currentの音源: マイク入力(Pre FXとNoise Gateの後、VoxMorph変換の前)。"));
-        addAndMakeVisible (srcChip);
+        recPlayChk.setTooltip (juce::String::fromUTF8 (
+            "When checked, the target file plays while you record.\n"
+            "チェックすると録音と同時にターゲットを再生します。"));
+        addAndMakeVisible (recPlayChk);
 
         // Sample target dropdown -- Matching works out of the box, no file
         // needed (spec 2.3). Initial selection = index 0 (Feminine Standard).
+        // Replaced by TargetCharacterButton grid in the next commit; kept
+        // here so the section order / naming change lands in one step.
         int nSamples = 0;
         const auto* samples = getSampleTargets (nSamples);
         for (int i = 0; i < nSamples; ++i)
@@ -604,7 +593,7 @@ public:
             "録音時間。長いほど分析フレームが増え、プロファイルが安定します。"));
         addAndMakeVisible (durBox);
 
-        for (auto* l : { &p1Lbl, &p2Lbl, &pCLbl, &outLbl, &matchStatus, &saveHint })
+        for (auto* l : { &p1Lbl, &p2Lbl, &outLbl, &matchStatus, &saveHint })
         {
             l->setJustificationType (juce::Justification::topLeft);
             l->setFont (juce::Font (juce::FontOptions (12.0f)));
@@ -617,7 +606,7 @@ public:
         graph.you       = &prof1;
         graph.target    = &prof2;
         graph.estimated = &profE;
-        graph.conv      = &profC;
+        graph.conv      = nullptr;      // Matched series retired with MATCH AGAIN
         graph.param = [this] (const char* id)
         {
             auto* v = proc.apvts.getRawParameterValue (id);
@@ -625,7 +614,7 @@ public:
         };
         addAndMakeVisible (graph);
 
-        recBtn.setButtonText ("Record Current");
+        recBtn.setButtonText ("Record");
         recBtn.setTooltip (juce::String::fromUTF8 (
             "Records your microphone input for the CURRENT profile.\n"
             "マイク入力を録音してCurrentプロファイルにします。"));
@@ -648,11 +637,6 @@ public:
             "One Undo step; locked parameters keep their values.\n"
             "CurrentとTargetの差からパラメータを算出して書き込みます。1 Undo、"
             "ロック項目は保持。"));
-        refineBtn.setButtonText ("MATCH AGAIN");
-        refineBtn.setTooltip (juce::String::fromUTF8 (
-            "Record the CONVERTED output voice and nudge the parameters by the "
-            "damped residual. Iterate until close.\n変換後の声を録音し、"
-            "目標との残差でパラメータを再調整します。繰り返し可。"));
         savePresetBtn.setButtonText ("SAVE PRESET");
         savePresetBtn.setTooltip (juce::String::fromUTF8 (
             "Save the current parameter set as a normal preset (.vmpreset). "
@@ -669,16 +653,6 @@ public:
                 return;
             proc.capFromOutput = false;
             startCapture (recBtn, waitingCapture);
-        };
-        refineBtn.onClick = [this]
-        {
-            if (! prof2.valid())
-            {
-                status (juce::String::fromUTF8 ("ターゲットを先に選択/読込してください。"));
-                return;
-            }
-            proc.capFromOutput = true;
-            startCapture (refineBtn, waitingRefine);
         };
         loadBtn.onClick  = [this] { loadFile(); };
         playBtn.onClick  = [this]
@@ -702,44 +676,32 @@ public:
     {
         auto r = getLocalBounds().reduced (16, 10);
 
-        // Session rail (top): three phase labels + iteration counter on right
-        auto rail = r.removeFromTop (22);
-        {
-            auto right = rail.removeFromRight (110);
-            railIter.setBounds (right);
-            const int cw = rail.getWidth() / 3;
-            railCurrent.setBounds (rail.removeFromLeft (cw));
-            railTarget .setBounds (rail.removeFromLeft (cw));
-            railMatch  .setBounds (rail);
-        }
-        r.removeFromTop (4);
-
-        // CURRENT section: heading + record row + profile label
-        hCurrent.setBounds (r.removeFromTop (20));
-        auto row1 = r.removeFromTop (30);
-        recBtn.setBounds (row1.removeFromLeft (150).withHeight (26));
-        durBox.setBounds (row1.removeFromLeft (72).withHeight (26).translated (8, 0));
-        recPlayChk.setBounds (row1.removeFromLeft (150).withHeight (26).translated (12, 0));
-        srcChip.setBounds (row1.removeFromRight (34).withHeight (18).translated (-2, 4));
-        p1Lbl.setBounds (r.removeFromTop (32).withTrimmedLeft (2));
-
-        r.removeFromTop (4);
-
-        // TARGET section: heading + sample + file row + profile label
-        hTarget.setBounds (r.removeFromTop (20));
-        auto row2 = r.removeFromTop (30);
-        sampleBox.setBounds (row2.removeFromLeft (200).withHeight (26));
-        loadBtn.setBounds   (row2.removeFromLeft (170).withHeight (26).translated (8, 0));
-        playBtn.setBounds   (row2.removeFromLeft (60) .withHeight (26).translated (12, 0));
-        saveProfBtn.setBounds (row2.removeFromLeft (130).withHeight (26).translated (12, 0));
+        // ── TargetCharacter (top) ──
+        hTargetCharacter.setBounds (r.removeFromTop (20));
+        auto trow = r.removeFromTop (30);
+        sampleBox.setBounds   (trow.removeFromLeft (200).withHeight (26));
+        loadBtn.setBounds     (trow.removeFromLeft (170).withHeight (26).translated (8, 0));
+        playBtn.setBounds     (trow.removeFromLeft (60) .withHeight (26).translated (12, 0));
+        saveProfBtn.setBounds (trow.removeFromLeft (130).withHeight (26).translated (12, 0));
         p2Lbl.setBounds (r.removeFromTop (32).withTrimmedLeft (2));
 
-        r.removeFromTop (4);
+        r.removeFromTop (6);
 
-        // reserve the match dock at the bottom
-        auto matchDock = r.removeFromBottom (60);
+        // ── MyVoice (middle) ──
+        hMyVoice.setBounds (r.removeFromTop (20));
+        auto vrow = r.removeFromTop (30);
+        recBtn.setBounds (vrow.removeFromLeft (150).withHeight (26));
+        durBox.setBounds (vrow.removeFromLeft (72).withHeight (26).translated (8, 0));
+        recPlayChk.setBounds (vrow.removeFromLeft (150).withHeight (26).translated (12, 0));
+        p1Lbl.setBounds (r.removeFromTop (32).withTrimmedLeft (2));
 
-        // status + inline save-preset editor at the very bottom
+        r.removeFromTop (6);
+
+        // ── AutoMatching (bottom): heading, graph, action row, footer ──
+        hAutoMatching.setBounds (r.removeFromTop (20));
+
+        // reserve the action row + optional save editor + status at the
+        // BOTTOM of the AutoMatching block so the graph fills the middle
         auto footer = r.removeFromBottom (savePresetVisible ? 60 : 24);
         outLbl.setBounds (footer.removeFromTop (24).withTrimmedLeft (2));
         if (savePresetVisible)
@@ -752,20 +714,13 @@ public:
         }
         r.removeFromBottom (4);
 
-        // Converted profile compact caption
-        pCLbl.setBounds (r.removeFromBottom (28).withTrimmedLeft (2));
+        auto actionRow = r.removeFromBottom (44);
+        matchBtn.setBounds       (actionRow.removeFromLeft (140).withHeight (36));
+        savePresetBtn.setBounds  (actionRow.removeFromRight (150).withHeight (36));
+        matchStatus.setBounds    (actionRow.reduced (10, 6));
 
-        // Graph fills what's left
+        r.removeFromBottom (4);
         graph.setBounds (r.reduced (0, 2));
-
-        // Match dock layout
-        {
-            auto d = matchDock.reduced (0, 6);
-            matchBtn.setBounds       (d.removeFromLeft (140).withHeight (36));
-            refineBtn.setBounds      (d.removeFromLeft (170).withHeight (36).translated (10, 0));
-            savePresetBtn.setBounds  (d.removeFromRight (150).withHeight (36));
-            matchStatus.setBounds    (d.reduced (10, 6));
-        }
     }
 
 private:
@@ -810,31 +765,27 @@ private:
         {
             waitingCapture = false;
             stopPlayIfStartedByCapture();
-            recBtn.setButtonText ("Record Current");
+            recBtn.setButtonText ("Record");
             prof1 = analyzeCapture();
             proc.lastMyVoice = prof1;
-            p1Lbl.setText (juce::String::fromUTF8 ("Current: ") + fmt (prof1),
+            p1Lbl.setText (juce::String::fromUTF8 ("MyVoice: ") + fmt (prof1),
                            juce::dontSendNotification);
             refreshEstimated();
             graph.repaint();
             updateMatchStatus();
-        }
-        if (waitingRefine && ! proc.capturing.load())
-        {
-            waitingRefine = false;
-            stopPlayIfStartedByCapture();
-            refineBtn.setButtonText ("MATCH AGAIN");
-            profC = analyzeCapture();
-            pCLbl.setText (juce::String::fromUTF8 ("Matched: ") + fmt (profC),
-                           juce::dontSendNotification);
-            doRefine();
-            graph.repaint();
         }
         playBtn.setButtonText (proc.prevPos.load() >= 0 ? "Stop" : "Play");
         playBtn.setEnabled (proc.prevLen.load() > 0);
     }
 
     // ── target loading ───────────────────────────────────────────────────
+    void invalidateForTargetChange()
+    {
+        refreshEstimated();
+        graph.repaint();
+        updateMatchStatus();
+    }
+
     void loadSampleTarget()
     {
         const int idx = std::max (0, sampleBox.getSelectedId() - 1);
@@ -849,14 +800,7 @@ private:
         currentTargetName = juce::String::fromUTF8 (s.displayJp) + " (built-in)";
         p2Lbl.setText (juce::String::fromUTF8 ("Target: ") + currentTargetName + "\n" + fmt (prof2),
                        juce::dontSendNotification);
-        // ターゲットが変わると Matched は無効化(iterationはリセット、
-        // Currentは保持) -- spec 6.2 "ターゲット変更"
-        profC = VoiceProfile{};
-        pCLbl.setText ("", juce::dontSendNotification);
-        iteration = 0;
-        refreshEstimated();
-        graph.repaint();
-        updateMatchStatus();
+        invalidateForTargetChange();
     }
 
     void loadFile()
@@ -875,7 +819,7 @@ private:
             {
                 VoiceProfile p;
                 if (auto xml = juce::XmlDocument::parse (file); xml != nullptr
-                    && profileFromXml (*xml, p))
+                    && profileFromXml (*xml, p) && p.valid())
                 {
                     prof2 = p;
                     proc.lastTarget = p;
@@ -883,12 +827,7 @@ private:
                     currentTargetName = file.getFileNameWithoutExtension() + " (.vmprofile)";
                     p2Lbl.setText (juce::String::fromUTF8 ("Target: ") + currentTargetName
                                    + "\n" + fmt (prof2), juce::dontSendNotification);
-                    profC = VoiceProfile{};
-                    pCLbl.setText ("", juce::dontSendNotification);
-                    iteration = 0;
-                    refreshEstimated();
-                    graph.repaint();
-                    updateMatchStatus();
+                    invalidateForTargetChange();
                 }
                 else
                     status (juce::String::fromUTF8 ("プロファイルを読み込めませんでした: ")
@@ -925,17 +864,19 @@ private:
                 proc.prevBuf[(size_t) i] = sum / (float) nch;
             }
             proc.prevLen = nOut;
-            prof2 = VoiceAnalyzer::analyze (proc.prevBuf.data(), nOut, sr);
+            auto analysed = VoiceAnalyzer::analyze (proc.prevBuf.data(), nOut, sr);
+            if (! analysed.valid())
+            {
+                status (juce::String::fromUTF8 (
+                    "解析に失敗しました(有声区間が不足): ") + file.getFileName());
+                return;
+            }
+            prof2 = analysed;
             proc.lastTarget = prof2;
             currentTargetName = file.getFileName();
             p2Lbl.setText (juce::String::fromUTF8 ("Target: ") + currentTargetName
                            + "\n" + fmt (prof2), juce::dontSendNotification);
-            profC = VoiceProfile{};
-            pCLbl.setText ("", juce::dontSendNotification);
-            iteration = 0;
-            refreshEstimated();
-            graph.repaint();
-            updateMatchStatus();
+            invalidateForTargetChange();
         });
     }
 
@@ -965,7 +906,7 @@ private:
         });
     }
 
-    // ── Match / Refine (calls MatchingEngine, applies through history.group)
+    // ── Match (calls MatchingEngine, applies through history.group) ──
     void doMatch()
     {
         if (! prof1.valid() || ! prof2.valid())
@@ -974,29 +915,12 @@ private:
             return;
         }
         const auto proposal = MatchingEngine::autoSet (prof1, prof2);
-        applyProposal (proposal, /*isRefine*/ false);
+        applyProposal (proposal);
         refreshEstimated();
         graph.repaint();
     }
 
-    void doRefine()
-    {
-        if (! prof2.valid() || ! profC.valid())
-        {
-            status (juce::String::fromUTF8 ("目標と変換後の声の両方が必要です。"));
-            return;
-        }
-        auto get = [this] (const char* id)
-        {
-            auto* v = proc.apvts.getRawParameterValue (id);
-            return v != nullptr ? v->load() : 0.0f;
-        };
-        const auto proposal = MatchingEngine::refine (prof2, profC, get);
-        applyProposal (proposal, /*isRefine*/ true);
-        refreshEstimated();
-    }
-
-    void applyProposal (const MatchingEngine::Proposal& r, bool isRefine)
+    void applyProposal (const MatchingEngine::Proposal& r)
     {
         nSet = nLocked = 0;
         proc.history.group ([&]
@@ -1008,25 +932,15 @@ private:
                 setP (c.id, c.value);
             }
         });
-        if (isRefine) ++iteration;
-        juce::String line;
-        if (isRefine)
-            line = juce::String::formatted (
-                "residual: pitch %+.1f st  formant %+.1f st  tilt %+.1f dB",
-                r.pitch, r.formant, r.tilt);
-        else
-        {
-            line = juce::String::formatted ("pitch %+.1f st   formant %+.1f st   tilt %+.1f dB",
-                                            r.pitch, r.formant, r.tilt);
-            if (r.rangeApplied)
-                line += juce::String::formatted ("   range %.0f%%  center %.0f Hz",
-                                                 r.range, r.center);
-            line += juce::String::formatted ("\nhigh-range start %.0f Hz   pitch floor %.0f Hz",
-                                             r.hifreq, r.pitchfloor);
-        }
-        status ((isRefine ? juce::String::fromUTF8 ("MATCH AGAIN 完了 — ")
-                          : juce::String::fromUTF8 ("MATCH 完了 — "))
-                + line + "\n" + setSummary());
+        juce::String line = juce::String::formatted (
+            "pitch %+.1f st   formant %+.1f st   tilt %+.1f dB",
+            r.pitch, r.formant, r.tilt);
+        if (r.rangeApplied)
+            line += juce::String::formatted ("   range %.0f%%  center %.0f Hz",
+                                             r.range, r.center);
+        line += juce::String::formatted ("\nhigh-range start %.0f Hz   pitch floor %.0f Hz",
+                                         r.hifreq, r.pitchfloor);
+        status (juce::String::fromUTF8 ("MATCH 完了 — ") + line + "\n" + setSummary());
         updateMatchStatus();
     }
 
@@ -1088,11 +1002,13 @@ private:
         }
         const auto file = presetDir().getChildFile (juce::File::createLegalFileName (name)
                                                     + ".vmpreset");
-        if (auto xml = proc.apvts.copyState().createXml(); xml != nullptr && xml->writeTo (file))
+        if (auto xml = proc.apvts.copyState().createXml();
+            xml != nullptr && xml->writeTo (file) && file.existsAsFile())
         {
             saveNameEdit.clear();
             showSavePreset (false);
-            status (juce::String::fromUTF8 ("プリセット保存: ") + name);
+            status (juce::String::fromUTF8 ("プリセット保存: ") + name
+                    + juce::String::fromUTF8 (" (PRESETSタブで確認)"));
         }
         else
             status (juce::String::fromUTF8 ("保存に失敗しました。"));
@@ -1125,41 +1041,35 @@ private:
 
     void updateMatchStatus()
     {
-        const bool canMatch  = prof1.valid() && prof2.valid();
-        matchBtn .setEnabled (canMatch);
-        refineBtn.setEnabled (canMatch);   // permits recording converted after MATCH
-        auto s = juce::String::fromUTF8 (canMatch ? "READY TO MATCH" : "RECORD CURRENT");
+        const bool canMatch = prof1.valid() && prof2.valid();
+        matchBtn.setEnabled (canMatch);
+        auto s = juce::String::fromUTF8 (canMatch ? "READY TO MATCH" : "RECORD MYVOICE");
         if (nSet + nLocked > 0)
             s = juce::String (nSet) + juce::String::fromUTF8 (" APPLIED")
               + (nLocked > 0 ? juce::String (" · ") + juce::String (nLocked)
                              + juce::String::fromUTF8 (" LOCKED") : juce::String());
         matchStatus.setText (s, juce::dontSendNotification);
-        railIter.setText (iteration > 0 ? juce::String::formatted ("iter %d", iteration)
-                                        : juce::String(), juce::dontSendNotification);
     }
 
     // ── members ──────────────────────────────────────────────────────────
     VoxMorphProcessor& proc;
-    VoiceProfile prof1, prof2, profE, profC;   // Current / Target / Estimated / Matched
+    VoiceProfile prof1, prof2, profE;   // Current / Target / Estimated
     int nSet = 0, nLocked = 0;
-    int iteration = 0;
     ProfileGraph graph;
     juce::String currentTargetName, savedButtonText;
 
-    bool waitingCapture = false, waitingRefine = false, playStartedByCapture = false;
+    bool waitingCapture = false, playStartedByCapture = false;
     bool savePresetVisible = false;
 
-    juce::Label railCurrent, railTarget, railMatch, railIter;
-    juce::Label hCurrent, hTarget;
-    juce::Label p1Lbl, p2Lbl, pCLbl, outLbl, matchStatus, saveHint, srcChip;
+    juce::Label hTargetCharacter, hMyVoice, hAutoMatching;
+    juce::Label p1Lbl, p2Lbl, outLbl, matchStatus, saveHint;
 
     juce::ComboBox sampleBox, durBox;
     juce::ToggleButton recPlayChk { "With target play" };
 
-    juce::TextButton recBtn { "Record Current" }, loadBtn { "Load Target File..." },
+    juce::TextButton recBtn { "Record" }, loadBtn { "Load Target File..." },
                      playBtn { "Play" }, saveProfBtn { "Save Profile..." },
-                     matchBtn { "MATCH" }, refineBtn { "MATCH AGAIN" },
-                     savePresetBtn { "SAVE PRESET" },
+                     matchBtn { "MATCH" }, savePresetBtn { "SAVE PRESET" },
                      savePresetOkBtn { "Save" }, savePresetCancelBtn { "Cancel" };
     juce::TextEditor saveNameEdit;
 
