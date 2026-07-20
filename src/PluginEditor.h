@@ -521,6 +521,92 @@ private:
     }
 };
 
+// Square button used in the Matching tab's TargetCharacter row: one per
+// built-in profile plus one "TargetFile" tile. Selection is exclusive
+// through a shared radio group. Top ~60% of the tile is reserved for a
+// future icon (drawn as a placeholder rounded rectangle for now); the
+// bottom carries a short label. Selected/unselected states differ in
+// fill AND outline so the state is visible without depending on colour.
+class TargetCharacterButton : public juce::TextButton
+{
+public:
+    TargetCharacterButton (juce::String stableIdIn,
+                           juce::String labelIn,
+                           bool         isFileTarget = false)
+        : targetId (std::move (stableIdIn)),
+          fileTarget (isFileTarget),
+          labelText (std::move (labelIn))
+    {
+        setClickingTogglesState (true);
+        setTriggeredOnMouseDown (false);
+    }
+
+    const juce::String targetId;
+    const bool         fileTarget;
+
+    void paintButton (juce::Graphics& g, bool hover, bool /*down*/) override
+    {
+        const auto b        = getLocalBounds().toFloat().reduced (1.5f);
+        const bool selected = getToggleState();
+
+        const juce::Colour bg = selected ? juce::Colour (0xff54bda1)  // mint
+                                         : juce::Colour (0xfffcfaf9); // near-white
+        const juce::Colour edge = selected ? juce::Colour (0xff45bda5)
+                                           : juce::Colour (0xffe4dadd);
+        g.setColour (bg);
+        g.fillRoundedRectangle (b, 10.0f);
+        if (hover && ! selected)
+        {
+            g.setColour (juce::Colour (0x22a889f4));
+            g.fillRoundedRectangle (b, 10.0f);
+        }
+        g.setColour (edge);
+        g.drawRoundedRectangle (b, 10.0f, selected ? 2.0f : 1.0f);
+
+        // icon area: top ~60 %. Placeholder shape until real icons ship.
+        const float iconH = b.getHeight() * 0.55f;
+        auto iconR = b.reduced (10.0f).withHeight (iconH);
+        g.setColour (selected ? juce::Colour (0xfffcfaf9)
+                              : juce::Colour (0xffbfd9d2));
+        if (fileTarget)
+        {
+            // folder-ish rounded square hint
+            g.drawRoundedRectangle (iconR.reduced (iconR.getWidth() * 0.18f,
+                                                    iconR.getHeight() * 0.12f),
+                                    4.0f, 1.6f);
+            g.drawLine (iconR.getX() + iconR.getWidth() * 0.30f,
+                        iconR.getY() + iconR.getHeight() * 0.18f,
+                        iconR.getX() + iconR.getWidth() * 0.55f,
+                        iconR.getY() + iconR.getHeight() * 0.18f, 1.6f);
+        }
+        else
+        {
+            // voice-print hint: three stacked arcs
+            for (int i = 0; i < 3; ++i)
+            {
+                juce::Path arc;
+                const float rad = 5.0f + (float) i * 5.0f;
+                arc.addCentredArc (iconR.getCentreX(), iconR.getCentreY(),
+                                   rad, rad, 0.0f,
+                                   -0.9f, 0.9f, true);
+                g.strokePath (arc, juce::PathStrokeType (1.4f));
+            }
+        }
+
+        // label: bottom area
+        g.setColour (selected ? juce::Colour (0xfffcfaf9)
+                              : juce::Colour (0xff606a68));
+        g.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
+        auto textR = b.withY (b.getY() + iconH + 4.0f)
+                      .withHeight (b.getHeight() - iconH - 6.0f);
+        g.drawFittedText (labelText, textR.toNearestInt(),
+                          juce::Justification::centred, 2);
+    }
+
+private:
+    juce::String labelText;
+};
+
 // MATCHING tab (v0.28.x). Sections top to bottom:
 //   1) TargetCharacter -- pick a built-in target voice profile, or load a
 //      target file / .vmprofile
@@ -559,7 +645,7 @@ public:
         initHeading (hMyVoice,         "MyVoice");
         initHeading (hAutoMatching,    "AutoMatching");
 
-        for (auto* b : { &recBtn, &loadBtn, &playBtn, &saveProfBtn,
+        for (auto* b : { &recBtn, &playBtn, &saveProfBtn,
                          &matchBtn, &savePresetBtn, &savePresetOkBtn,
                          &savePresetCancelBtn })
             addAndMakeVisible (*b);
@@ -568,21 +654,41 @@ public:
             "チェックすると録音と同時にターゲットを再生します。"));
         addAndMakeVisible (recPlayChk);
 
-        // Sample target dropdown -- Matching works out of the box, no file
-        // needed (spec 2.3). Initial selection = index 0 (Feminine Standard).
-        // Replaced by TargetCharacterButton grid in the next commit; kept
-        // here so the section order / naming change lands in one step.
+        // TargetCharacter buttons: N built-in profiles + one "TargetFile"
+        // tile, all in a shared radio group so exactly one is selected at
+        // a time. Initial selection = index 0 (Feminine Standard).
         int nSamples = 0;
         const auto* samples = getSampleTargets (nSamples);
         for (int i = 0; i < nSamples; ++i)
-            sampleBox.addItem (samples[i].displayEn, i + 1);
-        sampleBox.setSelectedId (1, juce::dontSendNotification);
-        sampleBox.setTooltip (juce::String::fromUTF8 (
-            "Built-in target voice profiles. Pick one and press MATCH; no audio "
-            "file needed.\n組み込みのターゲット声プロファイル。ファイルなしで"
-            "選んでMATCHが押せます。"));
-        sampleBox.onChange = [this] { loadSampleTarget(); };
-        addAndMakeVisible (sampleBox);
+        {
+            auto btn = std::make_unique<TargetCharacterButton> (
+                juce::String (samples[i].id), juce::String (samples[i].displayEn), false);
+            btn->setRadioGroupId (kTargetRadioGroup, juce::dontSendNotification);
+            btn->setTooltip (juce::String::fromUTF8 (samples[i].displayJp));
+            btn->onClick = [this, i] { selectSampleTarget (i, true); };
+            addAndMakeVisible (*btn);
+            targetButtons.push_back (std::move (btn));
+        }
+        {
+            auto btn = std::make_unique<TargetCharacterButton> (
+                juce::String ("target_file"), juce::String ("TargetFile"), true);
+            targetFileButton = btn.get();
+            btn->setRadioGroupId (kTargetRadioGroup, juce::dontSendNotification);
+            btn->setTooltip (juce::String::fromUTF8 (
+                "Load a voice audio file (wav/aiff/mp3/m4a/flac, first 60 s) or a "
+                ".vmprofile as the target.\n音声ファイル(60秒まで)または.vmprofileを"
+                "ターゲットとして読み込みます。"));
+            // Clicking TargetFile toggles it selected; we immediately restore
+            // the previous selection so a cancelled chooser leaves the UI
+            // where it was, then re-select TargetFile on load success.
+            btn->onClick = [this]
+            {
+                restoreLastNonFileSelectionUi();
+                loadFile();
+            };
+            addAndMakeVisible (*btn);
+            targetButtons.push_back (std::move (btn));
+        }
 
         durBox.addItem ("5 s",  5);
         durBox.addItem ("10 s", 10);
@@ -618,11 +724,6 @@ public:
         recBtn.setTooltip (juce::String::fromUTF8 (
             "Records your microphone input for the CURRENT profile.\n"
             "マイク入力を録音してCurrentプロファイルにします。"));
-        loadBtn.setButtonText ("Load Target File...");
-        loadBtn.setTooltip (juce::String::fromUTF8 (
-            "Load a voice audio file (wav/aiff/mp3/m4a/flac, first 60 s) or a "
-            ".vmprofile as the target.\n音声ファイル(先頭60秒まで)または.vmprofileを"
-            "ターゲットとして読み込みます。"));
         playBtn.setButtonText ("Play");
         playBtn.setTooltip (juce::String::fromUTF8 (
             "Preview the loaded target audio through the plugin output.\n"
@@ -654,7 +755,6 @@ public:
             proc.capFromOutput = false;
             startCapture (recBtn, waitingCapture);
         };
-        loadBtn.onClick  = [this] { loadFile(); };
         playBtn.onClick  = [this]
         {
             if (proc.prevPos.load() >= 0) proc.prevPos = -1;
@@ -666,7 +766,7 @@ public:
         savePresetOkBtn.onClick     = [this] { savePreset(); };
         savePresetCancelBtn.onClick = [this] { showSavePreset (false); };
 
-        loadSampleTarget();     // pre-populate prof2 from the initial sample
+        selectSampleTarget (0, /*fromUser*/ false);  // initial: Feminine Standard
         showSavePreset (false); // hide the name editor
         updateMatchStatus();
         startTimerHz (10);
@@ -678,11 +778,29 @@ public:
 
         // ── TargetCharacter (top) ──
         hTargetCharacter.setBounds (r.removeFromTop (20));
-        auto trow = r.removeFromTop (30);
-        sampleBox.setBounds   (trow.removeFromLeft (200).withHeight (26));
-        loadBtn.setBounds     (trow.removeFromLeft (170).withHeight (26).translated (8, 0));
-        playBtn.setBounds     (trow.removeFromLeft (60) .withHeight (26).translated (12, 0));
-        saveProfBtn.setBounds (trow.removeFromLeft (130).withHeight (26).translated (12, 0));
+        {
+            // 6 tiles: 6x1 above ~650 px wide, 3x2 otherwise. Tiles are
+            // strictly square; grid width is derived from tile size.
+            const int nb    = (int) targetButtons.size();
+            const int cols  = (getWidth() >= 650 ? nb : 3);
+            const int rows  = (nb + cols - 1) / cols;
+            const int gap   = 8;
+            const int avail = r.getWidth();
+            const int size  = std::clamp ((avail - gap * (cols - 1)) / cols, 72, 96);
+            auto grid = r.removeFromTop (rows * size + (rows - 1) * gap);
+            for (int i = 0; i < nb; ++i)
+            {
+                const int col = i % cols;
+                const int row = i / cols;
+                targetButtons[(size_t) i]->setBounds (grid.getX() + col * (size + gap),
+                                                      grid.getY() + row * (size + gap),
+                                                      size, size);
+            }
+        }
+        r.removeFromTop (4);
+        auto arow = r.removeFromTop (28);
+        playBtn.setBounds     (arow.removeFromLeft (72).withHeight (26));
+        saveProfBtn.setBounds (arow.removeFromLeft (140).withHeight (26).translated (8, 0));
         p2Lbl.setBounds (r.removeFromTop (32).withTrimmedLeft (2));
 
         r.removeFromTop (6);
@@ -786,13 +904,21 @@ private:
         updateMatchStatus();
     }
 
-    void loadSampleTarget()
+    void selectSampleTarget (int index, bool /*fromUser*/)
     {
-        const int idx = std::max (0, sampleBox.getSelectedId() - 1);
         int n = 0;
         const auto* samples = getSampleTargets (n);
-        if (n <= 0) return;
-        const auto& s = samples[std::min (idx, n - 1)];
+        if (! juce::isPositiveAndBelow (index, n)) return;
+        selectedSampleIndex = index;
+        targetFileActive    = false;
+
+        // radio group already flips buttons when they're clicked, but this
+        // path is also hit by the initial pre-populate call and by the
+        // cancel-restore below -- make selection explicit either way
+        if ((size_t) index < targetButtons.size())
+            targetButtons[(size_t) index]->setToggleState (true, juce::dontSendNotification);
+
+        const auto& s = samples[index];
         prof2 = s.profile;
         proc.lastTarget = prof2;
         proc.prevLen = 0;    // sample targets have no audio to Play
@@ -801,6 +927,29 @@ private:
         p2Lbl.setText (juce::String::fromUTF8 ("Target: ") + currentTargetName + "\n" + fmt (prof2),
                        juce::dontSendNotification);
         invalidateForTargetChange();
+    }
+
+    void selectTargetFileButton()
+    {
+        targetFileActive = true;
+        if (targetFileButton != nullptr)
+            targetFileButton->setToggleState (true, juce::dontSendNotification);
+    }
+
+    // Called at the start of a TargetFile click so the UI reflects the
+    // previous choice while the FileChooser is up; on load success the
+    // callback re-selects TargetFile via selectTargetFileButton().
+    void restoreLastNonFileSelectionUi()
+    {
+        if (targetFileActive)
+        {
+            // an earlier TargetFile is still in place -- keep the tile lit
+            if (targetFileButton != nullptr)
+                targetFileButton->setToggleState (true, juce::dontSendNotification);
+        }
+        else if ((size_t) selectedSampleIndex < targetButtons.size())
+            targetButtons[(size_t) selectedSampleIndex]
+                ->setToggleState (true, juce::dontSendNotification);
     }
 
     void loadFile()
@@ -827,6 +976,7 @@ private:
                     currentTargetName = file.getFileNameWithoutExtension() + " (.vmprofile)";
                     p2Lbl.setText (juce::String::fromUTF8 ("Target: ") + currentTargetName
                                    + "\n" + fmt (prof2), juce::dontSendNotification);
+                    selectTargetFileButton();
                     invalidateForTargetChange();
                 }
                 else
@@ -876,6 +1026,7 @@ private:
             currentTargetName = file.getFileName();
             p2Lbl.setText (juce::String::fromUTF8 ("Target: ") + currentTargetName
                            + "\n" + fmt (prof2), juce::dontSendNotification);
+            selectTargetFileButton();
             invalidateForTargetChange();
         });
     }
@@ -1064,10 +1215,16 @@ private:
     juce::Label hTargetCharacter, hMyVoice, hAutoMatching;
     juce::Label p1Lbl, p2Lbl, outLbl, matchStatus, saveHint;
 
-    juce::ComboBox sampleBox, durBox;
+    static constexpr int kTargetRadioGroup = 0x564d01;
+    std::vector<std::unique_ptr<TargetCharacterButton>> targetButtons;
+    TargetCharacterButton* targetFileButton = nullptr;
+    int  selectedSampleIndex = 0;
+    bool targetFileActive    = false;
+
+    juce::ComboBox durBox;
     juce::ToggleButton recPlayChk { "With target play" };
 
-    juce::TextButton recBtn { "Record" }, loadBtn { "Load Target File..." },
+    juce::TextButton recBtn { "Record" },
                      playBtn { "Play" }, saveProfBtn { "Save Profile..." },
                      matchBtn { "MATCH" }, savePresetBtn { "SAVE PRESET" },
                      savePresetOkBtn { "Save" }, savePresetCancelBtn { "Cancel" };
