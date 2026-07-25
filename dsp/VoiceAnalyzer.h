@@ -62,6 +62,7 @@ struct VowelProfile
     float F[3]   = { 0.0f, 0.0f, 0.0f };   // formant centres, Hz (medians)
     float L[3]   = { 0.0f, 0.0f, 0.0f };   // levels, dB rel. this vowel's strongest
     float rel[3] = { 0.0f, 0.0f, 0.0f };   // measurement reliability, 0..1
+    float hnr[3] = { 0.0f, 0.0f, 0.0f };   // band harmonic-to-noise ratio, dB
 
     static constexpr int kMinFrames = 8;
     bool valid() const { return frames >= kMinFrames; }
@@ -76,6 +77,8 @@ struct VoiceProfile
     float tiltDb = 0.0f;                // 10*log10(E 0-1k / E 2-8k)
     int   voicedFrames = 0;
     float rel[3] = { 0.0f, 0.0f, 0.0f };  // per-band reliability, 0..1 (v0.29.0)
+    float hnr[3] = { 0.0f, 0.0f, 0.0f };  // band harmonic-to-noise ratio, dB
+    float tractScale = 1.0f;              // vocal-tract size vs the reference
     VowelProfile vow[5];                  // per-vowel sub-profiles (v0.29.0)
 
     bool valid() const { return voicedFrames >= 15 && f0Hz > 40.0f; }
@@ -93,7 +96,13 @@ class VoiceAnalyzer
 {
 public:
     // ---- envelope / assignment constants (validated against ground truth) --
-    static constexpr float kCepDiv   = 1.6f;  // cepstral order = fs / (kCepDiv*f0)
+    // Cepstral order = fs / (kCepDiv * f0). The harmonic-resolving limit is
+    // fs / (2*f0): ABOVE it the envelope starts following individual
+    // harmonics instead of formants. v0.29.0 shipped 1.6, i.e. 25 % past that
+    // limit, which put 6-8 spurious maxima in the F3 band on real speech and
+    // made the picked F3 jump frame to frame. The classical true-envelope
+    // order is exactly fs / (2*f0); that is what this is now.
+    static constexpr float kCepDiv   = 2.0f;
     static constexpr int   kCepIters = 8;     // true-envelope iterations
     static constexpr float kPreEmphDb = 6.0f; // dB per octave, above kPreEmphF0
     static constexpr float kPreEmphF0 = 100.0f;
@@ -107,12 +116,48 @@ public:
     // 552 Hz, i.e. the second harmonic). The ramp therefore only starts
     // trusting a band at 2.5x f0 and reaches full trust at 4x.
     static constexpr float kRelLo = 2.5f, kRelHi = 4.0f;
+    // reference speaker geometry the vowel anchors are written for
+    static inline const float kRefL1 = std::log2 (480.0f);
+    // Band HNR ramp, dB. Measured: ordinary speech and synthetic vowels run
+    // +7..+19 dB per band; a band that is pure noise sits at 0 dB by
+    // construction. The user's dark recording reads +1.5 (F2) and +0.4 (F3).
+    static constexpr float kHnrLo = 2.0f, kHnrHi = 6.0f;
 
-    static float reliability (float F, float f0)
+    // A band is only worth believing when BOTH are true:
+    //   (a) the harmonics sample that region densely enough to place a peak
+    //       (F/f0; below ~2.5 the resonance position is not identifiable), and
+    //   (b) there is actually voiced structure there rather than noise.
+    // (b) was missing in the first v0.29.0 cut and it is what broke matching
+    // on the user's own recording: above 1 kHz that take is a flat noise floor
+    // (band HNR +1.5 dB at F2, +0.4 dB at F3, against +12.6/+8.3 dB for
+    // ordinary speech), so the "F3" being matched against was noise -- and
+    // because F3 carries the largest vocal-tract weight, the global formant
+    // it produced could come out near zero or negative, which for a
+    // male-to-female match is not physically possible.
+    static float density (float F, float f0)
     {
         if (! (f0 > 0.0f) || ! std::isfinite (F)) return 0.0f;
         return std::clamp ((F / f0 - kRelLo) / (kRelHi - kRelLo), 0.0f, 1.0f);
     }
+    static float harmonicity (float hnrDb)
+    {
+        if (! std::isfinite (hnrDb)) return 0.0f;
+        return std::clamp ((hnrDb - kHnrLo) / (kHnrHi - kHnrLo), 0.0f, 1.0f);
+    }
+    // Harmonicity WEIGHTS rather than gates. Gating it outright is too harsh
+    // on real, quiet recordings: the user's takes read only +1.0..+1.5 dB in
+    // the F2 band, yet the engine's tracker and this one independently agree
+    // on F2 there to within 0.1 st, so there is real structure to use. A dead
+    // band still falls to the 0.3 floor and is out-voted by a clean one,
+    // while identifiability (density) remains a hard gate because that one
+    // is a statement about what the signal can possibly contain.
+    static constexpr float kHnrFloor = 0.3f;
+    static float reliability (float F, float f0, float hnrDb)
+    {
+        return density (F, f0) * (kHnrFloor + (1.0f - kHnrFloor) * harmonicity (hnrDb));
+    }
+    // kept for callers that only have the frequencies (built-in catalog)
+    static float reliability (float F, float f0) { return density (F, f0); }
 
     static VoiceProfile analyze (const float* x, int n, double fs)
     {
@@ -127,8 +172,9 @@ public:
         std::vector<float>  re ((size_t) N), im ((size_t) N);
         std::vector<double> dfn ((size_t) maxLD + 2, 1.0), mag ((size_t) NB + 1);
         std::vector<float>  A ((size_t) N), V ((size_t) N), Acur ((size_t) N);
-        std::vector<float>  f0v, Fv[3], Lv[3], Rv[3], tv;
-        std::vector<int>    vv;                 // per-frame vowel class
+        std::vector<float>  f0v, Fv[3], Lv[3], Rv[3], Hv[3], tv;
+        std::vector<float>  pkF, pkL;           // cached peaks, kMaxPeaks/frame
+        std::vector<int>    pkN, vv;            // peak count / vowel class
 
         for (int s = 0; s + W + maxLag < n; s += hop)
         {
@@ -185,38 +231,110 @@ public:
                 mag[(size_t) k] = (double) re[(size_t) k] * re[(size_t) k]
                                 + (double) im[(size_t) k] * im[(size_t) k];
 
-            // ---- log spectrum with a +6 dB/oct tilt correction, mirrored to
-            // a real EVEN sequence so the forward FFT serves both directions
-            // (for real-even data the inverse DFT is the forward DFT / N).
-            for (int k = 0; k <= NB; ++k)
-            {
-                const double hz = (double) k * fs / N;
-                const double lift = kPreEmphDb * std::log2 (std::max (hz, (double) kPreEmphF0)
-                                                           / (double) kPreEmphF0);
-                A[(size_t) k] = (float) (10.0 * std::log10 (mag[(size_t) k] + 1.0e-20) + lift);
-            }
-            for (int k = NB + 1; k < N; ++k) A[(size_t) k] = A[(size_t) (N - k)];
+            harmonicEnvelope (mag.data(), NB, N, fs, f0, V.data(), Acur.data());
 
-            trueEnvelope (A.data(), Acur.data(), V.data(), re.data(), im.data(), N, f0, fs);
-
-            // ---- formant candidates -> joint assignment
-            float Fi[3], Li[3];
-            if (! assignFormants (V.data(), N, NB, fs, Fi, Li)) continue;
+            // ---- formant candidates. The ASSIGNMENT is deferred: which
+            // peak is F1/F2/F3 depends on a range prior, and that prior has
+            // to be scaled to this speaker's vocal tract before it is safe
+            // to apply (see the two-pass step after this loop).
+            float pf[kMaxPeaks], pl[kMaxPeaks];
+            const int npk = extractPeaks (V.data(), N, NB, fs, pf, pl);
+            if (npk < 3) continue;
 
             double eLo = 0.0, eHi = 0.0;
             auto binOf = [&] (double hz) { return std::clamp ((int) std::lround (hz * N / fs), 1, NB - 1); };
             for (int k = binOf (60.0);   k <= binOf (1000.0); ++k) eLo += mag[(size_t) k];
             for (int k = binOf (2000.0); k <= binOf (std::min (8000.0, fs * 0.45)); ++k) eHi += mag[(size_t) k];
 
+            float hn[3];
+            bandHnr (mag.data(), NB, N, fs, f0, hn);
+
             f0v.push_back (f0);
-            for (int fi = 0; fi < 3; ++fi)
+            pkN.push_back (npk);
+            for (int i = 0; i < kMaxPeaks; ++i)
             {
-                Fv[fi].push_back (Fi[fi]);
-                Lv[fi].push_back (Li[fi]);
-                Rv[fi].push_back (reliability (Fi[fi], f0));
+                pkF.push_back (i < npk ? pf[i] : 0.0f);
+                pkL.push_back (i < npk ? pl[i] : 0.0f);
             }
+            for (int fi = 0; fi < 3; ++fi) Hv[fi].push_back (hn[fi]);
             tv.push_back ((float) (10.0 * std::log10 ((eLo + 1.0e-20) / (eHi + 1.0e-20))));
         }
+
+        // ---- two-pass assignment ------------------------------------------
+        // The range prior (F1~500, F2~1500, F3~2600 Hz) describes an average
+        // adult tract. Applied as-is it OUTVOTES the evidence for anyone far
+        // from that: an anime/high-female /i/ with a true F2 of 3269 Hz is
+        // penalized 1.26 while the whole level term can only repay ~0.35, so
+        // the assignment picks a wrong, more central peak and the voice reads
+        // back as having a longer tract than it does. That is a systematic
+        // pull toward "average" -- and it is why matching to bright, small
+        // -tract voices under-shot, sometimes to the point of a negative
+        // formant shift on a male-to-female match.
+        //
+        // So: pass 1 assigns with the prior weakened, purely to estimate how
+        // this speaker is scaled relative to the reference; pass 2 re-assigns
+        // with the prior re-centred on that estimate. Only the cached peaks
+        // are re-used, so the expensive envelope work is not repeated.
+        {
+            const size_t nf = f0v.size();
+            auto runPass = [&] (float refScale,
+                                std::vector<float>* Fo, std::vector<float>* Lo)
+            {
+                for (int b = 0; b < 3; ++b) { Fo[b].clear(); Lo[b].clear(); }
+                float prev[3] = { -1.0f, -1.0f, -1.0f };
+                for (size_t i = 0; i < nf; ++i)
+                {
+                    float Fi[3], Li[3];
+                    if (! assignFormants (&pkF[i * kMaxPeaks], &pkL[i * kMaxPeaks],
+                                          pkN[i], refScale, prev, Fi, Li))
+                    { for (int b = 0; b < 3; ++b) { Fo[b].push_back (0.0f); Lo[b].push_back (0.0f); } }
+                    else
+                    {
+                        for (int b = 0; b < 3; ++b)
+                        { Fo[b].push_back (Fi[b]); Lo[b].push_back (Li[b]); prev[b] = Fi[b]; }
+                    }
+                }
+            };
+            std::vector<float> F1p[3], L1p[3];
+            runPass (1.0f, F1p, L1p);
+            // scale from the two bands that survive on real speech
+            std::vector<float> r2, r3;
+            for (size_t i = 0; i < nf; ++i)
+            {
+                if (F1p[1][i] > 0.0f) r2.push_back (F1p[1][i] / 1500.0f);
+                if (F1p[2][i] > 0.0f) r3.push_back (F1p[2][i] / 2600.0f);
+            }
+            float sc = 1.0f;
+            if (! r2.empty() && ! r3.empty())
+                sc = std::sqrt (median (r2) * median (r3));
+            else if (! r2.empty()) sc = median (r2);
+            else if (! r3.empty()) sc = median (r3);
+            if (! std::isfinite (sc)) sc = 1.0f;
+            // Damped and tightly clamped on purpose: the scale is estimated
+            // from the same noisy measurements it then re-centres, so an
+            // undamped correction amplifies its own error. Measured on the
+            // published-formant cases: 3/5 correct with no adaptation,
+            // 5/5 at 0.5 damping, and undamped it starts overshooting.
+            out.tractScale = std::clamp (1.0f + 0.5f * (sc - 1.0f), 0.85f, 1.25f);
+            runPass (out.tractScale, Fv, Lv);
+        }
+        // drop frames the final pass could not assign
+        {
+            size_t w = 0;
+            for (size_t i = 0; i < f0v.size(); ++i)
+            {
+                if (! (Fv[0][i] > 0.0f)) continue;
+                f0v[w] = f0v[i]; tv[w] = tv[i];
+                for (int b = 0; b < 3; ++b)
+                { Fv[b][w] = Fv[b][i]; Lv[b][w] = Lv[b][i]; Hv[b][w] = Hv[b][i]; }
+                ++w;
+            }
+            f0v.resize (w); tv.resize (w);
+            for (int b = 0; b < 3; ++b) { Fv[b].resize (w); Lv[b].resize (w); Hv[b].resize (w); }
+        }
+        for (size_t i = 0; i < f0v.size(); ++i)
+            for (int b = 0; b < 3; ++b)
+                Rv[b].push_back (reliability (Fv[b][i], f0v[i], Hv[b][i]));
 
         out.voicedFrames = (int) f0v.size();
         if (out.voicedFrames < 5) return out;
@@ -239,13 +357,14 @@ public:
             out.F[fi]   = median (Fv[fi]);
             Lmed[fi]    = median (Lv[fi]);
             out.rel[fi] = median (Rv[fi]);
+            out.hnr[fi] = median (Hv[fi]);
         }
         const float Lmax = std::max ({ Lmed[0], Lmed[1], Lmed[2] });
         for (int fi = 0; fi < 3; ++fi) out.L[fi] = Lmed[fi] - Lmax;
         out.tiltDb = median (tv);
 
-        classifyVowels (Fv, vv);
-        buildVowelProfiles (out, f0v, Fv, Lv, Rv, vv);
+        classifyVowels (Fv, Rv, vv);
+        buildVowelProfiles (out, f0v, Fv, Lv, Rv, Hv, vv);
         return out;
     }
 
@@ -266,102 +385,189 @@ private:
     // order VowelAdaptiveWarp uses (typical Japanese vowel F1/F2:
     // a 800/1250, i 300/2350, u 350/1300, e 480/2100, o 500/900 Hz), so a
     // residual measured here can be written straight into the AEIOU map.
+    static constexpr int kMaxPeaks = 24;
     static constexpr float kAnchorH[5] = { 0.86f, 0.06f, 0.18f, 0.44f, 0.47f };
     static constexpr float kAnchorF[5] = { 0.04f, 1.00f, 0.57f, 0.67f, 0.13f };
+    // the same five anchors expressed as a function of F2 only (F1 held at
+    // the reference), for frames whose F1 could not be located
+    static constexpr float kAnchorF2[5] = { 0.354f, 0.741f, 0.378f, 0.672f, 0.152f };
 
-    // Iterative cepstral "true envelope": lifter, then clamp the result back
-    // up to the original spectrum and repeat, so the envelope converges onto
-    // the harmonic peaks instead of the mean of peak and valley.
-    static void trueEnvelope (const float* A, float* Acur, float* V,
-                              float* re, float* im, int N, float f0, double fs)
+    // Spectral envelope, IDENTICAL IN METHOD to the one PsolaEngine uses per
+    // grain in the realtime path (spectralProcess): take one peak per
+    // harmonic, connect them by straight lines in the log domain, then smooth
+    // lightly. Two reasons to use the engine's own method here rather than
+    // something of our own:
+    //
+    //  * It is structurally immune to the failure the cepstral version had.
+    //    It samples exactly ONE point per harmonic, so it cannot follow
+    //    individual harmonics no matter what the pitch is -- the cepstral
+    //    order had to be tuned to avoid that, and got it wrong.
+    //  * Matching measures the voice, then hands parameters to the engine,
+    //    which warps that same envelope. Measuring with the engine's own
+    //    estimator means any systematic bias appears on BOTH sides and
+    //    largely cancels, instead of being a discrepancy between what
+    //    Matching thinks it set and what the engine actually does.
+    //
+    // This is a copy of the method, not a call into it: PsolaEngine's version
+    // is per-grain, resampled-domain and stateful, and the realtime path must
+    // not be disturbed. Keep the two in step if either changes.
+    static void harmonicEnvelope (const double* mag, int NB, int N, double fs,
+                                  float f0, float* env, float* tmp)
     {
-        const int K = std::max (4, (int) (fs / (kCepDiv * f0)));
-        for (int i = 0; i < N; ++i) Acur[i] = A[i];
-        for (int it = 0; it < kCepIters; ++it)
+        const double spacing = std::max (2.5, (double) f0 * N / fs);
+        int   pkB[512]; float pkV[512]; int np = 0;
+        for (double cb = spacing; cb < (double) (NB - 2) && np < 512; cb += spacing)
         {
-            for (int i = 0; i < N; ++i) { re[i] = Acur[i]; im[i] = 0.0f; }
-            PsolaEngine::fftForViz (re, im, N);          // == inverse * N
-            const float inv = 1.0f / (float) N;
-            for (int i = 0; i < N; ++i) re[i] *= inv;
-            for (int i = K + 1; i < N - K; ++i) re[i] = 0.0f;   // lifter
-            for (int i = 0; i < N; ++i) im[i] = 0.0f;
-            PsolaEngine::fftForViz (re, im, N);          // back to log-spectrum
-            for (int i = 0; i < N; ++i)
+            const int a = std::max (1, (int) (cb - 0.45 * spacing));
+            const int b = std::min (NB - 1, (int) (cb + 0.45 * spacing));
+            int bm = a; double vm = mag[(size_t) a];
+            for (int t = a + 1; t <= b; ++t)
+                if (mag[(size_t) t] > vm) { vm = mag[(size_t) t]; bm = t; }
+            pkB[np] = bm; pkV[np] = (float) std::log (vm + 1.0e-12);
+            ++np;
+        }
+        if (np >= 2)
+        {
+            int seg = 0;
+            for (int k = 0; k <= NB; ++k)
             {
-                V[i] = std::isfinite (re[i]) ? re[i] : A[i];
-                Acur[i] = std::max (A[i], V[i]);
+                float lv;
+                if (k <= pkB[0])         lv = pkV[0];
+                else if (k >= pkB[np-1]) lv = pkV[np-1];
+                else
+                {
+                    while (seg + 1 < np && pkB[seg + 1] < k) ++seg;
+                    const int a = pkB[seg], b = pkB[seg + 1];
+                    const float t = (float) (k - a) / (float) std::max (1, b - a);
+                    lv = pkV[seg] * (1.0f - t) + pkV[seg + 1] * t;
+                }
+                env[k] = lv;                       // kept in LOG domain (dB-like)
             }
         }
+        else
+            for (int k = 0; k <= NB; ++k) env[k] = (float) std::log (mag[(size_t) k] + 1.0e-12);
+
+        // light smoothing to remove the interpolation kinks (same 2 passes)
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            for (int k = 0; k <= NB; ++k)
+            {
+                const int a = std::max (0, k - 3), b = std::min (NB, k + 3);
+                double acc = 0.0;
+                for (int t = a; t <= b; ++t) acc += env[t];
+                tmp[k] = (float) (acc / (b - a + 1));
+            }
+            for (int k = 0; k <= NB; ++k) env[k] = tmp[k];
+        }
+        // `mag` is POWER here (the tilt and HNR stages downstream need it that
+        // way), so the envelope is ln(power); 10/ln(10) converts it to the
+        // same dB scale the levels used before.
+        for (int k = 0; k <= NB; ++k) env[k] *= 4.3429448f;
     }
 
-    // Joint F1/F2/F3 choice. Candidates are the envelope's local maxima;
-    // the winner maximizes peak prominence minus a soft log-distance prior,
-    // subject to ordering. Overlapping ranges are intentional: /u/ and /o/
-    // put F2 near 800 Hz while /a/ puts F1 there, and only the ordering
-    // constraint can separate those two readings.
-    static bool assignFormants (const float* V, int N, int NB, double fs,
-                                float* Fout, float* Lout)
+    // Interior local maxima of the envelope, parabolically refined. Interior
+    // only: a point that is merely the largest value at the edge of a
+    // decaying envelope is not a resonance.
+    static int extractPeaks (const float* V, int N, int NB, double fs,
+                             float* outF, float* outL)
     {
-        constexpr float LO[3]  = { 200.0f,  550.0f, 1800.0f };
-        constexpr float HI[3]  = { 1100.0f, 3300.0f, 4500.0f };
-        constexpr float REF[3] = { 500.0f,  1500.0f, 2600.0f };
-        constexpr float WG[3]  = { 1.4f,    1.0f,    0.8f    };
-        constexpr float kProm  = 0.35f;
-        constexpr int   kMaxC  = 12;
-
         const int kl = std::max (1, (int) (150.0 * N / fs));
-        const int kh = std::min (NB - 1, (int) (4700.0 * N / fs));
-
-        float cf[3][kMaxC], cl[3][kMaxC];
-        int   nc[3] = { 0, 0, 0 };
-        float lmax = -1.0e30f;
-
-        for (int k = kl; k <= kh; ++k)
+        const int kh = std::min (NB - 1, (int) (4800.0 * N / fs));
+        int n = 0;
+        for (int k = kl; k <= kh && n < kMaxPeaks; ++k)
         {
             if (! (V[k] >= V[k-1] && V[k] >= V[k+1])) continue;
             const float d = V[k-1] - 2.0f * V[k] + V[k+1];
             float dk = std::abs (d) > 1.0e-12f ? 0.5f * (V[k-1] - V[k+1]) / d : 0.0f;
             dk = std::clamp (dk, -1.0f, 1.0f);
-            const float hz = (float) ((k + dk) * fs / N);
-            if (V[k] > lmax) lmax = V[k];
-            for (int b = 0; b < 3; ++b)
-                if (hz >= LO[b] && hz <= HI[b] && nc[b] < kMaxC)
-                { cf[b][nc[b]] = hz; cl[b][nc[b]] = V[k]; ++nc[b]; }
+            outF[n] = (float) ((k + dk) * fs / N);
+            outL[n] = V[k];
+            ++n;
         }
-        if (nc[0] == 0 || nc[1] == 0 || nc[2] == 0) return false;
+        return n;
+    }
 
-        float bestSc = -1.0e30f; int bi = -1, bj = -1, bk2 = -1;
-        for (int i = 0; i < nc[0]; ++i)
-            for (int j = 0; j < nc[1]; ++j)
-            {
-                if (cf[1][j] < 1.15f * cf[0][i]) continue;
-                for (int k = 0; k < nc[2]; ++k)
-                {
-                    if (cf[2][k] < 1.10f * cf[1][j]) continue;
-                    const float f[3] = { cf[0][i], cf[1][j], cf[2][k] };
-                    const float l[3] = { cl[0][i], cl[1][j], cl[2][k] };
-                    float sc = 0.0f;
-                    for (int b = 0; b < 3; ++b)
-                    {
-                        const float lg = std::log2 (f[b] / REF[b]);
-                        sc += kProm * (l[b] - lmax) / 6.0f - WG[b] * lg * lg;
-                    }
-                    if (sc > bestSc) { bestSc = sc; bi = i; bj = j; bk2 = k; }
-                }
-            }
-        if (bi < 0) return false;
-        Fout[0] = cf[0][bi];  Lout[0] = cl[0][bi];
-        Fout[1] = cf[1][bj];  Lout[1] = cl[1][bj];
-        Fout[2] = cf[2][bk2]; Lout[2] = cl[2][bk2];
+    // Formant selection, again the SAME RULE the realtime engine uses: the
+    // highest interior local maximum inside each band's search range, and if
+    // there is no interior maximum at all, keep the previous frame's value
+    // (or a default on the first frame) rather than pinning to a band edge.
+    //
+    // That fallback is the important part. The pre-v0.29.0 analyzer took the
+    // plain range maximum, which on a decaying envelope IS the range edge --
+    // that is how a target profile came to claim "F1 = 1.35 x f0". The engine
+    // never had that bug because it has always fallen back instead.
+    //
+    // The engine's 0.7/0.3 inter-frame smoothing is carried over too. It is
+    // what makes the tracker hold together on quiet, dark material: measured
+    // on the user's own recordings the engine reads F1/F2/F3 = 738/1672/2643
+    // where an unsmoothed per-frame estimate wanders, and on a 352 Hz target
+    // it reports a plausible 677 Hz F1 where taking each frame on its own
+    // returns 269 Hz -- below that recording's own fundamental.
+    //
+    // It does blur across vowel boundaries, which costs some per-vowel
+    // detail. That trade is worth it: a stable global measurement is what
+    // the formant conversion rides on, and the per-vowel table degrades
+    // gracefully (fewer vowels pass their frame count) rather than lying.
+    //
+    static bool assignFormants (const float* pf, const float* pl, int npk,
+                                float sc, const float* prev,
+                                float* Fout, float* Lout)
+    {
+        // FIXED search ranges -- the same boxes for every speaker. An
+        // earlier cut scaled them by each speaker's own estimated tract size,
+        // which is self-defeating for matching: scaling A's boxes by 1.15 and
+        // B's by 1.00 absorbs exactly the difference the match is trying to
+        // measure, and drove the global shift toward zero.
+        //
+        // They are wider than the engine's (850-2600 for F2) because the
+        // engine only needs to place a warp point on the voice in front of
+        // it, while this has to measure voices of very different size against
+        // one another: an anime/high-female /i/ can put F2 past 3 kHz, well
+        // outside a box sized for an average adult.
+        constexpr float loR[3]  = { 200.0f,  700.0f, 1700.0f };
+        constexpr float hiR[3]  = { 1200.0f, 3400.0f, 4600.0f };
+        constexpr float defR[3] = { 500.0f,  1500.0f, 2500.0f };
+        if (npk < 1) return false;
+        (void) sc;                       // ranges are deliberately not scaled
+        const float s = 1.0f;
+
+        for (int b = 0; b < 3; ++b)
+        {
+            const float lo = loR[b] * s, hi = hiR[b] * s;
+            int best = -1; float bv = -1.0e30f;
+            for (int i = 0; i < npk; ++i)
+                if (pf[i] >= lo && pf[i] <= hi && pl[i] > bv) { bv = pl[i]; best = i; }
+            const float hz = best >= 0 ? pf[best]
+                           : ((prev != nullptr && prev[b] > 0.0f) ? prev[b] : defR[b] * s);
+            // same 0.7/0.3 tracking the engine applies to trackF[]
+            Fout[b] = (prev != nullptr && prev[b] > 0.0f) ? 0.7f * prev[b] + 0.3f * hz : hz;
+            Lout[b] = best >= 0 ? pl[best] : -60.0f;
+        }
+        // same minimum spacing the engine enforces, so the three can never
+        // collapse onto one resonance
+        Fout[1] = std::max (Fout[1], Fout[0] + 150.0f * s);
+        Fout[2] = std::max (Fout[2], Fout[1] + 200.0f * s);
         return true;
     }
 
-    // Speaker-normalized vowel classification. Each recording is first
-    // recentred on its OWN median log-F1/F2 and mapped onto a reference
-    // geometry, so a small and a large speaker saying the same vowel land on
-    // the same anchor. Without this the target's whole vowel space shifts and
-    // every frame classifies one anchor over.
-    static void classifyVowels (const std::vector<float>* Fv, std::vector<int>& vv)
+    // Vowel identity lives in (F1, F2). When F1 cannot be located -- which is
+    // exactly what happens on a high-pitched target, the case this feature
+    // exists for -- feeding the raw F1 in classifies on noise and scatters one
+    // vowel across several buckets. Those frames are placed on F2 ALONE, using
+    // a one-dimensional distance against kAnchorF2 below.
+    //
+    // (Pinning F1 to a fixed value instead does NOT work: the height
+    // coordinate then sits permanently next to the /e/ anchor and every frame
+    // classifies as /e/. Measured: 262 of 264 frames, on the anime case this
+    // is meant to rescue.)
+    //
+    // F2 alone cannot separate /a/ from /u/ -- their F2 differs by under
+    // 1 st -- so those two may share a bucket on a very high voice. That
+    // costs some per-vowel detail; it does not bias the global shift, which
+    // is what the formant conversion actually rides on.
+    static void classifyVowels (const std::vector<float>* Fv,
+                                const std::vector<float>* Rv,
+                                std::vector<int>& vv)
     {
         const size_t n = Fv[0].size();
         vv.assign (n, -1);
@@ -374,19 +580,37 @@ private:
             l2.push_back (std::log2 (std::max (Fv[1][i], 1.0f)));
         }
         const float m1 = median (l1), m2 = median (l2);
-        static const float R1 = std::log2 (480.0f), R2 = std::log2 (1450.0f);
+        static const float R1 = kRefL1, R2 = std::log2 (1450.0f);
         for (size_t i = 0; i < n; ++i)
         {
-            const float f1n = std::exp2 (l1[i] - m1 + R1);
+            const bool f1ok = Rv[0][i] >= 0.25f;
             const float f2n = std::exp2 (l2[i] - m2 + R2);
-            float h, fr;
-            vowelCoord (f1n, f2n, h, fr);
             int bestA = 0; float bestD = 1.0e30f;
-            for (int a = 0; a < 5; ++a)
+            if (f1ok)
             {
-                const float dh = h - kAnchorH[a], df = fr - kAnchorF[a];
-                const float d = dh * dh + df * df;
-                if (d < bestD) { bestD = d; bestA = a; }
+                const float f1n = std::exp2 (l1[i] - m1 + R1);
+                float h, fr;
+                vowelCoord (f1n, f2n, h, fr);
+                for (int a = 0; a < 5; ++a)
+                {
+                    const float dh = h - kAnchorH[a], df = fr - kAnchorF[a];
+                    const float d = dh * dh + df * df;
+                    if (d < bestD) { bestD = d; bestA = a; }
+                }
+            }
+            else
+            {
+                // F2-only: same normalization, F1 held at the reference so the
+                // coordinate is a pure function of F2, compared against
+                // anchors computed the same way.
+                const float fr = std::clamp (((std::log2 (std::max (f2n, 1.0f)) - kRefL1)
+                                              - 0.55f) / (2.90f - 0.55f), 0.0f, 1.0f);
+                for (int a = 0; a < 5; ++a)
+                {
+                    const float df = fr - kAnchorF2[a];
+                    const float d = df * df;
+                    if (d < bestD) { bestD = d; bestA = a; }
+                }
             }
             vv[i] = bestA;
         }
@@ -397,11 +621,12 @@ private:
                                     const std::vector<float>* Fv,
                                     const std::vector<float>* Lv,
                                     const std::vector<float>* Rv,
+                                    const std::vector<float>* Hv,
                                     const std::vector<int>& vv)
     {
         for (int a = 0; a < 5; ++a)
         {
-            std::vector<float> g0, gF[3], gL[3], gR[3];
+            std::vector<float> g0, gF[3], gL[3], gR[3], gH[3];
             for (size_t i = 0; i < vv.size(); ++i)
             {
                 if (vv[i] != a) continue;
@@ -411,6 +636,7 @@ private:
                     gF[b].push_back (Fv[b][i]);
                     gL[b].push_back (Lv[b][i]);
                     gR[b].push_back (Rv[b][i]);
+                    gH[b].push_back (Hv[b][i]);
                 }
             }
             auto& vp = out.vow[a];
@@ -425,9 +651,46 @@ private:
                 vp.F[b]   = median (gF[b]);
                 lm[b]     = median (gL[b]);
                 vp.rel[b] = median (gR[b]);
+                vp.hnr[b] = median (gH[b]);
             }
             const float mx = std::max ({ lm[0], lm[1], lm[2] });
             for (int b = 0; b < 3; ++b) vp.L[b] = lm[b] - mx;
+        }
+    }
+
+    // Band harmonic-to-noise ratio: energy AT the harmonics against energy
+    // BETWEEN them, per band, in dB. Pure noise gives ~0 dB by construction;
+    // voiced formant structure gives +7..+19 dB. This is what tells the
+    // matcher whether there is anything in a band worth measuring, as
+    // opposed to how densely the harmonics sample it (see density()).
+    static void bandHnr (const double* mag, int NB, int N, double fs,
+                         float f0, float* out)
+    {
+        constexpr double LOB[3] = { 250.0, 700.0, 1700.0 };
+        constexpr double HIB[3] = { 1100.0, 2600.0, 4200.0 };
+        for (int b = 0; b < 3; ++b)
+        {
+            float on[64], off[64];
+            int n = 0;
+            const int w = std::max (1, (int) std::lround (0.25 * f0 * N / fs));
+            for (int h = (int) std::ceil (LOB[b] / f0); n < 64; ++h)
+            {
+                const double fc = h * (double) f0;
+                if (fc >= HIB[b] || fc >= fs * 0.45) break;
+                const int k  = (int) std::lround (fc * N / fs);
+                const int kb = (int) std::lround ((fc + 0.5 * f0) * N / fs);
+                if (k - w < 0 || kb + w > NB) break;
+                double a = 0.0, c = 0.0;
+                for (int i = k - w;  i <= k + w;  ++i) a = std::max (a, mag[(size_t) i]);
+                for (int i = kb - w; i <= kb + w; ++i) c = std::max (c, mag[(size_t) i]);
+                on[n] = (float) a; off[n] = (float) c; ++n;
+            }
+            if (n < 2) { out[b] = 0.0f; continue; }
+            std::vector<float> vo (on, on + n), vf (off, off + n);
+            const float mo = median (vo), mf = median (vf);
+            const double r = (double) mo / ((double) mf + 1.0e-20);
+            out[b] = (float) (10.0 * std::log10 (std::max (r, 1.0e-6)));
+            if (! std::isfinite (out[b])) out[b] = 0.0f;
         }
     }
 
