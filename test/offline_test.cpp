@@ -527,26 +527,89 @@ int main()
     std::puts ("\n== Matching (vowel-matched, v0.29.0) ==");
     int mFail = 0;
     {
-        // adult-male reference vowels, order A I U E O (the AEIOU map order)
-        static const double VF[5][3] = {
-            { 775.0, 1200.0, 2500.0 }, { 285.0, 2200.0, 3000.0 },
-            { 350.0, 1250.0, 2200.0 }, { 480.0, 1900.0, 2500.0 },
-            { 500.0,  850.0, 2600.0 } };
+        // PUBLISHED Japanese vowel formants (Yazawa & Kondo, 16 Tokyo
+        // speakers, 8M/8F; medians at the vowel midpoint), order A I U E O.
+        // Real measured values, not a textbook sketch -- and the male/female
+        // pair below is the ground truth for what a male-to-female match
+        // must produce: +1.95..+4.24 st, POSITIVE in every band and vowel.
+        static const double VF[5][3] = {          // male
+            { 704.0, 1245.0, 2611.0 }, { 292.0, 2199.0, 3000.0 },
+            { 343.0, 1453.0, 2344.0 }, { 447.0, 1990.0, 2644.0 },
+            { 450.0,  854.0, 2620.0 } };
+        static const double VFF[5][3] = {         // female
+            { 847.0, 1504.0, 2922.0 }, { 352.0, 2724.0, 3412.0 },
+            { 439.0, 1656.0, 2826.0 }, { 518.0, 2319.0, 3050.0 },
+            { 518.0, 1035.0, 2983.0 } };
         static const char* VN[5] = { "A", "I", "U", "E", "O" };
 
-        auto utter = [&] (double f0, double scale, const char* which)
+        // Realistic vowel: glottal-pulse source with jitter, FIVE resonators
+        // (F4/F5 included) and aspiration noise. The earlier version of this
+        // test used an impulse train through three clean resonators, which
+        // any estimator can solve -- and that is precisely why it missed the
+        // F3 degeneracy that broke matching on a real recording. A test
+        // signal has to be at least as hard as the real thing.
+        auto vowel = [&] (const double* F123, double f0, double scale,
+                          double sec, unsigned seed)
+        {
+            const int n = (int) (FS*sec);
+            std::vector<float> y ((size_t) n, 0.0f);
+            unsigned st = seed*2654435761u + 1u;
+            auto rnd = [&st] { st = st*1664525u + 1013904223u;
+                               return (double) ((st >> 8) & 0xFFFF) / 32768.0 - 1.0; };
+            int i = 0;
+            while (i < n)
+            {
+                const double P = FS/(f0*(1.0 + 0.012*rnd()));
+                const int Pi = (int) P;
+                if (Pi < 8) break;
+                const int tp = (int) (0.40*Pi), tn = (int) (0.16*Pi);
+                std::vector<double> gl ((size_t) Pi, 0.0);
+                for (int k = 0; k < tp; ++k)
+                { const double t = (double) k/std::max (1, tp); gl[(size_t) k] = 3*t*t-2*t*t*t; }
+                for (int k = 0; k < tn && tp+k < Pi; ++k)
+                { const double t = (double) k/std::max (1, tn); gl[(size_t) (tp+k)] = 1.0-t*t; }
+                double prev = 0.0;
+                for (int k = 0; k < Pi && i+k < n; ++k)
+                { y[(size_t) (i+k)] += (float) (gl[(size_t) k]-prev); prev = gl[(size_t) k]; }
+                i += Pi;
+            }
+            double sd = 0; for (auto v : y) sd += (double) v*v;
+            sd = std::sqrt (sd/std::max (1, n))+1e-12;
+            for (auto& v : y) v = (float) (v/sd);
+            double nprev = 0.0;
+            for (int k = 0; k < n; ++k)
+            { const double u = rnd(); y[(size_t) k] += (float) (0.06*(u-0.85*nprev)); nprev = u; }
+            const double hi[2] = { 3800.0, 4600.0 };
+            const double bws[5] = { 70., 110., 160., 220., 280. };
+            for (int b = 0; b < 5; ++b)
+            {
+                const double f = (b < 3 ? F123[b] : hi[b-3])*scale;
+                if (f >= 0.45*FS) continue;
+                const double T = 1.0/FS, r = std::exp (-M_PI*bws[(size_t) b]*T);
+                const double b1 = 2*r*std::cos (2*M_PI*f*T), b2 = -r*r, g = 1-b1-b2;
+                double z1 = 0, z2 = 0;
+                for (auto& v : y)
+                { const double o = g*v + b1*z1 + b2*z2; v = (float) o; z2 = z1; z1 = o; }
+            }
+            float mx = 1e-12f; for (auto v : y) mx = std::max (mx, std::abs (v));
+            for (auto& v : y) v *= 0.5f/mx;
+            return y;
+        };
+
+        auto utterT = [&] (const double tbl[5][3], double f0, double scale, const char* which)
         {
             std::vector<float> out;
             for (const char* p = which; *p; ++p)
             {
                 const int v = *p - '0';
-                auto seg = makeVowelF (f0, VF[v][0]*scale, VF[v][1]*scale,
-                                       VF[v][2]*scale, 1.2);
+                auto seg = vowel (tbl[v], f0, scale, 1.2, (unsigned) (v*7+3));
                 out.insert (out.end(), seg.begin(), seg.end());
                 out.insert (out.end(), (size_t) (0.12*FS), 0.0f);
             }
             return out;
         };
+        auto utter = [&] (double f0, double scale, const char* which)
+        { return utterT (VF, f0, scale, which); };
 
         // (a) per-formant accuracy against ground truth, for the bands the
         //     signal can actually carry (reliability >= kMinRel)
@@ -555,7 +618,7 @@ int main()
             for (double f0 : { 110.0, 150.0, 220.0, 300.0 })
                 for (int v = 0; v < 5; ++v)
                 {
-                    auto s2 = makeVowelF (f0, VF[v][0], VF[v][1], VF[v][2], 2.0);
+                    auto s2 = vowel (VF[v], f0, 1.0, 2.0, (unsigned) (v*11+5));
                     const auto p = VoiceAnalyzer::analyze (s2.data(), (int) s2.size(), FS);
                     if (! p.valid()) continue;
                     for (int b = 0; b < 3; ++b)
@@ -629,6 +692,41 @@ int main()
                 { "diff vowels, 150->300, x1.20", 150.0, 1.00, 300.0, 1.20, "13",    "24",    false },
             };
             double worstMatched = 0.0; int unflagged = 0;
+            // published male -> female, averaged over every vowel and band
+            double pubShift = 0.0;
+            for (int v = 0; v < 5; ++v) for (int b = 0; b < 3; ++b)
+                pubShift += 12.0*std::log2 (VFF[v][b]/VF[v][b]);
+            pubShift /= 15.0;
+            {
+                struct { const char* n; double f0a, f0b, sb; double truth; } fem[] = {
+                    { "male 120 -> female 210",        120., 210., 1.00, pubShift },
+                    { "male 160 -> female 250",        160., 250., 1.00, pubShift },
+                    { "male 160 -> female 352",        160., 352., 1.00, pubShift },
+                    { "male 160 -> anime x1.12 @330",  160., 330., 1.12, pubShift + 12.0*std::log2 (1.12) },
+                    { "male 130 -> anime x1.20 @380",  130., 380., 1.20, pubShift + 12.0*std::log2 (1.20) },
+                };
+                int neg = 0; double worstF = 0.0;
+                for (const auto& f : fem)
+                {
+                    auto A = utterT (VF,  f.f0a, 1.0,  "01234");
+                    auto B = utterT (VFF, f.f0b, f.sb, "01234");
+                    const auto p1 = VoiceAnalyzer::analyze (A.data(), (int) A.size(), FS);
+                    const auto p2 = VoiceAnalyzer::analyze (B.data(), (int) B.size(), FS);
+                    const auto r  = MatchingEngine::autoSet (p1, p2);
+                    const double e = std::abs (r.formant - f.truth);
+                    if (r.formant <= 0.0f) ++neg;
+                    worstF = std::max (worstF, e);
+                    std::printf ("   %-30s truth %+5.2f got %+5.2f (err %.2f) vowels=%d\n",
+                                 f.n, f.truth, r.formant, e, r.vowelsMatched);
+                }
+                // A shorter vocal tract can only raise formants. A negative
+                // result on male -> female is physically impossible and was
+                // the user-visible symptom of the F3 estimate being noise.
+                const bool ok = neg == 0 && worstF < 1.5;
+                std::printf ("male->female/anime recovery: worst %.2f st, negative results %d  %s\n",
+                             worstF, neg, ok ? "PASS" : "FAIL");
+                if (! ok) ++mFail;
+            }
             for (const auto& c : cs)
             {
                 auto A = utter (c.f0a, c.sa, c.va);
