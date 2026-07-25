@@ -906,8 +906,11 @@ public:
         }
 
         // Status pinned to the very bottom of the AutoMatching block; the
-        // graph fills the rest below the action / save editor.
-        outLbl.setBounds (r.removeFromBottom (24).withTrimmedLeft (2));
+        // graph fills the rest below the action / save editor. It carries
+        // several lines after a MATCH (values, thresholds, applied count and
+        // the "bands disagree" warning), so give it real room.
+        outLbl.setBounds (r.removeFromBottom (juce::jlimit (24, 76, r.getHeight() / 3))
+                            .withTrimmedLeft (2));
         r.removeFromBottom (2);
         graph.setBounds (r.reduced (0, 2));
     }
@@ -1345,6 +1348,24 @@ private:
                                              r.range, r.center);
         line += juce::String::formatted ("\nhigh-range start %.0f Hz   pitch floor %.0f Hz",
                                          r.hifreq, r.pitchfloor);
+        // A different vocal tract scales F1, F2 and F3 by roughly the SAME
+        // factor. When the three bands demand wildly different shifts the
+        // two recordings are not comparable -- typically because they
+        // contain different vowels (compare F2/F1: ~4 for front vowels
+        // like i/e, under 2 for rounded o/u), or because the formants of a
+        // very high-pitched target could not be measured reliably. The
+        // averaged global Formant is then meaningless (it can even come out
+        // negative while the pitch says the target is far smaller), and the
+        // per-formant trims rail against their +-3 st clamp, so F1 never
+        // reaches the target. Say so instead of pretending it matched.
+        if (r.bandSpreadSt > 6.0f)
+            line += juce::String::formatted (
+                        "\n\xe2\x9a\xa0 F1/F2/F3 %+.1f / %+.1f / %+.1f st",
+                        r.bandShiftSt[0], r.bandShiftSt[1], r.bandShiftSt[2])
+                  + juce::String::fromUTF8 (
+                        " — 3帯域の要求量がばらばらです(録音内容が違う可能性)。"
+                        "\nターゲットを再生しながら同じ内容を録音し直すと精度が上がります"
+                        "(With target play)。");
         status (juce::String::fromUTF8 ("MATCH 完了 — ") + line + "\n" + setSummary());
         updateMatchStatus();
     }
