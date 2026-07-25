@@ -253,6 +253,25 @@ inline std::unique_ptr<juce::XmlElement> profileToXml (const VoiceProfile& p)
     {
         x->setAttribute ("f" + juce::String (i + 1), p.F[i]);
         x->setAttribute ("l" + juce::String (i + 1), p.L[i]);
+        x->setAttribute ("r" + juce::String (i + 1), p.rel[i]);
+    }
+    // v0.29.0 per-vowel table. Written as child elements so a profile saved
+    // by an older build (which simply has none) still loads — Matching then
+    // takes its global path instead of the vowel-matched one.
+    static const char* vw[5] = { "a", "i", "u", "e", "o" };
+    for (int v = 0; v < 5; ++v)
+    {
+        if (! p.vow[v].valid()) continue;
+        auto* e = x->createNewChildElement ("VOWEL");
+        e->setAttribute ("id", vw[v]);
+        e->setAttribute ("frames", p.vow[v].frames);
+        e->setAttribute ("f0", p.vow[v].f0Hz);
+        for (int i = 0; i < 3; ++i)
+        {
+            e->setAttribute ("f" + juce::String (i + 1), p.vow[v].F[i]);
+            e->setAttribute ("l" + juce::String (i + 1), p.vow[v].L[i]);
+            e->setAttribute ("r" + juce::String (i + 1), p.vow[v].rel[i]);
+        }
     }
     return x;
 }
@@ -268,6 +287,30 @@ inline bool profileFromXml (const juce::XmlElement& x, VoiceProfile& p)
     {
         p.F[i] = (float) x.getDoubleAttribute ("f" + juce::String (i + 1));
         p.L[i] = (float) x.getDoubleAttribute ("l" + juce::String (i + 1));
+        // Profiles written before v0.29.0 carry no reliability. Treating a
+        // missing value as 0 would make the matcher discard every band, so
+        // an absent attribute means "assume measurable" (which is what the
+        // old code implicitly did).
+        p.rel[i] = x.hasAttribute ("r" + juce::String (i + 1))
+                 ? (float) x.getDoubleAttribute ("r" + juce::String (i + 1)) : 1.0f;
+    }
+    static const char* vw[5] = { "a", "i", "u", "e", "o" };
+    for (auto* e : x.getChildWithTagNameIterator ("VOWEL"))
+    {
+        const auto id = e->getStringAttribute ("id");
+        for (int v = 0; v < 5; ++v)
+        {
+            if (id != vw[v]) continue;
+            auto& w = p.vow[v];
+            w.frames = e->getIntAttribute ("frames");
+            w.f0Hz   = (float) e->getDoubleAttribute ("f0");
+            for (int i = 0; i < 3; ++i)
+            {
+                w.F[i]   = (float) e->getDoubleAttribute ("f" + juce::String (i + 1));
+                w.L[i]   = (float) e->getDoubleAttribute ("l" + juce::String (i + 1));
+                w.rel[i] = (float) e->getDoubleAttribute ("r" + juce::String (i + 1));
+            }
+        }
     }
     return p.valid();
 }
@@ -1348,22 +1391,51 @@ private:
                                              r.range, r.center);
         line += juce::String::formatted ("\nhigh-range start %.0f Hz   pitch floor %.0f Hz",
                                          r.hifreq, r.pitchfloor);
-        // A different vocal tract scales F1, F2 and F3 by roughly the SAME
-        // factor. When the three bands demand wildly different shifts the
-        // two recordings are not comparable -- typically because they
-        // contain different vowels (compare F2/F1: ~4 for front vowels
-        // like i/e, under 2 for rounded o/u), or because the formants of a
-        // very high-pitched target could not be measured reliably. The
-        // averaged global Formant is then meaningless (it can even come out
-        // negative while the pitch says the target is far smaller), and the
-        // per-formant trims rail against their +-3 st clamp, so F1 never
-        // reaches the target. Say so instead of pretending it matched.
-        if (r.bandSpreadSt > 6.0f)
-            line += juce::String::formatted (
-                        "\n\xe2\x9a\xa0 F1/F2/F3 %+.1f / %+.1f / %+.1f st",
-                        r.bandShiftSt[0], r.bandShiftSt[1], r.bandShiftSt[2])
+        // ---- v0.29.0 measurement report ------------------------------
+        // Say what was actually compared, so the number above can be
+        // trusted or distrusted on evidence rather than on faith.
+        static const char* vw[5] = { "A", "I", "U", "E", "O" };
+        if (r.vowelsMatched > 0)
+        {
+            juce::String vs;
+            for (int v = 0; v < 5; ++v)
+                if (r.vowelUsed[v])
+                {
+                    if (vs.isNotEmpty()) vs << "/";
+                    vs << vw[v];
+                }
+            line += juce::String::fromUTF8 ("\n母音一致: ") + vs
+                  + juce::String::formatted (" (%d)   ", r.vowelsMatched)
+                  + juce::String::fromUTF8 ("ばらつき ")
+                  + juce::String::formatted ("%.1f st", r.agreementSt)
                   + juce::String::fromUTF8 (
-                        " — 3帯域の要求量がばらばらです(録音内容が違う可能性)。"
+                        "\nAEIOU Character を Custom に設定し、母音別の差を書き込みました");
+        }
+        else if (r.fellBack)
+        {
+            line += juce::String::fromUTF8 (
+                        "\n母音別データが無いため全体平均で一致させました");
+        }
+        // A formant at or below the fundamental leaves no trace in the
+        // spectrum, so it cannot be matched at all. Tell the user which
+        // band that happened to and why, instead of silently moving it.
+        {
+            juce::String un;
+            for (int i = 0; i < 3; ++i)
+                if (r.bandRel[i] < MatchingEngine::kMinRel)
+                {
+                    if (un.isNotEmpty()) un << "/";
+                    un << "F" << (i + 1);
+                }
+            if (un.isNotEmpty())
+                line << juce::String::fromUTF8 ("\n") << un
+                     << juce::String::fromUTF8 (
+                            " は基音に近すぎて測定できないため個別補正せず、"
+                            "全体のFormantに任せています");
+        }
+        if (r.lowConfidence)
+            line += juce::String::fromUTF8 (
+                        "\n\xe2\x9a\xa0 一致の根拠が不足しています(録音内容が違う可能性)。"
                         "\nターゲットを再生しながら同じ内容を録音し直すと精度が上がります"
                         "(With target play)。");
         status (juce::String::fromUTF8 ("MATCH 完了 — ") + line + "\n" + setSummary());
