@@ -1,6 +1,7 @@
 // Offline verification harness for PsolaEngine (v0.2 features included).
 #include "../dsp/PsolaEngine.h"
 #include "../dsp/VoiceAnalyzer.h"
+#include "../dsp/MatchingEngine.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -518,6 +519,233 @@ int main()
         std::printf ("analyzer sweep : f0=%.1f  spread=%.2f st (exp > vowel's)\n",
                      ps.f0Hz, ps.f0SpreadSt);
     }
+
+    // ==== v0.29.0: vowel-matched Matching ====
+    // Everything here is checked against KNOWN formants. The v0.28.4
+    // estimator was never measured this way, which is how a 4.8 st F2 error
+    // at high pitch went unnoticed and ended up driving Auto-Set.
+    std::puts ("\n== Matching (vowel-matched, v0.29.0) ==");
+    int mFail = 0;
+    {
+        // adult-male reference vowels, order A I U E O (the AEIOU map order)
+        static const double VF[5][3] = {
+            { 775.0, 1200.0, 2500.0 }, { 285.0, 2200.0, 3000.0 },
+            { 350.0, 1250.0, 2200.0 }, { 480.0, 1900.0, 2500.0 },
+            { 500.0,  850.0, 2600.0 } };
+        static const char* VN[5] = { "A", "I", "U", "E", "O" };
+
+        auto utter = [&] (double f0, double scale, const char* which)
+        {
+            std::vector<float> out;
+            for (const char* p = which; *p; ++p)
+            {
+                const int v = *p - '0';
+                auto seg = makeVowelF (f0, VF[v][0]*scale, VF[v][1]*scale,
+                                       VF[v][2]*scale, 1.2);
+                out.insert (out.end(), seg.begin(), seg.end());
+                out.insert (out.end(), (size_t) (0.12*FS), 0.0f);
+            }
+            return out;
+        };
+
+        // (a) per-formant accuracy against ground truth, for the bands the
+        //     signal can actually carry (reliability >= kMinRel)
+        {
+            std::vector<double> errs;
+            for (double f0 : { 110.0, 150.0, 220.0, 300.0 })
+                for (int v = 0; v < 5; ++v)
+                {
+                    auto s2 = makeVowelF (f0, VF[v][0], VF[v][1], VF[v][2], 2.0);
+                    const auto p = VoiceAnalyzer::analyze (s2.data(), (int) s2.size(), FS);
+                    if (! p.valid()) continue;
+                    for (int b = 0; b < 3; ++b)
+                    {
+                        if (VoiceAnalyzer::reliability ((float) VF[v][b], (float) f0)
+                                < MatchingEngine::kMinRel) continue;
+                        errs.push_back (std::abs (12.0*std::log2 (p.F[b]/VF[v][b])));
+                    }
+                }
+            std::sort (errs.begin(), errs.end());
+            // The profile is a MEDIAN over many frames and vowels, so the
+            // median error is the statistic that actually reaches Matching;
+            // the tail is reported for information. Residual outliers are
+            // all F1 just above the reliability floor (F/f0 ~ 3), where the
+            // envelope peak can still snap onto a harmonic.
+            const double med = errs.empty() ? 9.9 : errs[errs.size()/2];
+            const double p90 = errs.empty() ? 9.9 : errs[(size_t) (errs.size()*0.9)];
+            const bool ok = ! errs.empty() && errs.size() > 30 && med < 0.6 && p90 < 2.0;
+            std::printf ("formant accuracy (reliable bands): median %.2f  p90 %.2f  worst %.2f st"
+                         " over %zu checks  %s\n",
+                         med, p90, errs.back(), errs.size(), ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+        }
+
+        // (b) the reliability law itself: nothing below the fundamental is
+        //     ever trusted, everything well above it is
+        {
+            const bool ok = VoiceAnalyzer::reliability (300.0f, 350.0f) == 0.0f
+                         && VoiceAnalyzer::reliability (600.0f, 352.0f) == 0.0f
+                         && VoiceAnalyzer::reliability (2000.0f, 150.0f) == 1.0f
+                         && VoiceAnalyzer::reliability (500.0f, 100.0f) == 1.0f
+                         && VoiceAnalyzer::reliability (100.0f, 0.0f) == 0.0f;
+            std::printf ("reliability law (unmeasurable below ~2x f0): %s\n", ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+        }
+
+        // (c) per-vowel detection: each vowel must be found and land near its
+        //     own formants, not the recording's average
+        {
+            auto x = utter (150.0, 1.0, "01234");
+            const auto p = VoiceAnalyzer::analyze (x.data(), (int) x.size(), FS);
+            int found = 0; double worst = 0.0;
+            for (int v = 0; v < 5; ++v)
+            {
+                if (! p.vow[v].valid()) continue;
+                ++found;
+                // F2 separates the vowels most strongly; check that one
+                worst = std::max (worst, std::abs (12.0*std::log2 (p.vow[v].F[1]/VF[v][1])));
+            }
+            const bool ok = found >= 4 && worst < 3.0;
+            std::printf ("per-vowel detection: %d/5 vowels, worst F2 err %.2f st  %s\n",
+                         found, worst, ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+            for (int v = 0; v < 5; ++v)
+                std::printf ("   /%s/ n=%-4d F=%5.0f/%5.0f/%5.0f (true %4.0f/%4.0f/%4.0f)\n",
+                             VN[v], p.vow[v].frames, p.vow[v].F[0], p.vow[v].F[1], p.vow[v].F[2],
+                             VF[v][0], VF[v][1], VF[v][2]);
+        }
+
+        // (d) the headline case: recover a KNOWN vocal-tract shift when the
+        //     target sits at a pitch where its own F1 is unmeasurable
+        {
+            struct { const char* name; double f0a, sa, f0b, sb;
+                     const char* va; const char* vb; bool matched; } cs[] = {
+                { "same vowels, 150->150, x1.15", 150.0, 1.00, 150.0, 1.15, "01234", "01234", true },
+                { "same vowels, 150->352, x1.15", 150.0, 1.00, 352.0, 1.15, "01234", "01234", true },
+                { "same vowels, 150->300, x1.00", 150.0, 1.00, 300.0, 1.00, "01234", "01234", true },
+                { "same vowels, 150->200, x0.87", 150.0, 1.00, 200.0, 0.87, "01234", "01234", true },
+                { "same vowels, 220->352, x1.30", 220.0, 1.00, 352.0, 1.30, "01234", "01234", true },
+                { "diff vowels, 150->352, x1.15", 150.0, 1.00, 352.0, 1.15, "34",    "24",    false },
+                { "diff vowels, 150->300, x1.20", 150.0, 1.00, 300.0, 1.20, "13",    "24",    false },
+            };
+            double worstMatched = 0.0; int unflagged = 0;
+            for (const auto& c : cs)
+            {
+                auto A = utter (c.f0a, c.sa, c.va);
+                auto B = utter (c.f0b, c.sb, c.vb);
+                const auto p1 = VoiceAnalyzer::analyze (A.data(), (int) A.size(), FS);
+                const auto p2 = VoiceAnalyzer::analyze (B.data(), (int) B.size(), FS);
+                const auto r  = MatchingEngine::autoSet (p1, p2);
+                const double truth = 12.0*std::log2 (c.sb/c.sa);
+                const double err = std::abs (r.formant - truth);
+                // Contract: when the two recordings share their content the
+                // shift must be recovered tightly; when they do not, the
+                // engine is allowed to miss but MUST flag it rather than
+                // quietly hand back a wrong number.
+                if (c.matched) worstMatched = std::max (worstMatched, err);
+                else if (err > 1.5 && ! r.lowConfidence) ++unflagged;
+                std::printf ("   %-30s truth %+5.2f got %+5.2f (err %.2f) vowels=%d MAD=%.2f%s\n",
+                             c.name, truth, r.formant, err, r.vowelsMatched, r.agreementSt,
+                             r.lowConfidence ? "  [flagged]" : "");
+            }
+            const bool ok = worstMatched < 0.5 && unflagged == 0;
+            std::printf ("global formant recovery: worst matched-content %.2f st, "
+                         "unflagged bad results %d  %s\n",
+                         worstMatched, unflagged, ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+        }
+
+        // (e) an unmeasurable band must NOT be trimmed. This is the reported
+        //     bug: f1shift used to rail at its +-3 st clamp chasing a target
+        //     F1 that was never observable in the first place.
+        {
+            auto A = utter (150.0, 1.00, "01234");
+            auto B = utter (352.0, 1.15, "01234");
+            const auto p1 = VoiceAnalyzer::analyze (A.data(), (int) A.size(), FS);
+            const auto p2 = VoiceAnalyzer::analyze (B.data(), (int) B.size(), FS);
+            const auto r  = MatchingEngine::autoSet (p1, p2);
+            float f1shift = 999.0f;
+            for (int i = 0; i < r.count; ++i)
+                if (std::string (r.changes[i].id) == "f1shift") f1shift = r.changes[i].value;
+            // target f0 352: every vowel's F1 is below 2 x f0, so F1 is
+            // unmeasurable and its trim must stay at zero
+            const bool ok = r.bandRel[0] < MatchingEngine::kMinRel
+                         && std::abs (f1shift) < 0.01f;
+            std::printf ("unmeasurable F1 is left alone: bandRel[F1]=%.2f f1shift=%+.2f  %s\n",
+                         r.bandRel[0], f1shift, ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+        }
+
+        // (f) AEIOU map output: in range, finite, and only for vowels that
+        //     were really compared
+        {
+            auto A = utter (150.0, 1.00, "01234");
+            auto B = utter (352.0, 1.15, "01234");
+            const auto p1 = VoiceAnalyzer::analyze (A.data(), (int) A.size(), FS);
+            const auto p2 = VoiceAnalyzer::analyze (B.data(), (int) B.size(), FS);
+            const auto r  = MatchingEngine::autoSet (p1, p2);
+            bool ok = r.count <= MatchingEngine::kMax;
+            int nVa = 0; bool sawCustom = false, sawAdapt = false;
+            for (int i = 0; i < r.count; ++i)
+            {
+                const std::string id = r.changes[i].id;
+                const float v = r.changes[i].value;
+                if (! std::isfinite (v)) ok = false;
+                if (id.rfind ("va_", 0) == 0)
+                {
+                    ++nVa;
+                    const int b = id.back() - '1';
+                    const float cap = id[5] == 'f' ? MatchingEngine::kVowelClamp[b]
+                                                   : MatchingEngine::kVowelGainClamp;
+                    if (std::abs (v) > cap + 1.0e-4f) ok = false;
+                }
+                if (id == "vcharacter" && v == 8.0f) sawCustom = true;
+                if (id == "vadapt"     && v == 1.0f) sawAdapt  = true;
+            }
+            ok = ok && nVa == 30 && sawCustom && sawAdapt;
+            std::printf ("AEIOU map written: %d va_* ids, custom=%d adapt=%d, all in range  %s\n",
+                         nVa, (int) sawCustom, (int) sawAdapt, ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+        }
+
+        // (g) backward compatibility: a profile with no per-vowel table (a
+        //     built-in catalog target, or a .vmprofile from before v0.29.0)
+        //     must still match, take the global path, and NOT cry wolf
+        {
+            VoiceProfile me{}, tgt{};
+            me.f0Hz = 146.0f; me.f0SpreadSt = 2.2f; me.voicedFrames = 200;
+            me.F[0] = 560.0f; me.F[1] = 1500.0f; me.F[2] = 2600.0f;
+            me.rel[0] = me.rel[1] = me.rel[2] = 1.0f;
+            tgt = me; tgt.f0Hz = 215.0f;
+            tgt.F[0] = 644.0f; tgt.F[1] = 1725.0f; tgt.F[2] = 2990.0f;   // x1.15
+            const auto r = MatchingEngine::autoSet (me, tgt);
+            const bool ok = r.fellBack && ! r.lowConfidence
+                         && std::abs (r.formant - 2.42f) < 0.5f;
+            std::printf ("no-vowel-table fallback: formant %+.2f st (exp +2.42) "
+                         "fellBack=%d lowConf=%d  %s\n",
+                         r.formant, (int) r.fellBack, (int) r.lowConfidence,
+                         ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+        }
+
+        // (h) degenerate inputs must not produce non-finite parameters
+        {
+            VoiceProfile a{}, b{};
+            bool ok = MatchingEngine::autoSet (a, b).count == 0;   // both invalid
+            a.f0Hz = 150.0f; a.voicedFrames = 100;
+            a.F[0] = a.F[1] = a.F[2] = 0.0f;                       // zero formants
+            a.rel[0] = a.rel[1] = a.rel[2] = 1.0f;
+            b = a; b.f0Hz = 300.0f;
+            const auto r = MatchingEngine::autoSet (a, b);
+            for (int i = 0; i < r.count; ++i)
+                if (! std::isfinite (r.changes[i].value)) ok = false;
+            if (! std::isfinite (r.formant) || ! std::isfinite (r.agreementSt)) ok = false;
+            std::printf ("degenerate profiles stay finite: %s\n", ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+        }
+    }
+    std::printf ("Matching checks: %s (%d failure(s))\n",
+                 mFail == 0 ? "ALL PASS" : "FAILURES", mFail);
 
     // ==== Natural Air v2 (band-adaptive comb) ====
     std::puts ("\n== Natural Air v2 (band-adaptive comb) ==");
