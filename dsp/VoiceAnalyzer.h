@@ -27,16 +27,26 @@
 //     ordering constraints and a soft range prior, so no formant can be
 //     forced onto an edge.
 //
-// The other half of the rewrite is RELIABILITY. A formant sitting at or
-// below the fundamental leaves no trace in the spectrum: at f0 = 352 Hz the
-// /i/ and /u/ F1 (285-350 Hz) is simply not measurable, and every estimator
-// tested "recovers" it with a large positive bias, because the lowest thing
-// it can find is the fundamental itself. Rather than emit a confident-looking
-// number, each band now carries rel[] in 0..1 derived from F/f0, and the
-// Matching stage weights by it. This is a property of the SIGNAL, computed
-// before the value is known -- not a guard that inspects an output and
-// decides it looks wrong (two of those have already been tried and withdrawn;
-// they misfire on voices whose formants genuinely are unusual).
+// The other half of the rewrite is RELIABILITY, and it is about
+// IDENTIFIABILITY rather than about a formant being "missing". A voiced
+// spectrum only samples the vocal-tract resonance curve at multiples of f0.
+// When f0 is 352 Hz the samples sit at 352, 704, 1056 Hz -- so a first
+// resonance anywhere in roughly 250-500 Hz fits those samples about equally
+// well, and the estimator cannot say which. It does not mean the speaker has
+// no F1 (every vocal tract has one), nor that F1 must lie below f0. It means
+// F1's POSITION is not recoverable from this recording, and every estimator
+// tested returns one anyway, biased toward the lowest thing present.
+//
+// (F0 above F1 is, separately, entirely possible -- source and filter are
+// independent mechanisms, which is why sopranos sing above the F1 of close
+// vowels. It is just not something this data can be used to establish.)
+//
+// So each band carries rel[] in 0..1 derived from F/f0 -- how densely the
+// harmonics sample that region -- and the Matching stage weights by it. This
+// is a property of the SIGNAL, computed before the value is known: not a
+// guard that inspects an output and decides it looks wrong (two of those have
+// already been tried and withdrawn; they misfire on voices whose formants
+// genuinely are unusual).
 #pragma once
 #include "PsolaEngine.h"
 #include <vector>
@@ -88,7 +98,7 @@ public:
     static constexpr float kPreEmphDb = 6.0f; // dB per octave, above kPreEmphF0
     static constexpr float kPreEmphF0 = 100.0f;
 
-    // A formant is only measurable when enough harmonics fall around it.
+    // A formant can only be LOCATED when enough harmonics sample it.
     // Measured on synthetic vowels with known formants (offline_test
     // "formant accuracy"): the median error over all bands is 0.23 st, but
     // every outlier above 1.5 st is an F1 whose F/f0 ratio sits between 2.6

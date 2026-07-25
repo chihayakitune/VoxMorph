@@ -13,10 +13,13 @@
 //     demanded +7.0 / -7.3 / -4.1 st; their average (-1.5 st) described
 //     nothing, and f1shift railed against its +-3 st clamp trying to make up
 //     the difference -- exactly the "F1 never reaches the target" symptom.
-//  2. Formants at or below the fundamental cannot be measured at all. The
-//     target sits at f0 = 352 Hz, where /i/ and /u/ have their F1 (285-350 Hz)
-//     underneath the first harmonic. The old code matched against those
-//     invented numbers with full confidence.
+//  2. A formant's position is only identifiable where the harmonics sample it
+//     densely enough. The target sits at f0 = 352 Hz (confirmed by plain
+//     autocorrelation, 60/60 frames, and by the 176 Hz line being 32 dB down,
+//     so this is not an octave error), which puts its lowest spectral samples
+//     at 352/704/1056 Hz -- a first resonance anywhere from ~250 to ~500 Hz
+//     fits them equally well. The old code matched against whatever number
+//     fell out, with full confidence.
 //
 // So: compare each vowel with the SAME vowel, weight every comparison by how
 // measurable that band actually was (VoiceAnalyzer::reliability), and take a
@@ -118,7 +121,7 @@ public:
     static constexpr float kPitchBias  = 1.0f;    // st below the plain F0 match
     static constexpr float kRangeBoost = 1.15f;   // intonation compensation
 
-    // A band only contributes when both sides could measure it this well.
+    // A band only contributes when both sides could LOCATE it this well.
     static constexpr float kMinRel = 0.25f;
     // Weight of each band as a VOCAL TRACT LENGTH indicator. F1 and F2 move
     // ~5.9 st (sd) across the vowel space against F3's ~1.7 st, so any
