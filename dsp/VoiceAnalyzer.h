@@ -117,9 +117,29 @@ public:
                 // a strong first harmonic is mistaken for F1 on higher voices
                 const double lo = fi == 0 ? std::max (loR[0], f0 * 1.35) : loR[fi];
                 const int a = binOf (lo), b = binOf (std::min (hiR[fi], fs * 0.45));
-                int pk = a; double pv = env[(size_t) a];
-                for (int k = a + 1; k <= b; ++k)
-                    if (env[(size_t) k] > pv) { pv = env[(size_t) k]; pk = k; }
+
+                // A formant is a LOCAL MAXIMUM of the envelope, so look for
+                // one first (same rule PsolaEngine's own formant tracker
+                // uses). Taking the plain maximum over [a, b] returns the
+                // left edge whenever the envelope just decays across the
+                // band -- which happens on high voices whose true F1 sits
+                // below the search floor. F1 then reads back as exactly
+                // 1.35 x f0, and anything matching against that profile
+                // drags the converted F1 down next to the converted F0.
+                // Fall back to the range maximum only if there is no
+                // interior peak at all, so nothing gets worse than before.
+                int pk = -1; double pv = 0.0;
+                for (int k = a + 1; k < b; ++k)
+                    if (env[(size_t) k] >= env[(size_t) k - 1]
+                        && env[(size_t) k] >= env[(size_t) k + 1]
+                        && env[(size_t) k] > pv)
+                    { pv = env[(size_t) k]; pk = k; }
+                if (pk < 0)
+                {
+                    pk = a; pv = env[(size_t) a];
+                    for (int k = a + 1; k <= b; ++k)
+                        if (env[(size_t) k] > pv) { pv = env[(size_t) k]; pk = k; }
+                }
                 Fi[fi] = (float) (pk * fs / N);
                 Li[fi] = (float) (10.0 * std::log10 (pv + 1.0e-20));
             }

@@ -28,6 +28,16 @@ inline const SampleTargetEntry* getSampleTargets (int& count)
     // (>= 15 frames + F0 > 40 Hz). Values below are typical mid-range
     // adult female (Standard), softer/lower (Warm), and a bright/young
     // profile (Bright); they cover the space Auto-Set actually reacts to.
+    //
+    // NOTE on tiltDb: VoiceAnalyzer defines it as
+    //     10 * log10(energy 60-1000 Hz / energy 2000-8000 Hz)
+    // which is strongly POSITIVE for speech (~+8 on a synthetic vowel,
+    // higher on real voices) -- it is not a small +-3 dB "slope". The
+    // v0.28.0 values here were written on that wrong scale, so Auto-Set's
+    // 0.25 * (target - mine) always railed against its -4 dB clamp and
+    // pushed the voice to maximum brightness no matter which target was
+    // picked. These are on the measured scale, and only their RELATIVE
+    // order matters to matching.
     static const SampleTargetEntry list[] =
     {
         { "feminine_standard", "Feminine Standard", "自然な女性声",
@@ -35,32 +45,32 @@ inline const SampleTargetEntry* getSampleTargets (int& count)
             /* spread */ 2.4f,
             /* F      */ { 700.0f, 2050.0f, 2800.0f },
             /* L      */ {  0.0f,   -3.5f,   -6.0f },
-            /* tilt   */ -1.5f,
+            /* tilt   */ 13.0f,
             /* frames */ 240 }
         },
         { "feminine_bright", "Feminine Bright", "明るい女性声",
           { 240.0f, 3.0f,
             { 730.0f, 2200.0f, 3000.0f },
             {  0.0f,  -2.5f,   -5.0f  },
-            -0.5f, 240 }
+            10.0f, 240 }
         },
         { "feminine_warm", "Feminine Warm", "柔らかい女性声",
           { 195.0f, 1.9f,
             { 680.0f, 1900.0f, 2650.0f },
             {  0.0f,  -4.0f,   -7.0f  },
-            -3.0f, 240 }
+            17.0f, 240 }
         },
         { "youthful", "Youthful", "幼めの声",
           { 260.0f, 3.2f,
             { 760.0f, 2350.0f, 3150.0f },
             {  0.0f,  -2.0f,   -4.5f  },
-             0.5f, 240 }
+             9.0f, 240 }
         },
         { "androgynous", "Androgynous", "中性的な声",
           { 175.0f, 2.1f,
             { 620.0f, 1750.0f, 2550.0f },
             {  0.0f,  -3.0f,   -6.5f  },
-            -2.0f, 240 }
+            15.0f, 240 }
         },
     };
     count = (int) (sizeof (list) / sizeof (list[0]));

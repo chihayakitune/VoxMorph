@@ -103,6 +103,18 @@ MatchingEngine::autoSet (const VoiceProfile& p1, const VoiceProfile& p2)
 
     float sh[3];
     for (int i = 0; i < 3; ++i) sh[i] = st (p2.F[i], p1.F[i]);
+
+    // Guard against a failed F1 measurement. VoiceAnalyzer searches F1 from
+    // max(250 Hz, 1.35 x f0) upward, so on a high-pitched voice whose real
+    // F1 is at or below that floor the estimate lands ON the floor and the
+    // profile claims "F1 is only ~1.4 x f0". Matching against such a profile
+    // aims the converted F1 right next to the converted F0 (both end up
+    // around the target's fundamental). A median F1 closer than 1.5 x its
+    // own f0 is not a plausible speech formant, so shift that band with the
+    // other two instead of trusting it.
+    const bool f1Unreliable = p1.F[0] < 1.5f * p1.f0Hz || p2.F[0] < 1.5f * p2.f0Hz;
+    if (f1Unreliable) sh[0] = 0.5f * (sh[1] + sh[2]);
+
     r.formant = cl ((sh[0] + sh[1] + sh[2]) / 3.0f, -24.0f, 24.0f);
     r.tilt    = cl (0.25f * (p2.tiltDb - p1.tiltDb), -4.0f, 4.0f);
     r.hifreq  = cl (p1.f0Hz * std::pow (2.0f, (p1.f0SpreadSt + 2.0f) / 12.0f),

@@ -668,8 +668,8 @@ public:
         addAndMakeVisible (recBtn);
         addAndMakeVisible (myVoiceFileBtn);
         for (auto* b : { &playBtn, &saveTargetProfBtn, &saveMyVoiceProfBtn,
-                         &matchBtn, &savePresetBtn, &savePresetOkBtn,
-                         &savePresetCancelBtn })
+                         &resetAllBtn, &matchBtn, &savePresetBtn,
+                         &savePresetOkBtn, &savePresetCancelBtn })
             addAndMakeVisible (*b);
         recBtn.setTooltip (juce::String::fromUTF8 (
             "Records your microphone input for the CURRENT profile.\n"
@@ -682,6 +682,7 @@ public:
         recPlayChk.setTooltip (juce::String::fromUTF8 (
             "When checked, the target file plays while you record.\n"
             "チェックすると録音と同時にターゲットを再生します。"));
+        recPlayChk.setToggleState (true, juce::dontSendNotification);   // default ON
         addAndMakeVisible (recPlayChk);
 
         // TargetCharacter buttons: N built-in profiles + one "TargetFile"
@@ -764,6 +765,13 @@ public:
         saveMyVoiceProfBtn.setTooltip (juce::String::fromUTF8 (
             "Save your last analysed MyVoice as a .vmprofile.\n"
             "直前に測定/読込したMyVoiceを.vmprofileとして保存します。"));
+        resetAllBtn.setButtonText ("Reset All to Defaults");
+        resetAllBtn.setTooltip (juce::String::fromUTF8 (
+            "Resets every conversion parameter to its default, exactly like the "
+            "button on the PRESETS tab. Locked parameters keep their values and "
+            "it is one Undo step.\n"
+            "全ての変換パラメータを初期値に戻します(PRESETSタブの同名ボタンと同じ動作)。"
+            "ロック中の項目は保持され、Undoで元に戻せます。"));
         matchBtn.setButtonText ("MATCH");
         matchBtn.setTooltip (juce::String::fromUTF8 (
             "Auto-Set: derive parameters from the Current -> Target difference. "
@@ -782,8 +790,11 @@ public:
 
         recBtn.onClick = [this]
         {
-            if (recPlayChk.getToggleState() && ! startPlayForCapture())
-                return;
+            // "With target play" is a convenience, not a precondition: the
+            // built-in Characters and .vmprofile targets carry no audio, so
+            // recording must still go ahead when there is nothing to play.
+            if (recPlayChk.getToggleState())
+                startPlayForCapture();
             proc.capFromOutput = false;
             startCapture (recBtn, waitingCapture);
         };
@@ -794,6 +805,7 @@ public:
         };
         saveTargetProfBtn.onClick   = [this] { saveTargetProfile(); };
         saveMyVoiceProfBtn.onClick  = [this] { saveMyVoiceProfile(); };
+        resetAllBtn.onClick         = [this] { resetAllParameters(); };
         matchBtn.onClick      = [this] { doMatch(); };
         savePresetBtn.onClick = [this] { showSavePreset (true); };
         savePresetOkBtn.onClick     = [this] { savePreset(); };
@@ -859,9 +871,14 @@ public:
         }
         r.removeFromTop (4);
         auto vopts = r.removeFromTop (28);
-        durBox.setBounds             (vopts.removeFromLeft (72) .withHeight (26));
-        recPlayChk.setBounds         (vopts.removeFromLeft (150).withHeight (26).translated (8, 0));
-        saveMyVoiceProfBtn.setBounds (vopts.removeFromLeft (140).withHeight (26).translated (12, 0));
+        durBox.setBounds (vopts.removeFromLeft (72).withHeight (26));
+        vopts.removeFromLeft (8);
+        recPlayChk.setBounds (vopts.removeFromLeft (140).withHeight (26));
+        vopts.removeFromLeft (10);
+        saveMyVoiceProfBtn.setBounds (vopts.removeFromLeft (
+            std::min (130, std::max (90, vopts.getWidth() / 2))).withHeight (26));
+        vopts.removeFromLeft (8);
+        resetAllBtn.setBounds (vopts.withHeight (26));   // takes what's left
         p1Lbl.setBounds (r.removeFromTop (32).withTrimmedLeft (2));
 
         r.removeFromTop (6);
@@ -908,16 +925,14 @@ private:
         b.setButtonText ("REC...");   // short enough for the square tile
     }
 
-    bool startPlayForCapture()
+    // Starts target playback alongside a capture. Built-in Characters and
+    // .vmprofile targets have no audio, so this is simply a no-op there --
+    // the recording itself always proceeds.
+    void startPlayForCapture()
     {
-        if (proc.prevLen.load() <= 0)
-        {
-            status (juce::String::fromUTF8 ("ターゲット音声を読み込んでから使ってください。"));
-            return false;
-        }
+        if (proc.prevLen.load() <= 0) return;
         proc.prevPos = 0;
         playStartedByCapture = true;
-        return true;
     }
 
     void stopPlayIfStartedByCapture()
@@ -1254,6 +1269,36 @@ private:
         });
     }
 
+    // Same behaviour as the PRESETS tab's "Reset All to Defaults": every
+    // parameter back to its default in ONE undo step, locked parameters
+    // untouched. Kept here (rather than shared) so this stays a plain UI
+    // action -- PresetStore extraction is a Phase 2+ item.
+    void resetAllParameters()
+    {
+        int kept = 0;
+        proc.history.group ([&]
+        {
+            for (auto* p : proc.getParameters())
+                if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
+                {
+                    if (proc.isParamLocked (rp->paramID)) { ++kept; continue; }
+                    rp->beginChangeGesture();
+                    rp->setValueNotifyingHost (rp->getDefaultValue());
+                    rp->endChangeGesture();
+                }
+        });
+        auto msg = juce::String::fromUTF8 ("全パラメータを初期値に戻しました");
+        if (kept > 0)
+            msg += juce::String::fromUTF8 ("(") + juce::String (kept)
+                 + juce::String::fromUTF8 ("項目はロック保持)");
+        status (msg + juce::String::fromUTF8 ("。Undoで戻せます。"));
+        // the match result no longer describes the current parameters
+        nSet = nLocked = 0;
+        refreshEstimated();
+        graph.repaint();
+        updateMatchStatus();
+    }
+
     void saveTargetProfile()
     {
         saveProfileImpl (prof2, "Target Profile",
@@ -1446,6 +1491,7 @@ private:
     juce::TextButton playBtn { "Play" },
                      saveTargetProfBtn  { "Save Profile..." },
                      saveMyVoiceProfBtn { "Save Profile..." },
+                     resetAllBtn { "Reset All to Defaults" },
                      matchBtn { "MATCH" }, savePresetBtn { "SAVE PRESET" },
                      savePresetOkBtn { "Save" }, savePresetCancelBtn { "Cancel" };
     juce::TextEditor saveNameEdit;
