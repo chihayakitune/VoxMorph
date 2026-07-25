@@ -223,19 +223,7 @@ public:
                 mag[(size_t) k] = (double) re[(size_t) k] * re[(size_t) k]
                                 + (double) im[(size_t) k] * im[(size_t) k];
 
-            // ---- log spectrum with a +6 dB/oct tilt correction, mirrored to
-            // a real EVEN sequence so the forward FFT serves both directions
-            // (for real-even data the inverse DFT is the forward DFT / N).
-            for (int k = 0; k <= NB; ++k)
-            {
-                const double hz = (double) k * fs / N;
-                const double lift = kPreEmphDb * std::log2 (std::max (hz, (double) kPreEmphF0)
-                                                           / (double) kPreEmphF0);
-                A[(size_t) k] = (float) (10.0 * std::log10 (mag[(size_t) k] + 1.0e-20) + lift);
-            }
-            for (int k = NB + 1; k < N; ++k) A[(size_t) k] = A[(size_t) (N - k)];
-
-            trueEnvelope (A.data(), Acur.data(), V.data(), re.data(), im.data(), N, f0, fs);
+            harmonicEnvelope (mag.data(), NB, N, fs, f0, V.data(), Acur.data());
 
             // ---- formant candidates. The ASSIGNMENT is deferred: which
             // peak is F1/F2/F3 depends on a range prior, and that prior has
@@ -281,22 +269,26 @@ public:
         // are re-used, so the expensive envelope work is not repeated.
         {
             const size_t nf = f0v.size();
-            auto runPass = [&] (float priorW, float refScale,
+            auto runPass = [&] (float refScale,
                                 std::vector<float>* Fo, std::vector<float>* Lo)
             {
                 for (int b = 0; b < 3; ++b) { Fo[b].clear(); Lo[b].clear(); }
+                float prev[3] = { -1.0f, -1.0f, -1.0f };
                 for (size_t i = 0; i < nf; ++i)
                 {
                     float Fi[3], Li[3];
                     if (! assignFormants (&pkF[i * kMaxPeaks], &pkL[i * kMaxPeaks],
-                                          pkN[i], priorW, refScale, Fi, Li))
+                                          pkN[i], refScale, prev, Fi, Li))
                     { for (int b = 0; b < 3; ++b) { Fo[b].push_back (0.0f); Lo[b].push_back (0.0f); } }
                     else
-                    { for (int b = 0; b < 3; ++b) { Fo[b].push_back (Fi[b]); Lo[b].push_back (Li[b]); } }
+                    {
+                        for (int b = 0; b < 3; ++b)
+                        { Fo[b].push_back (Fi[b]); Lo[b].push_back (Li[b]); prev[b] = Fi[b]; }
+                    }
                 }
             };
             std::vector<float> F1p[3], L1p[3];
-            runPass (0.25f, 1.0f, F1p, L1p);
+            runPass (1.0f, F1p, L1p);
             // scale from the two bands that survive on real speech
             std::vector<float> r2, r3;
             for (size_t i = 0; i < nf; ++i)
@@ -316,7 +308,7 @@ public:
             // published-formant cases: 3/5 correct with no adaptation,
             // 5/5 at 0.5 damping, and undamped it starts overshooting.
             out.tractScale = std::clamp (1.0f + 0.5f * (sc - 1.0f), 0.85f, 1.25f);
-            runPass (1.0f, out.tractScale, Fv, Lv);
+            runPass (out.tractScale, Fv, Lv);
         }
         // drop frames the final pass could not assign
         {
@@ -392,39 +384,82 @@ private:
     // the reference), for frames whose F1 could not be located
     static constexpr float kAnchorF2[5] = { 0.354f, 0.741f, 0.378f, 0.672f, 0.152f };
 
-    // Iterative cepstral "true envelope": lifter, then clamp the result back
-    // up to the original spectrum and repeat, so the envelope converges onto
-    // the harmonic peaks instead of the mean of peak and valley.
-    static void trueEnvelope (const float* A, float* Acur, float* V,
-                              float* re, float* im, int N, float f0, double fs)
+    // Spectral envelope, IDENTICAL IN METHOD to the one PsolaEngine uses per
+    // grain in the realtime path (spectralProcess): take one peak per
+    // harmonic, connect them by straight lines in the log domain, then smooth
+    // lightly. Two reasons to use the engine's own method here rather than
+    // something of our own:
+    //
+    //  * It is structurally immune to the failure the cepstral version had.
+    //    It samples exactly ONE point per harmonic, so it cannot follow
+    //    individual harmonics no matter what the pitch is -- the cepstral
+    //    order had to be tuned to avoid that, and got it wrong.
+    //  * Matching measures the voice, then hands parameters to the engine,
+    //    which warps that same envelope. Measuring with the engine's own
+    //    estimator means any systematic bias appears on BOTH sides and
+    //    largely cancels, instead of being a discrepancy between what
+    //    Matching thinks it set and what the engine actually does.
+    //
+    // This is a copy of the method, not a call into it: PsolaEngine's version
+    // is per-grain, resampled-domain and stateful, and the realtime path must
+    // not be disturbed. Keep the two in step if either changes.
+    static void harmonicEnvelope (const double* mag, int NB, int N, double fs,
+                                  float f0, float* env, float* tmp)
     {
-        const int K = std::max (4, (int) (fs / (kCepDiv * f0)));
-        for (int i = 0; i < N; ++i) Acur[i] = A[i];
-        for (int it = 0; it < kCepIters; ++it)
+        const double spacing = std::max (2.5, (double) f0 * N / fs);
+        int   pkB[512]; float pkV[512]; int np = 0;
+        for (double cb = spacing; cb < (double) (NB - 2) && np < 512; cb += spacing)
         {
-            for (int i = 0; i < N; ++i) { re[i] = Acur[i]; im[i] = 0.0f; }
-            PsolaEngine::fftForViz (re, im, N);          // == inverse * N
-            const float inv = 1.0f / (float) N;
-            for (int i = 0; i < N; ++i) re[i] *= inv;
-            for (int i = K + 1; i < N - K; ++i) re[i] = 0.0f;   // lifter
-            for (int i = 0; i < N; ++i) im[i] = 0.0f;
-            PsolaEngine::fftForViz (re, im, N);          // back to log-spectrum
-            for (int i = 0; i < N; ++i)
+            const int a = std::max (1, (int) (cb - 0.45 * spacing));
+            const int b = std::min (NB - 1, (int) (cb + 0.45 * spacing));
+            int bm = a; double vm = mag[(size_t) a];
+            for (int t = a + 1; t <= b; ++t)
+                if (mag[(size_t) t] > vm) { vm = mag[(size_t) t]; bm = t; }
+            pkB[np] = bm; pkV[np] = (float) std::log (vm + 1.0e-12);
+            ++np;
+        }
+        if (np >= 2)
+        {
+            int seg = 0;
+            for (int k = 0; k <= NB; ++k)
             {
-                V[i] = std::isfinite (re[i]) ? re[i] : A[i];
-                Acur[i] = std::max (A[i], V[i]);
+                float lv;
+                if (k <= pkB[0])         lv = pkV[0];
+                else if (k >= pkB[np-1]) lv = pkV[np-1];
+                else
+                {
+                    while (seg + 1 < np && pkB[seg + 1] < k) ++seg;
+                    const int a = pkB[seg], b = pkB[seg + 1];
+                    const float t = (float) (k - a) / (float) std::max (1, b - a);
+                    lv = pkV[seg] * (1.0f - t) + pkV[seg + 1] * t;
+                }
+                env[k] = lv;                       // kept in LOG domain (dB-like)
             }
         }
+        else
+            for (int k = 0; k <= NB; ++k) env[k] = (float) std::log (mag[(size_t) k] + 1.0e-12);
+
+        // light smoothing to remove the interpolation kinks (same 2 passes)
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            for (int k = 0; k <= NB; ++k)
+            {
+                const int a = std::max (0, k - 3), b = std::min (NB, k + 3);
+                double acc = 0.0;
+                for (int t = a; t <= b; ++t) acc += env[t];
+                tmp[k] = (float) (acc / (b - a + 1));
+            }
+            for (int k = 0; k <= NB; ++k) env[k] = tmp[k];
+        }
+        // `mag` is POWER here (the tilt and HNR stages downstream need it that
+        // way), so the envelope is ln(power); 10/ln(10) converts it to the
+        // same dB scale the levels used before.
+        for (int k = 0; k <= NB; ++k) env[k] *= 4.3429448f;
     }
 
-    // Joint F1/F2/F3 choice. Candidates are the envelope's local maxima;
-    // the winner maximizes peak prominence minus a soft log-distance prior,
-    // subject to ordering. Overlapping ranges are intentional: /u/ and /o/
-    // put F2 near 800 Hz while /a/ puts F1 there, and only the ordering
-    // constraint can separate those two readings.
-    // Envelope local maxima, parabolically refined, strongest-first is not
-    // needed -- they come out in frequency order and the assignment searches
-    // all combinations.
+    // Interior local maxima of the envelope, parabolically refined. Interior
+    // only: a point that is merely the largest value at the edge of a
+    // decaying envelope is not a resonance.
     static int extractPeaks (const float* V, int N, int NB, double fs,
                              float* outF, float* outL)
     {
@@ -444,72 +479,55 @@ private:
         return n;
     }
 
-    // Joint F1/F2/F3 choice over the cached peaks. The winner maximizes peak
-    // prominence minus a soft log-distance prior, subject to ordering.
-    // `refScale` re-centres that prior on this speaker's vocal tract and
-    // `priorW` scales its strength (pass 1 runs it weak, to estimate the
-    // scale in the first place). Overlapping ranges are intentional: /u/ and
-    // /o/ put F2 near 800 Hz while /a/ puts F1 there, and only the ordering
-    // constraint can separate those two readings.
+    // Formant selection, again the SAME RULE the realtime engine uses: the
+    // highest interior local maximum inside each band's search range, and if
+    // there is no interior maximum at all, keep the previous frame's value
+    // (or a default on the first frame) rather than pinning to a band edge.
+    //
+    // That fallback is the important part. The pre-v0.29.0 analyzer took the
+    // plain range maximum, which on a decaying envelope IS the range edge --
+    // that is how a target profile came to claim "F1 = 1.35 x f0". The engine
+    // never had that bug because it has always fallen back instead.
+    //
+    // Deliberately NOT carried over from the engine: its 0.7/0.3 inter-frame
+    // smoothing. That is right for a continuous audio stream and wrong here,
+    // where consecutive frames may be different vowels and get pooled into
+    // per-vowel statistics -- smoothing across a vowel boundary would blend
+    // two vowels into one measurement.
+    //
+    // `sc` scales the search ranges to this speaker's vocal tract, so a small
+    // tract's bright F2 (an anime voice can sit past 3 kHz) does not fall off
+    // the top of a box sized for an average adult.
     static bool assignFormants (const float* pf, const float* pl, int npk,
-                                float priorW, float refScale,
+                                float sc, const float* prev,
                                 float* Fout, float* Lout)
     {
-        constexpr float LO[3]  = { 200.0f,  550.0f, 1700.0f };
-        constexpr float HI[3]  = { 1100.0f, 3300.0f, 4600.0f };
-        constexpr float REF[3] = { 500.0f,  1500.0f, 2600.0f };
-        constexpr float WG[3]  = { 1.4f,    1.0f,    0.8f    };
-        constexpr float kProm  = 0.35f;
-        constexpr int   kMaxC  = 12;
-        if (npk < 3) return false;
-        const float sc = (std::isfinite (refScale) && refScale > 0.1f) ? refScale : 1.0f;
+        constexpr float loR[3]  = { 250.0f,  850.0f, 1900.0f };
+        constexpr float hiR[3]  = { 1000.0f, 2600.0f, 3800.0f };
+        constexpr float defR[3] = { 500.0f,  1500.0f, 2500.0f };
+        if (npk < 1) return false;
+        const float s = (std::isfinite (sc) && sc > 0.1f) ? sc : 1.0f;
 
-        float cf[3][kMaxC], cl[3][kMaxC];
-        int   nc[3] = { 0, 0, 0 };
-        float lmax = -1.0e30f;
-        for (int i = 0; i < npk; ++i) lmax = std::max (lmax, pl[i]);
-        for (int i = 0; i < npk; ++i)
-            for (int b = 0; b < 3; ++b)
+        for (int b = 0; b < 3; ++b)
+        {
+            const float lo = loR[b] * s, hi = hiR[b] * s;
+            int best = -1; float bv = -1.0e30f;
+            for (int i = 0; i < npk; ++i)
+                if (pf[i] >= lo && pf[i] <= hi && pl[i] > bv) { bv = pl[i]; best = i; }
+            if (best >= 0) { Fout[b] = pf[best]; Lout[b] = pl[best]; }
+            else
             {
-                // the SEARCH window scales with the speaker too, otherwise a
-                // small tract's F2 falls off the top of an average-sized box
-                const float lo = LO[b] * sc, hi = HI[b] * sc;
-                if (pf[i] >= lo && pf[i] <= hi && nc[b] < kMaxC)
-                { cf[b][nc[b]] = pf[i]; cl[b][nc[b]] = pl[i]; ++nc[b]; }
+                Fout[b] = (prev != nullptr && prev[b] > 0.0f) ? prev[b] : defR[b] * s;
+                Lout[b] = -60.0f;
             }
-        if (nc[0] == 0 || nc[1] == 0 || nc[2] == 0) return false;
-
-        float bestSc = -1.0e30f; int bi = -1, bj = -1, bk2 = -1;
-        for (int i = 0; i < nc[0]; ++i)
-            for (int j = 0; j < nc[1]; ++j)
-            {
-                if (cf[1][j] < 1.15f * cf[0][i]) continue;
-                for (int k = 0; k < nc[2]; ++k)
-                {
-                    if (cf[2][k] < 1.10f * cf[1][j]) continue;
-                    const float f[3] = { cf[0][i], cf[1][j], cf[2][k] };
-                    const float l[3] = { cl[0][i], cl[1][j], cl[2][k] };
-                    float s2 = 0.0f;
-                    for (int b = 0; b < 3; ++b)
-                    {
-                        const float lg = std::log2 (f[b] / (REF[b] * sc));
-                        s2 += kProm * (l[b] - lmax) / 6.0f - priorW * WG[b] * lg * lg;
-                    }
-                    if (s2 > bestSc) { bestSc = s2; bi = i; bj = j; bk2 = k; }
-                }
-            }
-        if (bi < 0) return false;
-        Fout[0] = cf[0][bi];  Lout[0] = cl[0][bi];
-        Fout[1] = cf[1][bj];  Lout[1] = cl[1][bj];
-        Fout[2] = cf[2][bk2]; Lout[2] = cl[2][bk2];
+        }
+        // same minimum spacing the engine enforces, so the three can never
+        // collapse onto one resonance
+        Fout[1] = std::max (Fout[1], Fout[0] + 150.0f * s);
+        Fout[2] = std::max (Fout[2], Fout[1] + 200.0f * s);
         return true;
     }
 
-    // Speaker-normalized vowel classification. Each recording is first
-    // recentred on its OWN median log-F1/F2 and mapped onto a reference
-    // geometry, so a small and a large speaker saying the same vowel land on
-    // the same anchor. Without this the target's whole vowel space shifts and
-    // every frame classifies one anchor over.
     // Vowel identity lives in (F1, F2). When F1 cannot be located -- which is
     // exactly what happens on a high-pitched target, the case this feature
     // exists for -- feeding the raw F1 in classifies on noise and scatters one
