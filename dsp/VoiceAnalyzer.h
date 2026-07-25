@@ -144,9 +144,17 @@ public:
         if (! std::isfinite (hnrDb)) return 0.0f;
         return std::clamp ((hnrDb - kHnrLo) / (kHnrHi - kHnrLo), 0.0f, 1.0f);
     }
+    // Harmonicity WEIGHTS rather than gates. Gating it outright is too harsh
+    // on real, quiet recordings: the user's takes read only +1.0..+1.5 dB in
+    // the F2 band, yet the engine's tracker and this one independently agree
+    // on F2 there to within 0.1 st, so there is real structure to use. A dead
+    // band still falls to the 0.3 floor and is out-voted by a clean one,
+    // while identifiability (density) remains a hard gate because that one
+    // is a statement about what the signal can possibly contain.
+    static constexpr float kHnrFloor = 0.3f;
     static float reliability (float F, float f0, float hnrDb)
     {
-        return density (F, f0) * harmonicity (hnrDb);
+        return density (F, f0) * (kHnrFloor + (1.0f - kHnrFloor) * harmonicity (hnrDb));
     }
     // kept for callers that only have the frequencies (built-in catalog)
     static float reliability (float F, float f0) { return density (F, f0); }
@@ -489,24 +497,39 @@ private:
     // that is how a target profile came to claim "F1 = 1.35 x f0". The engine
     // never had that bug because it has always fallen back instead.
     //
-    // Deliberately NOT carried over from the engine: its 0.7/0.3 inter-frame
-    // smoothing. That is right for a continuous audio stream and wrong here,
-    // where consecutive frames may be different vowels and get pooled into
-    // per-vowel statistics -- smoothing across a vowel boundary would blend
-    // two vowels into one measurement.
+    // The engine's 0.7/0.3 inter-frame smoothing is carried over too. It is
+    // what makes the tracker hold together on quiet, dark material: measured
+    // on the user's own recordings the engine reads F1/F2/F3 = 738/1672/2643
+    // where an unsmoothed per-frame estimate wanders, and on a 352 Hz target
+    // it reports a plausible 677 Hz F1 where taking each frame on its own
+    // returns 269 Hz -- below that recording's own fundamental.
     //
-    // `sc` scales the search ranges to this speaker's vocal tract, so a small
-    // tract's bright F2 (an anime voice can sit past 3 kHz) does not fall off
-    // the top of a box sized for an average adult.
+    // It does blur across vowel boundaries, which costs some per-vowel
+    // detail. That trade is worth it: a stable global measurement is what
+    // the formant conversion rides on, and the per-vowel table degrades
+    // gracefully (fewer vowels pass their frame count) rather than lying.
+    //
     static bool assignFormants (const float* pf, const float* pl, int npk,
                                 float sc, const float* prev,
                                 float* Fout, float* Lout)
     {
-        constexpr float loR[3]  = { 250.0f,  850.0f, 1900.0f };
-        constexpr float hiR[3]  = { 1000.0f, 2600.0f, 3800.0f };
+        // FIXED search ranges -- the same boxes for every speaker. An
+        // earlier cut scaled them by each speaker's own estimated tract size,
+        // which is self-defeating for matching: scaling A's boxes by 1.15 and
+        // B's by 1.00 absorbs exactly the difference the match is trying to
+        // measure, and drove the global shift toward zero.
+        //
+        // They are wider than the engine's (850-2600 for F2) because the
+        // engine only needs to place a warp point on the voice in front of
+        // it, while this has to measure voices of very different size against
+        // one another: an anime/high-female /i/ can put F2 past 3 kHz, well
+        // outside a box sized for an average adult.
+        constexpr float loR[3]  = { 200.0f,  700.0f, 1700.0f };
+        constexpr float hiR[3]  = { 1200.0f, 3400.0f, 4600.0f };
         constexpr float defR[3] = { 500.0f,  1500.0f, 2500.0f };
         if (npk < 1) return false;
-        const float s = (std::isfinite (sc) && sc > 0.1f) ? sc : 1.0f;
+        (void) sc;                       // ranges are deliberately not scaled
+        const float s = 1.0f;
 
         for (int b = 0; b < 3; ++b)
         {
@@ -514,12 +537,11 @@ private:
             int best = -1; float bv = -1.0e30f;
             for (int i = 0; i < npk; ++i)
                 if (pf[i] >= lo && pf[i] <= hi && pl[i] > bv) { bv = pl[i]; best = i; }
-            if (best >= 0) { Fout[b] = pf[best]; Lout[b] = pl[best]; }
-            else
-            {
-                Fout[b] = (prev != nullptr && prev[b] > 0.0f) ? prev[b] : defR[b] * s;
-                Lout[b] = -60.0f;
-            }
+            const float hz = best >= 0 ? pf[best]
+                           : ((prev != nullptr && prev[b] > 0.0f) ? prev[b] : defR[b] * s);
+            // same 0.7/0.3 tracking the engine applies to trackF[]
+            Fout[b] = (prev != nullptr && prev[b] > 0.0f) ? 0.7f * prev[b] + 0.3f * hz : hz;
+            Lout[b] = best >= 0 ? pl[best] : -60.0f;
         }
         // same minimum spacing the engine enforces, so the three can never
         // collapse onto one resonance
