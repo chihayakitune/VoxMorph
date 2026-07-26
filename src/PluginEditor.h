@@ -241,6 +241,337 @@ private:
     bool  known = false;
 };
 
+// ===========================================================================
+// Shared helpers (v0.30.0)
+// ===========================================================================
+
+// bilingual tooltip: English first, Japanese below, blank line between.
+// (VoxMorphEditor keeps its own private tip() for its existing call sites.)
+inline juce::String vmTip (const char* en, const char* jp)
+{
+    return juce::String::fromUTF8 (en) + "\n\n" + juce::String::fromUTF8 (jp);
+}
+
+// ---- presets --------------------------------------------------------------
+// One folder for every preset writer: the PRESETS tab, the MATCHING tab's
+// "SAVE PRESET" and the MAIN tab's preset bar all use this.
+inline juce::File voxMorphPresetDir()
+{
+    auto d = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                 .getChildFile ("VoxMorph").getChildFile ("Presets");
+    d.createDirectory();
+    return d;
+}
+
+inline juce::Array<juce::File> voxMorphPresetFiles()
+{
+    auto files = voxMorphPresetDir().findChildFiles (juce::File::findFiles, false, "*.vmpreset");
+    std::sort (files.begin(), files.end(),
+               [] (const juce::File& a, const juce::File& b)
+               { return a.getFileName().compareIgnoreCase (b.getFileName()) < 0; });
+    return files;
+}
+
+// Apply a .vmpreset to the processor: ONE undo step, locked parameters keep
+// their current value, and parameters missing from the file fall back to
+// their default (the semantics PresetPanel has had since v0.19.0 — this is
+// that code, lifted out so the MAIN tab's preset bar behaves identically).
+inline bool voxMorphApplyPreset (VoxMorphProcessor& proc, const juce::File& file,
+                                 int& applied, int& lockedKept)
+{
+    applied = 0;  lockedKept = 0;
+    auto xml = juce::XmlDocument::parse (file);
+    if (xml == nullptr || ! xml->hasTagName (proc.apvts.state.getType()))
+        return false;
+
+    proc.history.group ([&]
+    {
+        for (auto* p : proc.getParameters())
+            if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
+            {
+                float norm = rp->getDefaultValue();
+                if (auto* e = xml->getChildByAttribute ("id", rp->paramID))
+                    norm = rp->convertTo0to1 ((float) e->getDoubleAttribute ("value"));
+                if (proc.isParamLocked (rp->paramID))
+                {
+                    if (std::abs (norm - rp->getValue()) > 1.0e-4f) ++lockedKept;
+                    continue;
+                }
+                if (norm != rp->getValue())
+                {
+                    rp->beginChangeGesture();
+                    rp->setValueNotifyingHost (norm);
+                    rp->endChangeGesture();
+                    ++applied;
+                }
+            }
+    });
+    return true;
+}
+
+// ---- standalone audio device access (MONITOR + Audio Settings window) -----
+// All of these return "nothing" outside the standalone app, so every caller
+// degrades to a no-op in a DAW instead of needing its own #if.
+inline juce::AudioDeviceManager* vmDeviceManager()
+{
+   #if VOXMORPH_HAS_STANDALONE_HOLDER
+    if (auto* h = juce::StandalonePluginHolder::getInstance())
+        return &h->deviceManager;
+   #endif
+    return nullptr;
+}
+
+inline juce::StringArray vmOutputDeviceNames()
+{
+    juce::StringArray names;
+    if (auto* dm = vmDeviceManager())
+        if (auto* t = dm->getCurrentDeviceTypeObject())
+        {
+            t->scanForDevices();
+            names = t->getDeviceNames (false);      // false = output side
+        }
+    return names;
+}
+
+inline juce::String vmCurrentOutputDevice()
+{
+    if (auto* dm = vmDeviceManager())
+    {
+        juce::AudioDeviceManager::AudioDeviceSetup s;
+        dm->getAudioDeviceSetup (s);
+        return s.outputDeviceName;
+    }
+    return {};
+}
+
+// Switches ONLY the output device; the input device, sample rate and buffer
+// size are left exactly as they are. "" = success, otherwise an error text.
+inline juce::String vmSetOutputDevice (const juce::String& name)
+{
+    auto* dm = vmDeviceManager();
+    if (dm == nullptr)
+        return juce::String::fromUTF8 ("スタンドアロン版でのみ使用できます。");
+    juce::AudioDeviceManager::AudioDeviceSetup s;
+    dm->getAudioDeviceSetup (s);
+    if (s.outputDeviceName == name) return {};
+    s.outputDeviceName = name;
+    s.useDefaultOutputChannels = true;
+    return dm->setAudioDeviceSetup (s, true);
+}
+
+// ---- reusable parameter row (for the BETA / Audio Settings windows) -------
+// Same [control] [↺] [🔒] set as the MAIN tab rows, but self-contained: it
+// owns its lock wiring and re-reads the lock state on a 4 Hz timer, so a lock
+// toggled on the MAIN tab (or restored by the host) stays in sync here.
+class ParamRow : public juce::Component, private juce::Timer
+{
+public:
+    enum class Kind { toggle, slider };
+
+    ParamRow (VoxMorphProcessor& p, const juce::String& paramId, Kind k,
+              const juce::String& displayName, const juce::String& tipText)
+        : proc (p), id (paramId), kind (k)
+    {
+        rp = proc.apvts.getParameter (id);
+
+        if (kind == Kind::toggle)
+        {
+            toggle.setButtonText (displayName);
+            toggle.setTooltip (tipText);
+            addAndMakeVisible (toggle);
+            if (rp != nullptr)
+                bAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
+                           proc.apvts, id, toggle);
+        }
+        else
+        {
+            name.setText (displayName, juce::dontSendNotification);
+            name.setTooltip (tipText);
+            name.setFont (juce::Font (juce::FontOptions (13.0f)));
+            addAndMakeVisible (name);
+
+            slider.setSliderStyle (juce::Slider::LinearHorizontal);
+            slider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 74, 22);
+            slider.setTextBoxIsEditable (true);
+            slider.setTooltip (tipText);
+            addAndMakeVisible (slider);
+            if (rp != nullptr)
+            {
+                sAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+                           proc.apvts, id, slider);
+                slider.setDoubleClickReturnValue (
+                    true, (double) rp->convertFrom0to1 (rp->getDefaultValue()));
+            }
+        }
+
+        reset.setButtonText (juce::String::fromUTF8 ("\xE2\x86\xBA"));
+        reset.setTooltip (vmTip ("Reset to default.", "初期値に戻します。"));
+        reset.onClick = [this]
+        {
+            if (rp == nullptr) return;
+            rp->beginChangeGesture();
+            rp->setValueNotifyingHost (rp->getDefaultValue());
+            rp->endChangeGesture();
+        };
+        lock.onClick = [this]
+        {
+            proc.setParamLocked (id, ! proc.isParamLocked (id));
+            refreshLock();
+        };
+        addAndMakeVisible (reset);
+        addAndMakeVisible (lock);
+
+        refreshLock();
+        startTimerHz (4);
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds();
+        lock.setBounds  (r.removeFromRight (30).reduced (3));
+        reset.setBounds (r.removeFromRight (30).reduced (3));
+        if (kind == Kind::toggle)
+            toggle.setBounds (r.withTrimmedLeft (4));
+        else
+        {
+            name.setBounds (r.removeFromLeft (168));
+            slider.setBounds (r);
+        }
+    }
+
+private:
+    void timerCallback() override
+    {
+        if (isShowing() && proc.isParamLocked (id) != shownLocked)
+            refreshLock();
+    }
+
+    void refreshLock()
+    {
+        const bool locked = proc.isParamLocked (id);
+        shownLocked = locked;
+        lock.setButtonText (juce::String::fromUTF8 (locked ? "\xF0\x9F\x94\x92"      // 🔒
+                                                           : "\xF0\x9F\x94\x93"));   // 🔓
+        lock.setColour (juce::TextButton::buttonColourId,
+                        locked ? juce::Colour (0xffffe9ef) : juce::Colours::white);
+        lock.setTooltip (locked
+            ? vmTip ("Locked: this value cannot be changed - not by knobs, the reset arrow, "
+                     "presets, Reset All or Matching. Click to unlock.",
+                     "ロック中のため変更できません(手動操作・↺・プリセット・Reset All・"
+                     "Matchingのすべてから保護)。クリックで解除します。")
+            : vmTip ("Lock this parameter: protects the value from manual edits, the reset "
+                     "arrow, preset loading, Reset All and Matching.",
+                     "この項目をロックします。手動操作・↺・プリセット読込・Reset All・"
+                     "Matchingから値を保護します。"));
+        toggle.setEnabled (! locked);
+        slider.setEnabled (! locked);
+        name  .setEnabled (! locked);
+        reset .setEnabled (! locked);
+    }
+
+    VoxMorphProcessor& proc;
+    juce::String id;
+    Kind kind;
+    juce::RangedAudioParameter* rp = nullptr;
+    juce::Label        name;
+    juce::Slider       slider;
+    juce::ToggleButton toggle;
+    juce::TextButton   reset, lock;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bAtt;
+    bool shownLocked = false;
+};
+
+// ---- OUTPUT section level meter (v0.30.0) ---------------------------------
+// Horizontal bar of the plugin's REAL output level (after mute, output gain,
+// ASMR pan and the Post FX chain). Filled bar = RMS, thin marker = peak, on a
+// -60 .. +6 dB scale; the fill turns amber near 0 dBFS and pink when clipping.
+class OutputMeter : public juce::Component, public juce::SettableTooltipClient,
+                    private juce::Timer
+{
+public:
+    explicit OutputMeter (VoxMorphProcessor& p) : proc (p)
+    {
+        setTooltip (vmTip (
+            "Level of the signal actually leaving VoxMorph: after Mute, Output Gain, the "
+            "ASMR position and any Post FX. The bar is the average (RMS) level and the thin "
+            "marker is the recent peak. Aim for the peak to sit in the mint / amber area; "
+            "pink means 0 dBFS is being hit and the output may be clipping - lower Output Gain.",
+            "VoxMorphから実際に出ている音のレベルです(Mute・Output Gain・ASMR位置・Post FXの"
+            "すべてを通過した後)。バーが平均(RMS)レベル、細い線が直近のピークです。ピークが"
+            "ミント〜アンバーの範囲に収まるのが目安で、ピンクは0dBFSに達している状態=音が"
+            "割れる可能性があります。その場合はOutput Gainを下げてください。"));
+        startTimerHz (30);
+    }
+
+private:
+    static float pos (float lin)                       // linear -> 0..1 on the scale
+    {
+        const float db = juce::Decibels::gainToDecibels (lin, -60.0f);
+        return juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 66.0f);   // -60 .. +6 dB
+    }
+
+    void timerCallback() override
+    {
+        if (! isShowing()) return;
+        const float r = proc.uiOutRms .load (std::memory_order_relaxed);
+        const float p = proc.uiOutPeak.load (std::memory_order_relaxed);
+        if (r == rms && p == pk) return;               // idle: no repaint
+        rms = r;  pk = p;
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto row = getLocalBounds();
+        auto lbl = row.removeFromLeft (168);
+        g.setColour (juce::Colour (0xff2e2e32));
+        g.setFont (juce::Font (juce::FontOptions (13.0f)));
+        g.drawText ("Output Level", lbl, juce::Justification::centredLeft);
+
+        // value read-out on the right, in the same slot the sliders use
+        auto valBox = row.removeFromRight (74).reduced (0, 4);
+        row.removeFromRight (4);
+
+        auto bar = row.toFloat().reduced (0.0f, 7.0f);
+        g.setColour (juce::Colour (0xffe9e9e9));
+        g.fillRoundedRectangle (bar, 4.0f);
+
+        // scale ticks at -40 / -20 / -12 / -6 / 0 dB
+        g.setColour (juce::Colour (0xffd6d6d6));
+        for (float db : { -40.0f, -20.0f, -12.0f, -6.0f, 0.0f })
+        {
+            const float x = bar.getX() + bar.getWidth() * juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 66.0f);
+            g.fillRect (x, bar.getY(), 1.0f, bar.getHeight());
+        }
+
+        const float peakDb = juce::Decibels::gainToDecibels (pk, -60.0f);
+        const juce::Colour fill = peakDb >= -0.1f ? juce::Colour (0xfff08ba5)     // clipping
+                                : peakDb >= -6.0f ? juce::Colour (0xffe3a63c)     // hot
+                                                  : juce::Colour (0xff54c0aa);    // fine
+        const float w = bar.getWidth() * pos (rms);
+        if (w > 1.0f)
+        {
+            g.setColour (fill);
+            g.fillRoundedRectangle (bar.withWidth (w), 4.0f);
+        }
+        if (pk > 0.0f)                                  // peak marker
+        {
+            g.setColour (fill.darker (0.25f));
+            g.fillRect (bar.getX() + juce::jmax (1.5f, bar.getWidth() * pos (pk) - 1.5f),
+                        bar.getY(), 2.0f, bar.getHeight());
+        }
+
+        g.setColour (juce::Colour (0xff2e2e32));
+        g.setFont (juce::Font (juce::FontOptions (11.5f)));
+        g.drawText (pk > 0.0f ? juce::String (peakDb, 1) + " dB" : juce::String ("-inf"),
+                    valBox, juce::Justification::centredRight);
+    }
+
+    VoxMorphProcessor& proc;
+    float rms = -1.0f, pk = -1.0f;
+};
+
 // VoiceProfile <-> XML (.vmprofile files, saved next to the presets)
 inline std::unique_ptr<juce::XmlElement> profileToXml (const VoiceProfile& p)
 {
@@ -1761,20 +2092,11 @@ public:
     }
 
 private:
-    static juce::File presetDir()
-    {
-        auto d = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                     .getChildFile ("VoxMorph").getChildFile ("Presets");
-        d.createDirectory();
-        return d;
-    }
+    static juce::File presetDir() { return voxMorphPresetDir(); }
 
     void refreshList (const juce::String& select = {})
     {
-        files = presetDir().findChildFiles (juce::File::findFiles, false, "*.vmpreset");
-        std::sort (files.begin(), files.end(),
-                   [] (const juce::File& a, const juce::File& b)
-                   { return a.getFileName().compareIgnoreCase (b.getFileName()) < 0; });
+        files = voxMorphPresetFiles();
         presetBox.clear (juce::dontSendNotification);
         int id = 1, selId = 0;
         for (auto& f : files)
@@ -1795,40 +2117,14 @@ private:
             setStatus (juce::String::fromUTF8 ("プリセットを選択してください。"));
             return;
         }
-        auto xml = juce::XmlDocument::parse (files.getReference (idx));
-        if (xml == nullptr || ! xml->hasTagName (proc.apvts.state.getType()))
+        // Apply per parameter instead of replaceState: locked parameters keep
+        // their current values, and the whole load is ONE undo step.
+        int applied = 0, lockedKept = 0;
+        if (! voxMorphApplyPreset (proc, files.getReference (idx), applied, lockedKept))
         {
             setStatus (juce::String::fromUTF8 ("読み込みに失敗しました(壊れたファイル?)"));
             return;
         }
-
-        // Apply per parameter instead of replaceState: locked sections keep
-        // their current values, and the whole load is ONE undo step.
-        // Parameters missing from the file fall back to their defaults
-        // (matching the old full-state replace for complete presets).
-        int applied = 0, lockedKept = 0;
-        proc.history.group ([&]
-        {
-            for (auto* p : proc.getParameters())
-                if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
-                {
-                    float norm = rp->getDefaultValue();
-                    if (auto* e = xml->getChildByAttribute ("id", rp->paramID))
-                        norm = rp->convertTo0to1 ((float) e->getDoubleAttribute ("value"));
-                    if (proc.isParamLocked (rp->paramID))
-                    {
-                        if (std::abs (norm - rp->getValue()) > 1.0e-4f) ++lockedKept;
-                        continue;
-                    }
-                    if (norm != rp->getValue())
-                    {
-                        rp->beginChangeGesture();
-                        rp->setValueNotifyingHost (norm);
-                        rp->endChangeGesture();
-                        ++applied;
-                    }
-                }
-        });
         auto msg = juce::String::fromUTF8 ("読み込みました: ") + presetBox.getText()
                  + juce::String::fromUTF8 (" (") + juce::String (applied)
                  + juce::String::fromUTF8 ("項目を更新");
@@ -1998,6 +2294,228 @@ private:
     VoiceProfile pvBase, pvConv;
     float pvHifreq = 0.0f, pvFloor = 0.0f;
     std::unique_ptr<juce::FileChooser> profChooser;
+};
+
+// ---------------------------------------------------------------------------
+// MAIN tab preset bar (v0.30.0): [preset ▼] [Save] [Delete].
+//
+// Unlike the PRESETS tab (select, then press Load), picking a preset here
+// APPLIES it immediately — that is the requested behaviour for the main
+// screen. It is still one undo step and locked parameters are still honoured,
+// so a mis-click is always recoverable with Cmd+Z.
+class PresetBar : public juce::Component
+{
+public:
+    // onStatus receives short messages to show in the MAIN tab footer
+    PresetBar (VoxMorphProcessor& p, std::function<void (const juce::String&)> onStatus)
+        : proc (p), status (std::move (onStatus))
+    {
+        box.setTextWhenNothingSelected (juce::String::fromUTF8 ("-- プリセットを選択 / Preset --"));
+        box.setTooltip (vmTip (
+            "Choose a preset - it is applied to every parameter immediately. Locked "
+            "parameters keep their value, and the whole load counts as ONE undo step "
+            "(Cmd+Z / Ctrl+Z). The same presets appear in the PRESETS tab.",
+            "プリセットを選ぶと、その場で全パラメータに反映されます。ロック中の項目は"
+            "そのまま保持され、読み込み全体がUndo 1回分(Cmd+Z / Ctrl+Z)で元に戻せます。"
+            "PRESETSタブと同じプリセットです。"));
+        // re-scan just before the list drops down, so presets saved from the
+        // PRESETS / MATCHING tabs show up without restarting
+        box.beforePopup = [this] { refreshList (currentName()); };
+        box.onChange = [this] { applySelected(); };
+        addAndMakeVisible (box);
+
+        saveBtn.setTooltip (vmTip (
+            "Save the current settings as a preset. You are asked whether to overwrite "
+            "the selected preset or to save under a new name.",
+            "現在の設定をプリセットとして保存します。押すと「選択中のプリセットに上書き」か"
+            "「別名で保存」かを選べます。"));
+        saveBtn.onClick = [this] { saveMenu(); };
+        addAndMakeVisible (saveBtn);
+
+        deleteBtn.setTooltip (vmTip (
+            "Delete the selected preset file. A confirmation is asked first.",
+            "選択中のプリセットファイルを削除します(削除前に確認が出ます)。"));
+        deleteBtn.onClick = [this] { deleteSelected(); };
+        addAndMakeVisible (deleteBtn);
+
+        refreshList();
+    }
+
+    ~PresetBar() override
+    {
+        if (nameWin != nullptr)          // dismiss a still-open Save-as dialog
+        {
+            nameWin->setLookAndFeel (nullptr);
+            nameWin->exitModalState (0);
+        }
+    }
+
+    void visibilityChanged() override
+    {
+        if (isVisible()) refreshList (currentName());
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (0, 3);
+        deleteBtn.setBounds (r.removeFromRight (74).reduced (2, 0));
+        saveBtn  .setBounds (r.removeFromRight (74).reduced (2, 0));
+        r.removeFromRight (4);
+        box.setBounds (r);
+    }
+
+private:
+    // ComboBox that lets us re-scan the folder before the menu appears
+    struct RescanComboBox : public juce::ComboBox
+    {
+        std::function<void()> beforePopup;
+        void showPopup() override
+        {
+            if (beforePopup) beforePopup();
+            juce::ComboBox::showPopup();
+        }
+    };
+
+    juce::String currentName() const
+    {
+        const int idx = box.getSelectedId() - 1;
+        return juce::isPositiveAndBelow (idx, files.size())
+                 ? files.getReference (idx).getFileNameWithoutExtension() : juce::String();
+    }
+
+    void refreshList (const juce::String& select = {})
+    {
+        const juce::ScopedValueSetter<bool> guard (updating, true);
+        files = voxMorphPresetFiles();
+        box.clear (juce::dontSendNotification);
+        int id = 1, selId = 0;
+        for (auto& f : files)
+        {
+            box.addItem (f.getFileNameWithoutExtension(), id);
+            if (f.getFileNameWithoutExtension() == select) selId = id;
+            ++id;
+        }
+        box.setSelectedId (selId, juce::dontSendNotification);
+    }
+
+    void applySelected()
+    {
+        if (updating) return;                     // list rebuild, not a user pick
+        const int idx = box.getSelectedId() - 1;
+        if (! juce::isPositiveAndBelow (idx, files.size())) return;
+
+        int applied = 0, lockedKept = 0;
+        if (! voxMorphApplyPreset (proc, files.getReference (idx), applied, lockedKept))
+        {
+            report (juce::String::fromUTF8 ("読み込みに失敗しました(壊れたファイル?)"));
+            return;
+        }
+        auto msg = juce::String::fromUTF8 ("\xE2\x9C\x93 ") + box.getText()
+                 + juce::String::fromUTF8 (" を適用 (") + juce::String (applied)
+                 + juce::String::fromUTF8 ("項目");
+        if (lockedKept > 0)
+            msg += juce::String::fromUTF8 ("、") + juce::String (lockedKept)
+                 + juce::String::fromUTF8 ("項目はロック保持");
+        report (msg + juce::String::fromUTF8 (") — Undoで戻せます"));
+    }
+
+    void saveMenu()
+    {
+        const auto sel = currentName();
+        juce::PopupMenu m;
+        m.addItem (1, juce::String::fromUTF8 ("上書き保存 / Overwrite: ")
+                      + (sel.isNotEmpty() ? sel : juce::String::fromUTF8 ("(未選択)")),
+                   sel.isNotEmpty());
+        m.addItem (2, juce::String::fromUTF8 ("別名で保存 / Save as new..."));
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&saveBtn),
+            [this, sel] (int r)
+            {
+                if (r == 1)      writePreset (sel);
+                else if (r == 2) askNewName();
+            });
+    }
+
+    void askNewName()
+    {
+        nameWin = std::make_unique<juce::AlertWindow> (
+            juce::String::fromUTF8 ("プリセットを保存 / Save preset"),
+            juce::String::fromUTF8 ("新しいプリセット名を入力してください。\n"
+                                    "Enter a name for the new preset."),
+            juce::MessageBoxIconType::NoIcon, this);
+        nameWin->setLookAndFeel (&alertLnf);
+        nameWin->addTextEditor ("name", currentName(), juce::String::fromUTF8 ("名前 / Name"));
+        nameWin->addButton (juce::String::fromUTF8 ("保存 / Save"), 1,
+                            juce::KeyPress (juce::KeyPress::returnKey));
+        nameWin->addButton (juce::String::fromUTF8 ("キャンセル / Cancel"), 0,
+                            juce::KeyPress (juce::KeyPress::escapeKey));
+        nameWin->enterModalState (true, juce::ModalCallbackFunction::create (
+            [this] (int r)
+            {
+                const auto name = r == 1 && nameWin != nullptr
+                                    ? nameWin->getTextEditorContents ("name").trim()
+                                    : juce::String();
+                if (nameWin != nullptr)
+                {
+                    nameWin->setLookAndFeel (nullptr);
+                    nameWin->exitModalState (0);
+                    nameWin->setVisible (false);
+                }
+                if (name.isNotEmpty()) writePreset (name);
+                else if (r == 1)
+                    report (juce::String::fromUTF8 ("プリセット名を入力してください。"));
+            }), false);
+    }
+
+    void writePreset (const juce::String& name)
+    {
+        if (name.isEmpty()) return;
+        const auto file = voxMorphPresetDir()
+                            .getChildFile (juce::File::createLegalFileName (name) + ".vmpreset");
+        auto xml = proc.apvts.copyState().createXml();
+        if (xml != nullptr && xml->writeTo (file))
+        {
+            refreshList (file.getFileNameWithoutExtension());
+            report (juce::String::fromUTF8 ("\xE2\x9C\x93 保存しました: ") + name);
+        }
+        else
+            report (juce::String::fromUTF8 ("保存に失敗しました。"));
+    }
+
+    void deleteSelected()
+    {
+        const int idx = box.getSelectedId() - 1;
+        if (! juce::isPositiveAndBelow (idx, files.size()))
+        {
+            report (juce::String::fromUTF8 ("削除するプリセットを選択してください。"));
+            return;
+        }
+        const auto file = files.getReference (idx);
+        juce::NativeMessageBox::showOkCancelBox (juce::MessageBoxIconType::QuestionIcon,
+            "Delete preset",
+            juce::String::fromUTF8 ("このプリセットを削除しますか?\nDelete this preset?\n\n")
+              + file.getFileNameWithoutExtension(),
+            this, juce::ModalCallbackFunction::create ([this, file] (int result)
+            {
+                if (result != 1) return;                       // 0 = cancel
+                const auto name = file.getFileNameWithoutExtension();
+                if (file.deleteFile())
+                    report (juce::String::fromUTF8 ("削除しました: ") + name);
+                else
+                    report (juce::String::fromUTF8 ("削除に失敗しました: ") + name);
+                refreshList();
+            }));
+    }
+
+    void report (const juce::String& s) { if (status) status (s); }
+
+    VoxMorphProcessor& proc;
+    std::function<void (const juce::String&)> status;
+    juce::Array<juce::File> files;
+    RescanComboBox   box;
+    juce::TextButton saveBtn { "Save" }, deleteBtn { "Delete" };
+    std::unique_ptr<juce::AlertWindow> nameWin;
+    juce::LookAndFeel_V4 alertLnf { juce::LookAndFeel_V4::getLightColourScheme() };
+    bool updating = false;
 };
 
 // ASMR tab: pseudo-3D positioning. A sonar-style circular pad with a
@@ -2335,10 +2853,324 @@ public:
     void closeButtonPressed() override { setVisible (false); }
 };
 
+// ---------------------------------------------------------------------------
+// Audio Settings window (v0.30.0, STANDALONE ONLY).
+//
+// Replaces JUCE's plain showAudioSettingsDialog(): it still hosts the same
+// AudioDeviceSelectorComponent, but adds the two settings that belong with
+// the audio routing — the MONITOR output device used by the options bar's
+// MONITOR button, and Auto-Mute on Feedback (moved here from ADVANCED).
+class AudioSettingsPanel : public juce::Component
+{
+public:
+    explicit AudioSettingsPanel (VoxMorphProcessor& p) : proc (p)
+    {
+        // this window is outside the editor's LookAndFeel scope, so give it
+        // the same pastel-mint light theme (see AEIOUCharacterPanel)
+        lnf.setColour (juce::Slider::trackColourId,             juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::Slider::backgroundColourId,        juce::Colour (0xffe9e9e9));
+        lnf.setColour (juce::Slider::thumbColourId,             juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::Slider::textBoxTextColourId,       juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::white);
+        lnf.setColour (juce::Slider::textBoxOutlineColourId,    juce::Colour (0xffdedede));
+        lnf.setColour (juce::Label::textColourId,               juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::ToggleButton::textColourId,        juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::ToggleButton::tickColourId,        juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::TextButton::buttonColourId,        juce::Colours::white);
+        lnf.setColour (juce::TextButton::textColourOffId,       juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::ComboBox::textColourId,            juce::Colour (0xff2e2e32));
+        setLookAndFeel (&lnf);
+
+        auto initHead = [this] (juce::Label& l, const char* text)
+        {
+            l.setText (juce::String::fromUTF8 (text), juce::dontSendNotification);
+            l.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
+            l.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+            addAndMakeVisible (l);
+        };
+        initHead (hDevice,  "AUDIO DEVICE");
+        initHead (hMonitor, "MONITOR");
+        initHead (hSafety,  "SAFETY");
+
+        if (auto* dm = vmDeviceManager())
+        {
+            sel = std::make_unique<juce::AudioDeviceSelectorComponent> (
+                      *dm, 0, 2, 0, 2,
+                      /*showMidiIn*/ false, /*showMidiOut*/ false,
+                      /*channelsAsStereoPairs*/ true, /*hideAdvanced*/ false);
+            addAndMakeVisible (*sel);
+        }
+
+        monLbl.setText (juce::String::fromUTF8 ("モニター出力デバイス / Monitor output"),
+                        juce::dontSendNotification);
+        monLbl.setFont (juce::Font (juce::FontOptions (13.0f)));
+        addAndMakeVisible (monLbl);
+
+        monBox.setTooltip (vmTip (
+            "The output device the MONITOR button switches to. Typically your headphones, "
+            "while the normal output goes to a virtual cable feeding OBS / Discord. "
+            "Leave it unset and the MONITOR button stays inactive.",
+            "MONITORボタンを押したときに一時的に切り替わる出力先です。通常はヘッドホンを"
+            "指定し、普段の出力はOBSやDiscordへ送る仮想オーディオデバイスにしておきます。"
+            "未設定のままだとMONITORボタンは動作しません。"));
+        monBox.onChange = [this]
+        {
+            if (updating) return;
+            proc.monitorDeviceName = monBox.getSelectedId() <= 1 ? juce::String()
+                                                                 : monBox.getText();
+        };
+        addAndMakeVisible (monBox);
+
+        rescanBtn.setTooltip (vmTip ("Re-scan the audio devices.",
+                                     "オーディオデバイスを再検索します。"));
+        rescanBtn.onClick = [this] { refreshMonitorList(); };
+        addAndMakeVisible (rescanBtn);
+
+        monNote.setText (juce::String::fromUTF8 (
+            "MONITORをオンにすると出力先が上のデバイスへ一時的に切り替わり、MUTEも自動でオンに"
+            "なります。MONITORをオフに戻しても出力が消えたままなのは意図的な安全動作です"
+            "(MUTEを手で解除すると配信に戻り、同時にMONITORもオフになります)。"),
+            juce::dontSendNotification);
+        monNote.setFont (juce::Font (juce::FontOptions (11.5f)));
+        monNote.setColour (juce::Label::textColourId, juce::Colour (0xff9aa5a2));
+        monNote.setJustificationType (juce::Justification::topLeft);
+        addAndMakeVisible (monNote);
+
+        autoMuteRow = std::make_unique<ParamRow> (proc, "automute", ParamRow::Kind::toggle,
+            "Auto-Mute on Feedback",
+            vmTip ("Standalone app: if the output stays extremely loud for over a second "
+                   "(a runaway feedback loop between speakers and mic), the output is muted "
+                   "for 3 seconds automatically. Has no effect in a DAW.",
+                   "スタンドアロン用。スピーカー→マイクのハウリングが暴走して出力が1秒以上"
+                   "大音量で鳴り続けた場合、自動で3秒間ミュートして回路を切ります。"
+                   "DAWプラグインとして使用中は動作しません。"));
+        addAndMakeVisible (*autoMuteRow);
+
+        closeBtn.onClick = [this]
+        {
+            if (auto* dw = findParentComponentOfClass<juce::DocumentWindow>())
+                dw->setVisible (false);
+        };
+        addAndMakeVisible (closeBtn);
+
+        setSize (600, 640);
+        sendLookAndFeelChange();
+        refreshMonitorList();
+    }
+
+    ~AudioSettingsPanel() override { setLookAndFeel (nullptr); }
+
+    void visibilityChanged() override
+    {
+        if (isVisible()) refreshMonitorList();
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (14, 10);
+
+        closeBtn.setBounds (r.removeFromBottom (30).removeFromRight (100).reduced (0, 2));
+        r.removeFromBottom (6);
+        autoMuteRow->setBounds (r.removeFromBottom (28));
+        hSafety.setBounds (r.removeFromBottom (24));
+        r.removeFromBottom (6);
+        monNote.setBounds (r.removeFromBottom (46));
+        auto mr = r.removeFromBottom (30);
+        monLbl.setBounds (mr.removeFromLeft (230));
+        rescanBtn.setBounds (mr.removeFromRight (86).reduced (2, 2));
+        monBox.setBounds (mr.reduced (2, 2));
+        hMonitor.setBounds (r.removeFromBottom (24));
+        r.removeFromBottom (8);
+
+        hDevice.setBounds (r.removeFromTop (24));
+        if (sel != nullptr) sel->setBounds (r);
+    }
+
+    void paint (juce::Graphics& g) override { g.fillAll (juce::Colour (0xfffcf9f9)); }
+
+private:
+    void refreshMonitorList()
+    {
+        const juce::ScopedValueSetter<bool> guard (updating, true);
+        const auto names = vmOutputDeviceNames();
+        monBox.clear (juce::dontSendNotification);
+        monBox.addItem (juce::String::fromUTF8 ("-- 未設定 / not set --"), 1);
+        int id = 2, selId = 1;
+        for (const auto& n : names)
+        {
+            monBox.addItem (n, id);
+            if (n == proc.monitorDeviceName) selId = id;
+            ++id;
+        }
+        // a device saved earlier but not currently connected must not be lost
+        if (selId == 1 && proc.monitorDeviceName.isNotEmpty())
+        {
+            monBox.addItem (proc.monitorDeviceName
+                              + juce::String::fromUTF8 ("  (未接続 / offline)"), id);
+            selId = id;
+        }
+        monBox.setSelectedId (selId, juce::dontSendNotification);
+    }
+
+    VoxMorphProcessor& proc;
+    juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
+    juce::TooltipWindow  tips { this, 400 };
+    juce::Label hDevice, hMonitor, hSafety, monLbl, monNote;
+    std::unique_ptr<juce::AudioDeviceSelectorComponent> sel;
+    juce::ComboBox   monBox;
+    juce::TextButton rescanBtn { "Rescan" }, closeBtn { "Close" };
+    std::unique_ptr<ParamRow> autoMuteRow;
+    bool updating = false;
+};
+
+class AudioSettingsWindow : public juce::DocumentWindow
+{
+public:
+    explicit AudioSettingsWindow (VoxMorphProcessor& p)
+        : juce::DocumentWindow (juce::String::fromUTF8 ("Audio Settings"),
+                                juce::Colour (0xfffcf9f9), juce::DocumentWindow::closeButton)
+    {
+        setUsingNativeTitleBar (true);
+        setContentOwned (new AudioSettingsPanel (p), true);
+        setResizable (true, false);
+        setResizeLimits (480, 420, 1000, 1000);
+        centreWithSize (getWidth(), getHeight());
+        setVisible (true);
+    }
+    void closeButtonPressed() override { setVisible (false); }
+};
+
+// ---------------------------------------------------------------------------
+// BETA window (v0.30.0): the experimental controls, kept out of the MAIN tab
+// so the main screen only shows features that are considered finished.
+// Currently GCI Grain Sync and Breath.
+class BetaPanel : public juce::Component
+{
+public:
+    explicit BetaPanel (VoxMorphProcessor& p) : proc (p)
+    {
+        lnf.setColour (juce::Slider::trackColourId,             juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::Slider::backgroundColourId,        juce::Colour (0xffe9e9e9));
+        lnf.setColour (juce::Slider::thumbColourId,             juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::Slider::textBoxTextColourId,       juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::white);
+        lnf.setColour (juce::Slider::textBoxOutlineColourId,    juce::Colour (0xffdedede));
+        lnf.setColour (juce::Label::textColourId,               juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::ToggleButton::textColourId,        juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::ToggleButton::tickColourId,        juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::TextButton::buttonColourId,        juce::Colours::white);
+        lnf.setColour (juce::TextButton::textColourOffId,       juce::Colour (0xff54c0aa));
+        setLookAndFeel (&lnf);
+
+        heading.setText ("BETA", juce::dontSendNotification);
+        heading.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
+        heading.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+        addAndMakeVisible (heading);
+
+        note.setText (juce::String::fromUTF8 (
+            "Experimental features. They are still being tuned and may sound worse on some "
+            "voices - each one is off / 0 by default, and that default is the classic "
+            "behaviour.\n"
+            "実験中の機能です。声によっては品質が落ちる場合があります。既定値(オフ/0)は"
+            "従来どおりの動作なので、合わなければそのままにしてください。"),
+            juce::dontSendNotification);
+        note.setFont (juce::Font (juce::FontOptions (11.5f)));
+        note.setColour (juce::Label::textColourId, juce::Colour (0xff9aa5a2));
+        note.setJustificationType (juce::Justification::topLeft);
+        addAndMakeVisible (note);
+
+        gciRow = std::make_unique<ParamRow> (proc, "gci", ParamRow::Kind::toggle,
+            "GCI Grain Sync",
+            vmTip ("EXPERIMENTAL. Aligns the internal grain cutting to the glottal closure instants "
+                   "(the exact moments the vocal folds snap shut) and keeps them phase-locked from "
+                   "period to period. Mainly helps low / slightly hoarse voices, especially with "
+                   "Low Voice Mode. It automatically reverts to the classic alignment where no clear "
+                   "pulses exist and while the pitch is sliding. If your voice sounds juddery or "
+                   "robotic with this on, leave it off - off is the previous behaviour.",
+                   "実験的機能。内部のグレイン切り出しを声帯の閉鎖瞬間(GCI)に同期させ、周期ごとの"
+                   "位相を揃えます。主に低い声・少しかすれた声(特にLow Voice Mode併用時)で効果が"
+                   "あります。明確な声帯パルスが無い区間や音程が動いている間は自動的に従来の整列に"
+                   "戻ります。オンにしてガタつき・ロボットっぽさを感じる場合はオフのままにして"
+                   "ください(オフ=従来どおり)。"));
+        addAndMakeVisible (*gciRow);
+
+        breathRow = std::make_unique<ParamRow> (proc, "breath2", ParamRow::Kind::slider,
+            "Breath",
+            vmTip ("EXPERIMENTAL. Replaces the upper harmonics with aspiration noise shaped by your "
+                   "vocal tract (harmonic+noise model). Small amounts (0.1-0.2) add air; the quality "
+                   "is still being tuned - leave at 0 if it sounds synthetic to you.",
+                   "実験的機能。高域の倍音を、声道の響きで整形した気息ノイズに置き換えます"
+                   "(ハーモニック+ノイズモデル)。0.1〜0.2で空気感が出ます。品質は調整中なので、"
+                   "合成的に聞こえる場合は0のままにしてください。"));
+        addAndMakeVisible (*breathRow);
+
+        closeBtn.onClick = [this]
+        {
+            if (auto* dw = findParentComponentOfClass<juce::DocumentWindow>())
+                dw->setVisible (false);
+        };
+        addAndMakeVisible (closeBtn);
+
+        setSize (600, 240);
+        sendLookAndFeelChange();
+    }
+
+    ~BetaPanel() override { setLookAndFeel (nullptr); }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (14, 10);
+        heading.setBounds (r.removeFromTop (24));
+        note.setBounds (r.removeFromTop (46));
+        r.removeFromTop (6);
+        gciRow->setBounds (r.removeFromTop (28));
+        r.removeFromTop (4);
+        breathRow->setBounds (r.removeFromTop (30));
+        closeBtn.setBounds (r.removeFromBottom (30).removeFromRight (100).reduced (0, 2));
+    }
+
+    void paint (juce::Graphics& g) override { g.fillAll (juce::Colour (0xfffcf9f9)); }
+
+private:
+    VoxMorphProcessor& proc;
+    juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
+    juce::TooltipWindow  tips { this, 400 };
+    juce::Label heading, note;
+    std::unique_ptr<ParamRow> gciRow, breathRow;
+    juce::TextButton closeBtn { "Close" };
+};
+
+class BetaWindow : public juce::DocumentWindow
+{
+public:
+    explicit BetaWindow (VoxMorphProcessor& p)
+        : juce::DocumentWindow (juce::String::fromUTF8 ("BETA \xE2\x80\x94 Experimental features"),
+                                juce::Colour (0xfffcf9f9), juce::DocumentWindow::closeButton)
+    {
+        setUsingNativeTitleBar (true);
+        setContentOwned (new BetaPanel (p), true);
+        centreWithSize (getWidth(), getHeight());
+        setVisible (true);
+    }
+    void closeButtonPressed() override { setVisible (false); }
+};
+
 // Standalone options bar (shown above the tabs, STANDALONE ONLY): controls
-// that only make sense for the app — external FX chains and the audio
-// device settings (the old title-bar Options button moved here).
-class FxBar : public juce::Component
+// that only make sense for the app — external FX chains, the audio device
+// settings (the old title-bar Options button moved here) and, since v0.30.0,
+// the MUTE / MONITOR pair.
+//
+// MUTE / MONITOR semantics (see also PluginProcessor.h):
+//   * MONITOR on  -> the output device is switched to the monitor device
+//                    chosen in Audio Settings, and MUTE is turned on too.
+//   * MONITOR off -> the previous output device is restored. MUTE is left
+//                    ON deliberately, so you never go live just by ending a
+//                    monitoring session.
+//   * MUTE off while monitoring -> "I want to be heard again", so monitoring
+//                    ends as well and the normal output device comes back.
+//   * While monitoring, MUTE does not silence anything (you are listening to
+//     yourself); it only marks where you land when monitoring stops.
+class FxBar : public juce::Component, private juce::Timer
 {
 public:
     explicit FxBar (VoxMorphProcessor& p) : proc (p)
@@ -2356,24 +3188,71 @@ public:
             }
         };
         audioBtn.setTooltip (juce::String::fromUTF8 (
-            "オーディオ入出力デバイス・サンプルレート・バッファの設定を開きます。"));
-        audioBtn.onClick = []
+            "オーディオ入出力デバイス・サンプルレート・バッファ、モニター出力先、"
+            "Auto-Mute on Feedback の設定を開きます。"));
+        audioBtn.onClick = [this]
         {
-           #if VOXMORPH_HAS_STANDALONE_HOLDER
-            if (auto* h = juce::StandalonePluginHolder::getInstance())
-                h->showAudioSettingsDialog();
-           #endif
+            if (audioWin == nullptr)
+                audioWin = std::make_unique<AudioSettingsWindow> (proc);
+            else
+            {
+                audioWin->setVisible (true);
+                audioWin->toFront (true);
+            }
         };
+
+        muteBtn.setClickingTogglesState (true);
+        muteBtn.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xfff08ba5));
+        muteBtn.setColour (juce::TextButton::textColourOnId,   juce::Colours::white);
+        muteBtn.setTooltip (vmTip (
+            "Silences the output so nothing reaches your stream / virtual cable. The "
+            "conversion keeps running. Turning MUTE off while MONITOR is on also ends "
+            "monitoring (you are going live again).",
+            "出力を消音し、配信や仮想オーディオデバイスへ音が届かないようにします"
+            "(変換自体は動き続けます)。MONITORがオンのときにMUTEを解除すると、"
+            "配信に戻る操作とみなしてMONITORも自動でオフになります。"));
+        muteBtn.onClick = [this] { setMute (muteBtn.getToggleState(), true); };
+
+        monBtn.setClickingTogglesState (true);
+        monBtn.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xff54c0aa));
+        monBtn.setColour (juce::TextButton::textColourOnId,   juce::Colours::white);
+        monBtn.setTooltip (vmTip (
+            "Temporarily switches the app's OUTPUT to the monitor device set in Audio "
+            "Settings (typically your headphones), so you can check your voice without "
+            "sending it out. MUTE is switched on automatically and stays on when you turn "
+            "MONITOR off, so you never go live by accident.",
+            "出力先を Audio Settings で設定したモニター用デバイス(通常はヘッドホン)に"
+            "一時的に切り替え、配信に流さずに自分の声を確認できます。MUTEも自動でオンになり、"
+            "MONITORをオフに戻してもMUTEはオンのままです(不意に配信へ復帰しないための"
+            "安全動作)。"));
+        monBtn.onClick = [this] { setMonitor (monBtn.getToggleState()); };
+
+        msg.setFont (juce::Font (juce::FontOptions (11.5f)));
+        msg.setColour (juce::Label::textColourId, juce::Colour (0xff8a7f83));
+        msg.setJustificationType (juce::Justification::centredLeft);
+
         addAndMakeVisible (plugBtn);
         addAndMakeVisible (audioBtn);
+        addAndMakeVisible (muteBtn);
+        addAndMakeVisible (monBtn);
+        addAndMakeVisible (msg);
+
+        syncButtons();
+        startTimerHz (4);
     }
 
     void resized() override
     {
         auto r = getLocalBounds().reduced (8, 3);
-        plugBtn.setBounds (r.removeFromLeft (110));
-        r.removeFromLeft (8);
-        audioBtn.setBounds (r.removeFromLeft (130));
+        plugBtn.setBounds (r.removeFromLeft (100));
+        r.removeFromLeft (6);
+        audioBtn.setBounds (r.removeFromLeft (126));
+        r.removeFromLeft (12);
+        muteBtn.setBounds (r.removeFromLeft (64));
+        r.removeFromLeft (6);
+        monBtn.setBounds (r.removeFromLeft (86));
+        r.removeFromLeft (10);
+        msg.setBounds (r);
     }
 
     void paint (juce::Graphics& g) override
@@ -2385,9 +3264,90 @@ public:
     }
 
 private:
+    void setMute (bool on, bool userAction)
+    {
+        proc.muted.store (on);
+        // Un-muting means "I want to be heard again", so a monitoring session
+        // (which routes the output away from the normal device) has to end.
+        if (userAction && ! on && proc.monitoring.load())
+            setMonitor (false);
+        syncButtons();
+    }
+
+    void setMonitor (bool on)
+    {
+        if (on == proc.monitoring.load()) { syncButtons(); return; }
+
+        if (on)
+        {
+            if (proc.monitorDeviceName.isEmpty())
+            {
+                flash (juce::String::fromUTF8 (
+                    "モニター出力先が未設定です \xE2\x86\x92 Audio Settings... で選択してください"));
+                syncButtons();
+                return;
+            }
+            proc.preMonitorDeviceName = vmCurrentOutputDevice();
+            const auto err = vmSetOutputDevice (proc.monitorDeviceName);
+            if (err.isNotEmpty())
+            {
+                proc.preMonitorDeviceName.clear();
+                flash (juce::String::fromUTF8 ("モニターに切り替えられませんでした: ") + err);
+                syncButtons();
+                return;
+            }
+            proc.monitoring.store (true);
+            proc.muted.store (true);          // monitoring implies "not live"
+            flash (juce::String::fromUTF8 ("モニター中: ") + proc.monitorDeviceName);
+        }
+        else
+        {
+            if (proc.preMonitorDeviceName.isNotEmpty())
+                vmSetOutputDevice (proc.preMonitorDeviceName);
+            proc.preMonitorDeviceName.clear();
+            proc.monitoring.store (false);
+            // MUTE is deliberately left as it is (see the class comment).
+            flash (juce::String::fromUTF8 ("モニター終了 \xE2\x80\x94 MUTEは継続中です"));
+        }
+        syncButtons();
+    }
+
+    void syncButtons()
+    {
+        muteBtn.setToggleState (proc.muted.load(),      juce::dontSendNotification);
+        monBtn .setToggleState (proc.monitoring.load(), juce::dontSendNotification);
+    }
+
+    void flash (const juce::String& s)
+    {
+        msg.setText (s, juce::dontSendNotification);
+        msgSec = 5.0f;
+    }
+
+    void timerCallback() override
+    {
+        // If the output device was changed behind our back (e.g. in the Audio
+        // Settings window, or the device disappeared), monitoring is no longer
+        // what the button claims — drop it, keeping MUTE on as usual.
+        if (proc.monitoring.load() && vmCurrentOutputDevice() != proc.monitorDeviceName)
+        {
+            proc.monitoring.store (false);
+            proc.preMonitorDeviceName.clear();
+            flash (juce::String::fromUTF8 ("出力デバイスが変更されたためモニターを終了しました"));
+        }
+        syncButtons();
+
+        if (msgSec > 0.0f && (msgSec -= 0.25f) <= 0.0f)
+            msg.setText ({}, juce::dontSendNotification);
+    }
+
     VoxMorphProcessor& proc;
-    juce::TextButton plugBtn { "Plugins..." }, audioBtn { "Audio Settings..." };
-    std::unique_ptr<FxChainWindow> fxWin;
+    juce::TextButton plugBtn { "Plugins..." }, audioBtn { "Audio Settings..." },
+                     muteBtn { "MUTE" }, monBtn { "MONITOR" };
+    juce::Label msg;
+    float msgSec = 0.0f;
+    std::unique_ptr<FxChainWindow>      fxWin;
+    std::unique_ptr<AudioSettingsWindow> audioWin;
 };
 
 // simple component that forwards resized() to a lambda (used for tab pages)
@@ -2755,6 +3715,14 @@ public:
         viewport.setScrollBarsShown (true, false);
         viewport.setScrollBarThickness (10);
 
+        // PRESET bar (v0.30.0): picking from the dropdown applies immediately;
+        // Save asks overwrite / save-as, Delete asks for confirmation.
+        addSection ("PRESET");
+        presetBar = std::make_unique<PresetBar> (proc,
+                        [this] (const juce::String& s) { flashFooter (s); });
+        content.addAndMakeVisible (*presetBar);
+        items.push_back ({ presetBar.get(), 32 });
+
         addSection ("VISUALIZER");
         content.addAndMakeVisible (spectrum);
         items.push_back ({ &spectrum, 168 });
@@ -2914,18 +3882,6 @@ public:
                  "持ち上がり、中音域や声の芯には触れません。まずは2〜4dBがおすすめ。"));
 
         addSection ("ADVANCED");
-        addToggleRow ("gci", "GCI Grain Sync (Beta)",
-            tip ("EXPERIMENTAL. Aligns the internal grain cutting to the glottal closure instants "
-                 "(the exact moments the vocal folds snap shut) and keeps them phase-locked from "
-                 "period to period. Mainly helps low / slightly hoarse voices, especially with "
-                 "Low Voice Mode. It automatically reverts to the classic alignment where no clear "
-                 "pulses exist and while the pitch is sliding. If your voice sounds juddery or "
-                 "robotic with this on, leave it off - off is the previous behaviour.",
-                 "実験的機能。内部のグレイン切り出しを声帯の閉鎖瞬間(GCI)に同期させ、周期ごとの"
-                 "位相を揃えます。主に低い声・少しかすれた声(特にLow Voice Mode併用時)で効果が"
-                 "あります。明確な声帯パルスが無い区間や音程が動いている間は自動的に従来の整列に"
-                 "戻ります。オンにしてガタつき・ロボットっぽさを感じる場合はオフのままにして"
-                 "ください(オフ=従来どおり)。"));
         addToggleRow ("lowvoice", "Low Voice Mode",
             tip ("Extends pitch tracking for very low voices and vocal fry. It may retain more of "
                  "the original low-period texture depending on the voice.",
@@ -2948,26 +3904,12 @@ public:
                  "並列処理し、立体感を保ったまま変換します。遅延は変わりません(CPUは約2倍)。"
                  "声によってはまれに左右の解釈が割れて広がって聞こえる場合があり、その時はオフに。"
                  "オフ=従来どおりモノラル(左右を合成)。"));
-        addToggleRow ("automute", "Auto-Mute on Feedback",
-            tip ("Standalone app: if the output stays extremely loud for over a second "
-                 "(a runaway feedback loop between speakers and mic), the output is muted "
-                 "for 3 seconds automatically. Has no effect in a DAW.",
-                 "スタンドアロン用。スピーカー→マイクのハウリングが暴走して出力が1秒以上"
-                 "大音量で鳴り続けた場合、自動で3秒間ミュートして回路を切ります。"
-                 "DAWプラグインとして使用中は動作しません。"));
         addSliderRow ("gate", "Noise Gate (dB)",
             tip ("Mutes the input while it stays below this level - removes fan / room noise "
                  "between phrases. -80 = off. Set it just above your noise floor (try -55 to -45).",
                  "入力がこのレベルを下回っている間ミュートし、話していない間のファンノイズや"
                  "環境音を消します。-80=オフ。ノイズの音量より少し上に設定してください"
                  "(目安 -55〜-45)。"));
-        addSliderRow ("breath2", "Breath (Beta)",
-            tip ("EXPERIMENTAL. Replaces the upper harmonics with aspiration noise shaped by your "
-                 "vocal tract (harmonic+noise model). Small amounts (0.1-0.2) add air; the quality "
-                 "is still being tuned - leave at 0 if it sounds synthetic to you.",
-                 "実験的機能。高域の倍音を、声道の響きで整形した気息ノイズに置き換えます"
-                 "(ハーモニック+ノイズモデル)。0.1〜0.2で空気感が出ます。品質は調整中なので、"
-                 "合成的に聞こえる場合は0のままにしてください。"));
         addSliderRow ("pitchfloor", "Pitch Floor (Hz)",
             tip ("If the converted pitch falls below this, it is lifted softly toward the floor. "
                  "Useful when your voice drifts too low while speaking. 0 = off. "
@@ -2975,6 +3917,23 @@ public:
                  "変換後のピッチがこの値を下回ったとき、滑らかに引き上げます。"
                  "話しているうちに声が低くなりすぎる場合の補正用。0=オフ。"
                  "女声化なら140〜180が目安です。"));
+        addButtonRow ("Experimental", "BETA...",
+            tip ("Opens the BETA window with the experimental controls (GCI Grain Sync, "
+                 "Breath). They are kept out of the main list because their quality is "
+                 "still being tuned; every one of them defaults to the classic behaviour.",
+                 "実験中の機能(GCI Grain Sync、Breath)をまとめたBETAウィンドウを開きます。"
+                 "品質を調整中のため通常の一覧からは外していますが、既定値はいずれも"
+                 "従来どおりの動作です。"),
+            [this]
+            {
+                if (betaWin == nullptr)
+                    betaWin = std::make_unique<BetaWindow> (proc);
+                else
+                {
+                    betaWin->setVisible (true);
+                    betaWin->toFront (true);
+                }
+            });
 
         addSection ("OUTPUT");
         addSliderRow ("mix", "Mix",
@@ -2983,6 +3942,8 @@ public:
         addSliderRow ("gain", "Output Gain (dB)",
             tip ("Output level of the plugin, to compensate loudness changes from the conversion.",
                  "プラグインの出力レベル。変換で音量感が変わったときの補正用。"));
+        content.addAndMakeVisible (outMeter);   // live level of the real output
+        items.push_back ({ &outMeter, 30 });
 
         footer.setText (
             juce::String::fromUTF8 (
@@ -3438,6 +4399,7 @@ private:
     juce::Component content;     // holds every row; taller than the window
     SpectrumView    spectrum { proc };
     StatusView      status { proc };
+    OutputMeter     outMeter { proc };
     MatchingPanel   matchingPanel { proc };
     PresetPanel     presetPanel { proc };
     AsmrPanel       asmrPanel { proc };
@@ -3449,9 +4411,13 @@ private:
     struct Item { juce::Component* comp; int h; };
     std::vector<Item> items;
     std::vector<std::unique_ptr<juce::Component>> owned;
-    // AEIOU Character DETAIL window (child of this editor: destroyed with
-    // it, re-fronted instead of duplicated on repeated DETAIL clicks)
+    // MAIN tab preset bar (built in the constructor so its status callback
+    // can reach flashFooter)
+    std::unique_ptr<PresetBar> presetBar;
+    // AEIOU Character DETAIL / BETA windows (children of this editor:
+    // destroyed with it, re-fronted instead of duplicated on repeated clicks)
     std::unique_ptr<AEIOUCharacterWindow> aeiouWin;
+    std::unique_ptr<BetaWindow> betaWin;
     juce::Label footer;
     juce::String defaultFooterText;
 

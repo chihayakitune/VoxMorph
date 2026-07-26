@@ -158,6 +158,32 @@ public:
     // Device/host buffers are added on the editor side (standalone only).
     std::atomic<int> uiLatencySamples { 0 }, uiFxLatSamples { 0 };
 
+    // ---- MUTE / MONITOR (v0.30.0, driven by the standalone options bar) ----
+    // muted      = the user pressed MUTE; the output is silenced so nothing
+    //              reaches the stream / virtual cable.
+    // monitoring = MONITOR is on, i.e. the app's OUTPUT DEVICE was temporarily
+    //              switched to the monitor device chosen in Audio Settings.
+    //              While monitoring, MUTE does NOT silence the signal — the
+    //              point of monitoring is to hear yourself, and the normal
+    //              output device is not receiving anything anyway. MUTE stays
+    //              lit so that leaving monitoring drops you back to silence
+    //              instead of accidentally going live.
+    // Both are deliberately NOT parameters: presets and undo must never be
+    // able to un-mute you behind your back.
+    std::atomic<bool> muted      { false };
+    std::atomic<bool> monitoring { false };
+
+    // Monitor output device (message thread only). monitorDeviceName is the
+    // device chosen in Audio Settings; preMonitorDeviceName remembers the
+    // device that was active when monitoring started, so it can be restored.
+    // The name is saved with the plugin state; the live monitoring state is not.
+    juce::String monitorDeviceName, preMonitorDeviceName;
+
+    // OUTPUT meter (v0.30.0): level of what actually leaves the plugin, i.e.
+    // after mute, output gain, ASMR pan and the Post FX chain. Written on the
+    // audio thread, read by the editor's meter at ~30 Hz.
+    std::atomic<float> uiOutRms { 0.0f }, uiOutPeak { 0.0f };
+
     // Visualizer taps: mono input (pre-conversion) and output (as heard),
     // written on the audio thread, read by the editor's SpectrumView.
     static constexpr int kVizLen = 16384;              // power of two

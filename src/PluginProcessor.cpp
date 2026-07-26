@@ -230,6 +230,7 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     rmsSm = 0.0f;  loudSec = 0.0f;  muteSec = 0.0f;  muteGain = 1.0f;
     gateEnv = 0.0f;  gateGain = 1.0f;  panL = 1.0f;  panR = 1.0f;
     gainSm = juce::Decibels::decibelsToGain (pGain->load());
+    uiOutRms.store (0.0f);  uiOutPeak.store (0.0f);   // OUTPUT meter ballistics
 
     fxSr = sampleRate;  fxBlk = samplesPerBlock;
     fxScratch.setSize (2, samplesPerBlock);
@@ -618,7 +619,13 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         }
         if (muteSec > 0.0f) muteSec -= dt;
 
-        const float target = (muteSec > 0.0f) ? 0.0f : 1.0f;
+        // Manual MUTE (options bar). Suppressed while MONITOR is on: the
+        // output device is the monitor device then, so silencing it would
+        // defeat the purpose — see the comment in PluginProcessor.h.
+        const bool userMute = muted.load (std::memory_order_relaxed)
+                          && ! monitoring.load (std::memory_order_relaxed);
+
+        const float target = (muteSec > 0.0f || userMute) ? 0.0f : 1.0f;
         if (muteGain < 0.999f || target < 1.0f)
             for (int i = 0; i < n; ++i)
             {
@@ -717,6 +724,38 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         }
         prevPos.store (pp + n >= pl ? -1 : pp + n);
     }
+
+    // OUTPUT meter (v0.30.0): measured on the finished buffer, so it shows
+    // exactly what leaves the plugin (mute, gain, ASMR pan, Post FX and the
+    // Matching target preview all included). Fast attack / slow release with
+    // TIME constants, so the ballistics do not depend on the buffer size.
+    {
+        float pk = 0.0f;
+        double sum = 0.0;
+        for (int c = 0; c < ch; ++c)
+        {
+            const float* d = buffer.getReadPointer (c);
+            for (int i = 0; i < n; ++i)
+            {
+                const float a = std::abs (d[i]);
+                if (a > pk) pk = a;
+                sum += (double) d[i] * d[i];
+            }
+        }
+        if (! std::isfinite (pk)) pk = 0.0f;
+        const float rms = (float) std::sqrt (sum / (double) std::max (1, n * ch));
+        const float dt  = (float) n / (float) std::max (1.0, getSampleRate());
+
+        float r = uiOutRms.load (std::memory_order_relaxed);
+        const float aR = 1.0f - std::exp (-dt / (rms > r ? 0.02f : 0.25f));
+        r += aR * (rms - r);
+        uiOutRms.store (std::isfinite (r) ? r : 0.0f, std::memory_order_relaxed);
+
+        float hold = uiOutPeak.load (std::memory_order_relaxed);
+        hold = pk > hold ? pk                              // instant attack,
+                         : hold * std::exp (-dt / 0.45f);  // 450 ms hold-decay
+        uiOutPeak.store (std::isfinite (hold) ? hold : 0.0f, std::memory_order_relaxed);
+    }
 }
 
 void VoxMorphProcessor::getStateInformation (juce::MemoryBlock& dest)
@@ -724,6 +763,7 @@ void VoxMorphProcessor::getStateInformation (juce::MemoryBlock& dest)
     if (auto xml = apvts.copyState().createXml())
     {
         xml->setAttribute ("lockedIds", lockedIds.joinIntoString (","));   // 🔒 params
+        xml->setAttribute ("monitorDevice", monitorDeviceName);            // MONITOR target
         copyXmlToBinary (*xml, dest);
     }
 }
@@ -734,6 +774,10 @@ void VoxMorphProcessor::setStateInformation (const void* data, int size)
     {
         lockedIds = juce::StringArray::fromTokens (xml->getStringAttribute ("lockedIds"), ",", "");
         lockedIds.removeEmptyStrings();
+        // The monitor device is a machine-local preference, so a state saved
+        // elsewhere simply leaves the existing choice alone (no attribute).
+        if (xml->hasAttribute ("monitorDevice"))
+            monitorDeviceName = xml->getStringAttribute ("monitorDevice");
         apvts.replaceState (juce::ValueTree::fromXml (*xml));
     }
 }
