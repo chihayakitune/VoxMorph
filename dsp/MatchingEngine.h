@@ -71,7 +71,10 @@ public:
         float   center = 0.0f;
         float   hifreq = 0.0f;
         float   pitchfloor = 0.0f;
+        float   air = 0.0f;
+        float   airshine = 0.0f;
         bool    rangeApplied = false;
+        bool    airApplied = false;
 
         // ---- v0.29.0 measurement report (drives the status line) ----------
         // Per-band shift the measurement asks for, over and above the global
@@ -119,7 +122,38 @@ public:
                                           ParamGetter getCurrent);
 
     static constexpr float kPitchBias  = 1.0f;    // st below the plain F0 match
-    static constexpr float kRangeBoost = 1.15f;   // intonation compensation
+    // Intonation. The engine computes
+    //     f_out = center * ((f_in * 2^(pitch/12)) / center)^range
+    // so the CONVERTED MEDIAN only lands on the target when the pitch-shifted
+    // median coincides with the pivot -- otherwise the gap between them is
+    // raised to the power of `range` and gets amplified.
+    //
+    // That is what was wrong. pitch aimed 1 st under the target while center
+    // sat exactly ON the target, so the 1 st gap became `range` semitones:
+    // with a wide-intonation target it railed range at 200 % and the result
+    // came out a full 2.00 st under the target median. Measured on the anju
+    // sample: target f0 276.1 Hz, converted median 246.0 Hz.
+    //
+    // Fixed by aiming BOTH pitch and center at the same biased target, so the
+    // shifted median sits on the pivot and the median becomes invariant to
+    // range. The 1.15 boost is gone with it: it was compensating for the very
+    // sag this created, and with the sag removed it is just extra intonation.
+    static constexpr float kRangeBoost = 1.0f;
+    // Upper bound on Intonation Amount. The honest ratio can ask for well
+    // over 200 % against an expressive target, which is unusable; past ~140 %
+    // the expansion stops reading as expression and starts sounding unstable.
+    static constexpr float kRangeMax = 140.0f;
+    static constexpr float kRangeMin = 50.0f;
+
+    // Air / Air Shine, both derived from measurements and both deliberately
+    // capped well below their parameter maxima (1.5 and 6 dB): these are
+    // texture, and overshooting them is far more damaging than leaving them
+    // at zero. Only ever positive -- there is no "negative breath", so a
+    // target cleaner than the source correctly asks for nothing.
+    static constexpr float kAirPerDb   = 0.06f;   // per dB of extra breathiness
+    static constexpr float kAirMax     = 0.60f;
+    static constexpr float kShinePerDb = 0.35f;   // per dB of extra >6 kHz
+    static constexpr float kShineMax   = 3.0f;
 
     // A band only contributes when both sides could LOCATE it this well.
     static constexpr float kMinRel = 0.25f;
@@ -189,7 +223,13 @@ MatchingEngine::autoSet (const VoiceProfile& p1, const VoiceProfile& p2)
     Proposal r;
     if (! p1.valid() || ! p2.valid()) return r;
 
-    r.pitch = cl (st (p2.f0Hz, p1.f0Hz) - kPitchBias, -24.0f, 24.0f);
+    // Aim pitch and pivot at the SAME point: the target median, taken
+    // kPitchBias semitones low (the long-standing perceptual trim -- the
+    // converted voice reads as too high at a literal F0 match). Because the
+    // shifted median then lands exactly on the pivot, the intonation stage
+    // leaves the median alone whatever `range` turns out to be.
+    const float targetMedianHz = p2.f0Hz * std::pow (2.0f, -kPitchBias / 12.0f);
+    r.pitch = cl (st (targetMedianHz, p1.f0Hz), -24.0f, 24.0f);
 
     // ---- collect every (vowel, band) comparison both sides could measure --
     float sv[15], sw[15];          // shift value / weight, for the global fit
@@ -331,11 +371,40 @@ MatchingEngine::autoSet (const VoiceProfile& p1, const VoiceProfile& p2)
     if (p1.f0SpreadSt > 0.3f && p2.f0SpreadSt > 0.3f)
     {
         r.range  = cl (kRangeBoost * 100.0f * p2.f0SpreadSt / p1.f0SpreadSt,
-                       50.0f, 200.0f);
-        r.center = cl (p2.f0Hz, 80.0f, 400.0f);
+                       kRangeMin, kRangeMax);
+        // the pivot is the pitch-shifted median, i.e. the same biased target
+        // the pitch aims at -- see kRangeBoost above
+        r.center = cl (targetMedianHz, 80.0f, 400.0f);
         r.push ("range",  r.range);
         r.push ("center", r.center);
         r.rangeApplied = true;
+    }
+    // ---- Air / Air Shine -------------------------------------------------
+    // Breathiness shows up as LOW harmonic-to-noise ratio in the upper bands,
+    // so a target with less harmonic structure than the source is the breathy
+    // one. Only the bands that carry usable structure on the source side are
+    // compared, otherwise a noisy recording reads as "very breathy" and asks
+    // for maximum air.
+    // A built-in catalog target (and any .vmprofile older than this) carries
+    // no texture measurement at all. Comparing against its zeroed defaults
+    // would read as "infinitely breathy, no shine" and ask for air the target
+    // never asked for, so those two are simply left alone in that case --
+    // whatever the user already has stays.
+    {
+        const bool tgtMeasured = (p2.hnr[0] != 0.0f || p2.hnr[1] != 0.0f || p2.hnr[2] != 0.0f);
+        const bool srcMeasured = (p1.hnr[0] != 0.0f || p1.hnr[1] != 0.0f || p1.hnr[2] != 0.0f);
+        if (tgtMeasured && srcMeasured)
+        {
+            float acc = 0.0f; int n = 0;
+            for (int b = 1; b < 3; ++b)
+                if (p1.hnr[b] > 1.0f || p2.hnr[b] > 1.0f)
+                { acc += p1.hnr[b] - p2.hnr[b]; ++n; }
+            r.air      = n > 0 ? cl (kAirPerDb * (acc / (float) n), 0.0f, kAirMax) : 0.0f;
+            r.airshine = cl (kShinePerDb * (p2.hfDb - p1.hfDb), 0.0f, kShineMax);
+            r.push ("air",      r.air);
+            r.push ("airshine", r.airshine);
+            r.airApplied = true;
+        }
     }
     r.push ("hifreq",     r.hifreq);
     r.push ("hipitch",    50.0f);

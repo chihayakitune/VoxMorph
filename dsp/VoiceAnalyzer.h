@@ -78,6 +78,7 @@ struct VoiceProfile
     int   voicedFrames = 0;
     float rel[3] = { 0.0f, 0.0f, 0.0f };  // per-band reliability, 0..1 (v0.29.0)
     float hnr[3] = { 0.0f, 0.0f, 0.0f };  // band harmonic-to-noise ratio, dB
+    float hfDb = -30.0f;                  // 10*log10(E 6-16k / E 0.3-6k), "shine"
     float tractScale = 1.0f;              // vocal-tract size vs the reference
     VowelProfile vow[5];                  // per-vowel sub-profiles (v0.29.0)
 
@@ -172,7 +173,7 @@ public:
         std::vector<float>  re ((size_t) N), im ((size_t) N);
         std::vector<double> dfn ((size_t) maxLD + 2, 1.0), mag ((size_t) NB + 1);
         std::vector<float>  A ((size_t) N), V ((size_t) N), Acur ((size_t) N);
-        std::vector<float>  f0v, Fv[3], Lv[3], Rv[3], Hv[3], tv;
+        std::vector<float>  f0v, Fv[3], Lv[3], Rv[3], Hv[3], tv, hfv;
         std::vector<float>  pkF, pkL;           // cached peaks, kMaxPeaks/frame
         std::vector<int>    pkN, vv;            // peak count / vowel class
 
@@ -258,6 +259,12 @@ public:
             }
             for (int fi = 0; fi < 3; ++fi) Hv[fi].push_back (hn[fi]);
             tv.push_back ((float) (10.0 * std::log10 ((eLo + 1.0e-20) / (eHi + 1.0e-20))));
+
+            // "shine": how much lives above 6 kHz relative to the speech band
+            double eMid = 0.0, eTop = 0.0;
+            for (int k = binOf (300.0);  k <= binOf (std::min (6000.0,  fs * 0.45)); ++k) eMid += mag[(size_t) k];
+            for (int k = binOf (6000.0); k <= binOf (std::min (16000.0, fs * 0.45)); ++k) eTop += mag[(size_t) k];
+            hfv.push_back ((float) (10.0 * std::log10 ((eTop + 1.0e-20) / (eMid + 1.0e-20))));
         }
 
         // ---- two-pass assignment ------------------------------------------
@@ -362,6 +369,7 @@ public:
         const float Lmax = std::max ({ Lmed[0], Lmed[1], Lmed[2] });
         for (int fi = 0; fi < 3; ++fi) out.L[fi] = Lmed[fi] - Lmax;
         out.tiltDb = median (tv);
+        if (! hfv.empty()) out.hfDb = median (hfv);
 
         classifyVowels (Fv, Rv, vv);
         buildVowelProfiles (out, f0v, Fv, Lv, Rv, Hv, vv);

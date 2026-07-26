@@ -740,7 +740,16 @@ public:
                 TileIconKind::character, /*clickingToggles*/ true);
             btn->setRadioGroupId (kTargetRadioGroup, juce::dontSendNotification);
             btn->setTooltip (juce::String::fromUTF8 (samples[i].displayJp));
-            btn->onClick = [this, i] { selectSampleTarget (i); };
+            // Only act when this button is being turned ON. A shared radio
+            // group turns the OTHERS off with a notification, which fires
+            // their onClick too -- see the TargetFile handler below for what
+            // that was costing.
+            auto* raw = btn.get();
+            btn->onClick = [this, i, raw]
+            {
+                if (! raw->getToggleState()) return;
+                selectSampleTarget (i);
+            };
             addAndMakeVisible (*btn);
             targetButtons.push_back (std::move (btn));
         }
@@ -757,8 +766,17 @@ public:
             // Clicking TargetFile toggles it selected; we immediately restore
             // the previous selection so a cancelled chooser leaves the UI
             // where it was, then re-select TargetFile on load success.
+            //
+            // The toggle-state test is what stops the file chooser opening
+            // when the user picks a different target. JUCE turns the other
+            // buttons in a radio group off via setToggleState(false,
+            // sendNotification), and that DOES fire their onClick -- so
+            // selecting any character used to open the file dialog, because
+            // TargetFile was being switched off.
             btn->onClick = [this]
             {
+                if (targetFileButton == nullptr || ! targetFileButton->getToggleState())
+                    return;                       // being switched off, not chosen
                 restoreTargetSelectionUi();
                 loadTargetFile();
             };
@@ -1391,6 +1409,9 @@ private:
                                              r.range, r.center);
         line += juce::String::formatted ("\nhigh-range start %.0f Hz   pitch floor %.0f Hz",
                                          r.hifreq, r.pitchfloor);
+        if (r.airApplied)
+            line += juce::String::formatted ("   air %.2f   shine %.1f dB",
+                                             r.air, r.airshine);
         // ---- v0.29.0 measurement report ------------------------------
         // Say what was actually compared, so the number above can be
         // trusted or distrusted on evidence rather than on faith.

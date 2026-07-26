@@ -841,6 +841,50 @@ int main()
             if (! ok) ++mFail;
         }
 
+        // (g2) Intonation: the converted MEDIAN must land on the target
+        //      (minus the deliberate perceptual bias) whatever Amount comes
+        //      out as, and Amount must stay inside its cap.
+        //
+        //      The engine computes f_out = center*((f_in*2^(p/12))/center)^r,
+        //      so if pitch aims somewhere the pivot is not, the gap is raised
+        //      to the power r. That is the bug this checks for: it used to
+        //      rail Amount at 200 % and land 2.00 st under the target.
+        {
+            struct { const char* n; float f0a, sa, f0b, sb; } cs2[] = {
+                { "narrow -> very expressive", 162.5f, 3.54f, 276.1f, 6.43f },
+                { "narrow -> expressive",      162.5f, 3.54f, 265.1f, 6.59f },
+                { "similar spread",            162.5f, 3.54f, 352.0f, 4.08f },
+                { "expressive -> flat",        180.0f, 7.00f, 240.0f, 2.00f },
+                { "identical",                 200.0f, 4.00f, 200.0f, 4.00f },
+            };
+            bool ok = true;
+            for (const auto& c : cs2)
+            {
+                VoiceProfile a{}, b{};
+                a.f0Hz = c.f0a; a.f0SpreadSt = c.sa; a.voicedFrames = 200;
+                a.F[0]=560; a.F[1]=1500; a.F[2]=2600;
+                a.rel[0]=a.rel[1]=a.rel[2]=1.0f;
+                b = a; b.f0Hz = c.f0b; b.f0SpreadSt = c.sb;
+                b.F[0]=644; b.F[1]=1725; b.F[2]=2990;
+                const auto r = MatchingEngine::autoSet (a, b);
+                // replay the engine's own formula
+                const double mid = c.f0a * std::pow (2.0, r.pitch/12.0);
+                const double outMed = r.rangeApplied
+                    ? r.center * std::pow (mid / r.center, r.range*0.01) : mid;
+                const double wantHz = c.f0b * std::pow (2.0, -MatchingEngine::kPitchBias/12.0);
+                const double errSt = 12.0*std::log2 (outMed / wantHz);
+                const bool caseOk = std::abs (errSt) < 0.05
+                                 && r.range <= MatchingEngine::kRangeMax + 0.01f
+                                 && r.range >= MatchingEngine::kRangeMin - 0.01f;
+                if (! caseOk) ok = false;
+                std::printf ("   %-26s Amount %5.0f%%  pivot %5.0f Hz  median err %+.3f st%s\n",
+                             c.n, r.range, r.center, errSt, caseOk ? "" : "   <-- BAD");
+            }
+            std::printf ("intonation: median on target regardless of Amount, Amount <= %.0f%%  %s\n",
+                         MatchingEngine::kRangeMax, ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+        }
+
         // (h) degenerate inputs must not produce non-finite parameters
         {
             VoiceProfile a{}, b{};
