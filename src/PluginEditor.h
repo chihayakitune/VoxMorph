@@ -35,13 +35,25 @@
 //    PRESETS = PresetPanel (both defined below in this file).
 //  - All theme colours live in the mainLnf block in the constructor.
 
-// Spectrum visualizer: INPUT (mint) and converted OUTPUT (pink) spectra
-// overlaid on a 20 Hz - 20 kHz log axis. Pulls samples from the processor's
-// viz ring buffers on its own 30 Hz timer; FFT is the engine's radix-2.
-class SpectrumView : public juce::Component, private juce::Timer
+// bilingual tooltip: English first, Japanese below, blank line between.
+// (VoxMorphEditor keeps its own private tip() for its existing call sites.)
+inline juce::String vmTip (const char* en, const char* jp)
+{
+    return juce::String::fromUTF8 (en) + "\n\n" + juce::String::fromUTF8 (jp);
+}
+
+// Shared spectrum analysis (v0.30.1). One FFT pair per frame feeds BOTH the
+// linear SpectrumView and the radial donut view — each frame is two
+// 4096-point FFTs, so letting the donut analyse separately would double that
+// cost for identical numbers. Views register themselves and are repainted
+// after each frame; the analysis is skipped entirely while none is on screen.
+class SpectrumData : private juce::Timer
 {
 public:
-    explicit SpectrumView (VoxMorphProcessor& p) : proc (p)
+    static constexpr int   kCols  = 220;                   // analysed columns
+    static constexpr float kFloor = -66.0f, kTop = 6.0f;   // dB display range
+
+    explicit SpectrumData (VoxMorphProcessor& p) : proc (p)
     {
         re.assign ((size_t) kN, 0.0f);
         im.assign ((size_t) kN, 0.0f);
@@ -50,17 +62,26 @@ public:
         startTimerHz (30);
     }
 
+    void addView (juce::Component* c) { views.push_back (c); }
+
+    const std::vector<float>& in()  const { return smIn;  }   // INPUT column dB
+    const std::vector<float>& out() const { return smOut; }   // OUTPUT column dB
+
 private:
-    static constexpr int   kN     = 4096;     // FFT size
-    static constexpr int   kCols  = 220;      // drawn columns
-    static constexpr float kFloor = -66.0f, kTop = 6.0f;   // dB display range
+    static constexpr int kN = 4096;           // FFT size
 
     void timerCallback() override
     {
-        if (! isShowing()) return;
+        bool anyShowing = false;
+        for (auto& v : views)
+            if (v != nullptr && v->isShowing()) { anyShowing = true; break; }
+        if (! anyShowing) return;
+
         analyze (proc.vizIn,  smIn);
         analyze (proc.vizOut, smOut);
-        repaint();
+
+        for (auto& v : views)
+            if (v != nullptr && v->isShowing()) v->repaint();
     }
 
     void analyze (const std::vector<float>& src, std::vector<float>& dest)
@@ -93,6 +114,23 @@ private:
                        : 0.86f * s + 0.14f * db;
         }
     }
+
+    VoxMorphProcessor& proc;
+    std::vector<float> re, im, smIn, smOut;
+    std::vector<juce::Component::SafePointer<juce::Component>> views;
+};
+
+// Spectrum visualizer: INPUT (mint) and converted OUTPUT (pink) spectra
+// overlaid on a 20 Hz - 20 kHz log axis. Pure painter — the numbers come
+// from the shared SpectrumData.
+class SpectrumView : public juce::Component
+{
+public:
+    explicit SpectrumView (const SpectrumData& d) : data (d) {}
+
+private:
+    static constexpr int   kCols  = SpectrumData::kCols;
+    static constexpr float kFloor = SpectrumData::kFloor, kTop = SpectrumData::kTop;
 
     void drawCurve (juce::Graphics& g, const std::vector<float>& v,
                     juce::Rectangle<float> r, juce::Colour col) const
@@ -140,8 +178,8 @@ private:
             g.drawHorizontalLine ((int) y, r.getX(), r.getRight());
         }
 
-        drawCurve (g, smIn,  r, juce::Colour (0xff54bda1));        // input: mint
-        drawCurve (g, smOut, r, juce::Colour (0xfff08ba5));        // output: pink
+        drawCurve (g, data.in(),  r, juce::Colour (0xff54bda1));   // input: mint
+        drawCurve (g, data.out(), r, juce::Colour (0xfff08ba5));   // output: pink
 
         g.setFont (juce::Font (juce::FontOptions (11.0f)));        // legend
         g.setColour (juce::Colour (0xff54bda1));
@@ -150,8 +188,182 @@ private:
         g.drawText ("Output", (int) r.getRight() - 56,  (int) r.getY() + 2, 54, 14, juce::Justification::left);
     }
 
-    VoxMorphProcessor& proc;
-    std::vector<float> re, im, smIn, smOut;
+    const SpectrumData& data;
+};
+
+// ---------------------------------------------------------------------------
+// Radial ("donut") visualizer, v0.30.1 — the same INPUT/OUTPUT spectra as
+// SpectrumView wrapped around a circle. Frequency runs clockwise from the top
+// and the radius is the level (inner edge = the -66 dB floor, outer edge =
+// +6 dB), so a voice shows up as a star whose points are its formants.
+//
+// Two deliberate differences from the linear graph next to it, both needed to
+// make a ~150 px circle readable (checked against rendered test spectra):
+//  * Span is 60 Hz - 12 kHz, not 20 Hz - 20 kHz. On a log axis the empty
+//    20-110 Hz region would eat the first QUARTER of the circle and leave the
+//    formants squashed into the bottom half.
+//  * The 220 analysis columns are averaged down to 72 angular points and
+//    drawn as a smooth closed curve. Wrapping all 220 round a ~50 px annulus
+//    turns every single harmonic into a needle instead of a lobe.
+class RadialSpectrumView : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    explicit RadialSpectrumView (const SpectrumData& d) : data (d)
+    {
+        setTooltip (vmTip (
+            "The spectrum from the graph on the left, wrapped around a circle. Frequency "
+            "runs clockwise from 60 Hz at the top through 12 kHz, and the distance from "
+            "the centre is the level (inner edge -66 dB, outer edge +6 dB). Mint = your "
+            "input, pink = the converted output. The points of the star are the formants "
+            "of your voice, so the two shapes show at a glance how far the conversion "
+            "moved them.",
+            "左のグラフと同じスペクトラムを円形に巻いたものです。周波数は真上の60Hzから"
+            "時計回りに12kHzまで進み、中心からの距離がレベルを表します(内側=-66dB、"
+            "外側=+6dB)。ミントが入力、ピンクが変換後の出力です。星のとがった部分が声の"
+            "フォルマントなので、2つの形を見比べると変換でどれだけ動いたかが一目で分かります。"));
+    }
+
+private:
+    static constexpr int    kPts  = 72;                  // angular points
+    static constexpr double kLoHz = 60.0, kHiHz = 12000.0;
+
+    // SpectrumData column index of a frequency on its 20 Hz - 20 kHz log grid
+    static int colFor (double hz)
+    {
+        return juce::jlimit (0, SpectrumData::kCols,
+                   (int) std::lround (SpectrumData::kCols * std::log10 (hz / 20.0) / 3.0));
+    }
+
+    // columns -> kPts angular points: mean dB per bucket, then a circular
+    // 3-tap smooth (the averaging is what turns needles into lobes)
+    static void reduce (const std::vector<float>& v, float* outPts)
+    {
+        const int lo = colFor (kLoHz), hi = colFor (kHiHz);
+        const int span = juce::jmax (kPts, hi - lo);
+        float acc[kPts];
+        for (int i = 0; i < kPts; ++i)
+        {
+            const int c0 = lo + i * span / kPts;
+            const int c1 = juce::jmax (c0 + 1, lo + (i + 1) * span / kPts);
+            double s = 0.0;  int n = 0;
+            for (int c = c0; c < c1 && c < (int) v.size(); ++c) { s += v[(size_t) c]; ++n; }
+            acc[i] = n > 0 ? (float) (s / n) : SpectrumData::kFloor;
+        }
+        for (int i = 0; i < kPts; ++i)
+            outPts[i] = 0.25f * acc[(i + kPts - 1) % kPts]
+                      + 0.50f * acc[i]
+                      + 0.25f * acc[(i + 1) % kPts];
+    }
+
+    static float radiusFor (float db, float rIn, float rOut)
+    {
+        const float t = juce::jlimit (0.0f, 1.0f,
+            (db - SpectrumData::kFloor) / (SpectrumData::kTop - SpectrumData::kFloor));
+        // 6 % margin so a silent band rests just clear of the centre puck
+        return rIn + (rOut - rIn) * (0.06f + 0.94f * t);
+    }
+
+    static juce::Rectangle<float> circle (juce::Point<float> c, float r)
+    {
+        return juce::Rectangle<float> (r * 2.0f, r * 2.0f).withCentre (c);
+    }
+
+    void drawRing (juce::Graphics& g, const std::vector<float>& v, juce::Point<float> c,
+                   float rIn, float rOut, juce::Colour col, float thick) const
+    {
+        if ((int) v.size() < kPts) return;
+        float db[kPts];
+        reduce (v, db);
+
+        juce::Point<float> pt[kPts];
+        for (int i = 0; i < kPts; ++i)
+        {
+            const float a = juce::MathConstants<float>::twoPi * (float) i / (float) kPts
+                          - juce::MathConstants<float>::halfPi;      // 0 = top
+            const float r = radiusFor (db[i], rIn, rOut);
+            pt[i] = { c.x + r * std::cos (a), c.y + r * std::sin (a) };
+        }
+
+        // smooth closed curve: quadratic segments anchored at the midpoints
+        // with each sample as the control point — wraps seamlessly where
+        // 12 kHz meets 60 Hz again at the top
+        auto mid = [&] (int i, int j) { return (pt[i] + pt[j]) * 0.5f; };
+        juce::Path p;
+        p.startNewSubPath (mid (kPts - 1, 0));
+        for (int i = 0; i < kPts; ++i)
+            p.quadraticTo (pt[i], mid (i, (i + 1) % kPts));
+        p.closeSubPath();
+
+        g.setColour (col);
+        g.strokePath (p, juce::PathStrokeType (thick, juce::PathStrokeType::curved,
+                                                      juce::PathStrokeType::rounded));
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced (2.0f);
+        g.setColour (juce::Colours::white);
+        g.fillRoundedRectangle (b, 8.0f);
+        g.setColour (juce::Colour (0xffe9d8dd));
+        g.drawRoundedRectangle (b, 8.0f, 1.0f);
+
+        const auto  c    = b.getCentre();
+        const float rOut = 0.5f * juce::jmin (b.getWidth(), b.getHeight()) - 9.0f;
+        if (rOut < 26.0f) return;                       // too small to be readable
+        const float rIn  = rOut * 0.30f;                // the donut hole
+
+        // the dish the curves sit in: a soft raised disc
+        g.setGradientFill (juce::ColourGradient (juce::Colour (0xfffafcfd), c.x, c.y - rOut,
+                                                 juce::Colour (0xffeceff3), c.x, c.y + rOut, false));
+        g.fillEllipse (circle (c, rOut));
+        g.setColour (juce::Colour (0x14000000));
+        g.drawEllipse (circle (c, rOut), 1.0f);
+
+        g.setColour (juce::Colour (0x12000000));        // level guide rings
+        for (float db : { -48.0f, -24.0f, 0.0f })
+            g.drawEllipse (circle (c, radiusFor (db, rIn, rOut)), 0.8f);
+
+        drawRing (g, data.in(),  c, rIn, rOut, juce::Colour (0xff54bda1).withAlpha (0.8f), 1.2f);
+        drawRing (g, data.out(), c, rIn, rOut, juce::Colour (0xfff08ba5),                  1.9f);
+
+        // centre puck: covers the crowded low-radius area and gives the donut
+        // its raised look
+        juce::Path hole;
+        hole.addEllipse (circle (c, rIn));
+        juce::DropShadow (juce::Colour (0x3a000000), 11, { 0, 3 }).drawForPath (g, hole);
+        g.setGradientFill (juce::ColourGradient (juce::Colours::white,       c.x, c.y - rIn,
+                                                 juce::Colour (0xffe7ebef),  c.x, c.y + rIn, false));
+        g.fillPath (hole);
+    }
+
+    const SpectrumData& data;
+};
+
+// VISUALIZER row (v0.30.1): the linear spectrum on the left, the donut
+// version of the same data on the right. The donut is square and as tall as
+// the row; on narrow windows it shrinks rather than disappearing.
+class VisualizerRow : public juce::Component
+{
+public:
+    VisualizerRow (juce::Component& lin, juce::Component& rad) : linear (lin), radial (rad)
+    {
+        addAndMakeVisible (linear);
+        addAndMakeVisible (radial);
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds();
+        const int side = juce::jlimit (juce::jmin (100, r.getWidth() / 3), r.getHeight(),
+                                       (int) ((float) r.getWidth() * 0.36f));
+        radial.setBounds (r.removeFromRight (side));
+        r.removeFromRight (4);
+        linear.setBounds (r);
+    }
+
+private:
+    juce::Component& linear;
+    juce::Component& radial;
 };
 
 // Realtime status row under the visualizer. Shows the estimated internal
@@ -244,13 +456,6 @@ private:
 // ===========================================================================
 // Shared helpers (v0.30.0)
 // ===========================================================================
-
-// bilingual tooltip: English first, Japanese below, blank line between.
-// (VoxMorphEditor keeps its own private tip() for its existing call sites.)
-inline juce::String vmTip (const char* en, const char* jp)
-{
-    return juce::String::fromUTF8 (en) + "\n\n" + juce::String::fromUTF8 (jp);
-}
 
 // ---- presets --------------------------------------------------------------
 // One folder for every preset writer: the PRESETS tab, the MATCHING tab's
@@ -3724,8 +3929,10 @@ public:
         items.push_back ({ presetBar.get(), 32 });
 
         addSection ("VISUALIZER");
-        content.addAndMakeVisible (spectrum);
-        items.push_back ({ &spectrum, 168 });
+        specData.addView (&spectrum);          // one FFT pair feeds both views
+        specData.addView (&radial);
+        content.addAndMakeVisible (vizRow);    // linear graph + radial donut
+        items.push_back ({ &vizRow, 168 });
         content.addAndMakeVisible (status);    // realtime status (latency)
         items.push_back ({ &status, 26 });
 
@@ -4397,7 +4604,11 @@ private:
     juce::TooltipWindow tooltipWindow { this, 350 };
     juce::Viewport  viewport;    // scroll container
     juce::Component content;     // holds every row; taller than the window
-    SpectrumView    spectrum { proc };
+    // VISUALIZER: one shared analysis, two renderings side by side
+    SpectrumData       specData { proc };
+    SpectrumView       spectrum { specData };
+    RadialSpectrumView radial   { specData };
+    VisualizerRow      vizRow   { spectrum, radial };
     StatusView      status { proc };
     OutputMeter     outMeter { proc };
     MatchingPanel   matchingPanel { proc };
