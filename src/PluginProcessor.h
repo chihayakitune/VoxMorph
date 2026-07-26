@@ -179,6 +179,16 @@ public:
     // The name is saved with the plugin state; the live monitoring state is not.
     juce::String monitorDeviceName, preMonitorDeviceName;
 
+    // AEIOU vowel readout (v0.30.2) for the vowel donut in the VISUALIZER.
+    // These are the engine's OWN vowel coordinate — the same numbers the
+    // AEIOU Character warp acts on — republished through atomics because the
+    // engine's getters are not safe to call from the message thread.
+    // uiVowelActive is false whenever the feature is off or at 0 %, in which
+    // case the engine does not track vowels at all and the values are stale:
+    // the UI must show an inactive state rather than draw them.
+    std::atomic<float> uiVowelH { 0.5f }, uiVowelF { 0.5f }, uiVowelConf { 0.0f };
+    std::atomic<bool>  uiVowelActive { false };
+
     // OUTPUT meter (v0.30.0): level of what actually leaves the plugin, i.e.
     // after mute, output gain, ASMR pan and the Post FX chain. Written on the
     // audio thread, read by the editor's meter at ~30 Hz.

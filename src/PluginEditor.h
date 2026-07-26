@@ -339,23 +339,207 @@ private:
     const SpectrumData& data;
 };
 
-// VISUALIZER row (v0.30.1): the linear spectrum on the left, the donut
-// version of the same data on the right. The donut is square and as tall as
-// the row; on narrow windows it shrinks rather than disappearing.
+// ---------------------------------------------------------------------------
+// AEIOU vowel-mix donut, v0.30.2 — a true donut chart whose five arcs are
+// proportional to how much /a/ /i/ /u/ /e/ /o/ the engine currently hears.
+//
+// The numbers are NOT re-estimated here. They are the engine's own vowel
+// coordinate (height = openness from F1, frontness = log F2/F1) run through
+// VowelAdaptiveWarp::anchorWeights — literally the mix the AEIOU Character
+// warp is acting on. Deriving a second vowel estimate from the visualizer
+// spectrum would be a fresh unvalidated estimator that disagrees with the
+// DSP, which is the trap v0.28.3 / v0.28.4 already fell into.
+//
+// Consequence: the engine only tracks vowels while AEIOU Character is ON with
+// Amount > 0 (that feature is what drives the tracking). With it off there is
+// no data, so the chart says so instead of drawing stale values.
+class VowelDonut : public juce::Component, public juce::SettableTooltipClient,
+                   private juce::Timer
+{
+public:
+    explicit VowelDonut (VoxMorphProcessor& p) : proc (p)
+    {
+        setTooltip (vmTip (
+            "How much of each Japanese vowel the engine hears in your voice right now, "
+            "as a share of the whole. This is the exact vowel mix the AEIOU Character "
+            "feature uses to pick its per-vowel formant offsets, so it shows you why a "
+            "Character is doing what it is doing. It needs AEIOU Character switched on "
+            "(FORMANT section) with Amount above 0 - the vowel tracking is part of that "
+            "feature and does not run otherwise. The chart fades while you are not "
+            "speaking, because the estimate is only meaningful on voiced sound.",
+            "いま話している声に含まれる母音(あいうえお)の割合です。AEIOU Character機能が"
+            "母音ごとのフォルマント補正を選ぶのに使っている値そのものなので、Characterが"
+            "なぜその効き方をしているのかが分かります。表示にはFORMANTセクションの"
+            "AEIOU Characterがオンで、Amountが0より大きいことが必要です(母音の推定自体が"
+            "この機能の一部で、オフのときは動作しません)。声を出していない間は推定が"
+            "無意味なため薄く表示されます。"));
+        startTimerHz (30);
+    }
+
+private:
+    static constexpr int kV = 5;                                  // a i u e o
+    static constexpr const char* kLbl[kV] = { "A", "I", "U", "E", "O" };
+
+    static juce::Colour colourFor (int i)
+    {
+        static const juce::Colour c[kV] = {
+            juce::Colour (0xfff08ba5),   // A  pink   (matches the output curve)
+            juce::Colour (0xff54c0aa),   // I  mint   (matches the input curve)
+            juce::Colour (0xffa79ee0),   // U  lavender
+            juce::Colour (0xffe3a63c),   // E  amber
+            juce::Colour (0xff6fb2dc)    // O  sky
+        };
+        return c[juce::jlimit (0, kV - 1, i)];
+    }
+
+    void timerCallback() override
+    {
+        if (! isShowing()) return;
+
+        const bool  live = proc.uiVowelActive.load (std::memory_order_relaxed);
+        const float conf = proc.uiVowelConf  .load (std::memory_order_relaxed);
+        const bool  good = live && conf > 0.02f;
+
+        if (good)
+        {
+            float w[kV];
+            VowelAdaptiveWarp::anchorWeights (proc.uiVowelH.load (std::memory_order_relaxed),
+                                              proc.uiVowelF.load (std::memory_order_relaxed), w);
+            for (int i = 0; i < kV; ++i)
+                sm[i] += 0.22f * (w[i] - sm[i]);      // glide, ~150 ms
+        }
+        // hold the last mix while silent, but fade it out so a frozen shape is
+        // never mistaken for a live reading
+        fade   += 0.15f * ((good ? 1.0f : 0.22f) - fade);
+        active  = live;
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced (2.0f);
+        g.setColour (juce::Colours::white);
+        g.fillRoundedRectangle (b, 8.0f);
+        g.setColour (juce::Colour (0xffe9d8dd));
+        g.drawRoundedRectangle (b, 8.0f, 1.0f);
+
+        const auto  c    = b.getCentre();
+        const float rOut = 0.5f * juce::jmin (b.getWidth(), b.getHeight()) - 9.0f;
+        if (rOut < 26.0f) return;
+        const float rIn  = rOut * 0.52f;              // wider hole: this is a
+        const auto  box  = juce::Rectangle<float> (rOut * 2.0f, rOut * 2.0f).withCentre (c);
+
+        g.setGradientFill (juce::ColourGradient (juce::Colour (0xfffafcfd), c.x, c.y - rOut,
+                                                 juce::Colour (0xffeceff3), c.x, c.y + rOut, false));
+        g.fillEllipse (box);
+        g.setColour (juce::Colour (0x14000000));
+        g.drawEllipse (box, 1.0f);
+
+        if (! active)
+        {
+            drawPuck (g, c, rIn);          // puck FIRST — the message sits on top
+            g.setColour (juce::Colour (0xff9aa5a2));
+            g.setFont (juce::Font (juce::FontOptions (10.5f)));
+            g.drawFittedText ("AEIOU Character\nis off",
+                              box.toNearestInt(), juce::Justification::centred, 2);
+            return;
+        }
+
+        float sum = 0.0f;
+        for (int i = 0; i < kV; ++i) sum += juce::jmax (0.0f, sm[i]);
+        if (sum <= 1.0e-6f) { drawPuck (g, c, rIn); return; }
+
+        const float twoPi = juce::MathConstants<float>::twoPi;
+        const float gap   = 0.018f;                   // radians between arcs
+        float a0 = 0.0f;                              // JUCE: 0 = top, clockwise
+        int   top = 0;
+        for (int i = 0; i < kV; ++i)
+        {
+            const float share = juce::jmax (0.0f, sm[i]) / sum;
+            const float a1    = a0 + share * twoPi;
+            if (share > sm[top] / sum) top = i;
+
+            if (a1 - a0 > gap * 2.0f)
+            {
+                juce::Path seg;
+                seg.addPieSegment (box, a0 + gap, a1 - gap, rIn / rOut);
+                g.setColour (colourFor (i).withMultipliedAlpha (fade));
+                g.fillPath (seg);
+
+                // vowel letter on the arc, once the arc is wide enough to hold it
+                if (share > 0.085f)
+                {
+                    const float am = 0.5f * (a0 + a1);
+                    const float rm = 0.5f * (rIn + rOut);
+                    const juce::Point<float> lp (c.x + rm * std::sin (am),
+                                                 c.y - rm * std::cos (am));
+                    g.setColour (juce::Colours::white.withMultipliedAlpha (fade));
+                    g.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
+                    g.drawText (kLbl[i], juce::Rectangle<float> (18.0f, 14.0f).withCentre (lp)
+                                                                             .toNearestInt(),
+                                juce::Justification::centred);
+                }
+            }
+            a0 = a1;
+        }
+
+        drawPuck (g, c, rIn);
+
+        // dominant vowel + its share in the hole
+        const float topShare = juce::jmax (0.0f, sm[top]) / sum;
+        g.setColour (juce::Colour (0xff2e2e32).withMultipliedAlpha (juce::jmax (0.35f, fade)));
+        g.setFont (juce::Font (juce::FontOptions (juce::jmin (22.0f, rIn * 0.9f),
+                                                  juce::Font::bold)));
+        g.drawText (kLbl[top],
+                    juce::Rectangle<float> (rIn * 1.6f, rIn * 0.95f)
+                        .withCentre ({ c.x, c.y - rIn * 0.20f }).toNearestInt(),
+                    juce::Justification::centred);
+        g.setColour (juce::Colour (0xff9aa5a2));
+        g.setFont (juce::Font (juce::FontOptions (juce::jmin (11.0f, rIn * 0.42f))));
+        g.drawText (juce::String (juce::roundToInt (topShare * 100.0f)) + "%",
+                    juce::Rectangle<float> (rIn * 1.6f, rIn * 0.6f)
+                        .withCentre ({ c.x, c.y + rIn * 0.44f }).toNearestInt(),
+                    juce::Justification::centred);
+    }
+
+    static void drawPuck (juce::Graphics& g, juce::Point<float> c, float rIn)
+    {
+        juce::Path hole;
+        hole.addEllipse (juce::Rectangle<float> (rIn * 2.0f, rIn * 2.0f).withCentre (c));
+        juce::DropShadow (juce::Colour (0x3a000000), 11, { 0, 3 }).drawForPath (g, hole);
+        g.setGradientFill (juce::ColourGradient (juce::Colours::white,      c.x, c.y - rIn,
+                                                 juce::Colour (0xffe7ebef), c.x, c.y + rIn, false));
+        g.fillPath (hole);
+    }
+
+    VoxMorphProcessor& proc;
+    float sm[kV] = { 0.2f, 0.2f, 0.2f, 0.2f, 0.2f };
+    float fade = 0.22f;
+    bool  active = false;
+};
+
+// VISUALIZER row (v0.30.1, extended v0.30.2): the linear spectrum on the
+// left, then the radial version of the same data, then the AEIOU vowel mix.
+// The two donuts are square and as tall as the row; on narrow windows they
+// shrink rather than disappearing.
 class VisualizerRow : public juce::Component
 {
 public:
-    VisualizerRow (juce::Component& lin, juce::Component& rad) : linear (lin), radial (rad)
+    VisualizerRow (juce::Component& lin, juce::Component& rad, juce::Component& vow)
+        : linear (lin), radial (rad), vowel (vow)
     {
         addAndMakeVisible (linear);
         addAndMakeVisible (radial);
+        addAndMakeVisible (vowel);
     }
 
     void resized() override
     {
         auto r = getLocalBounds();
-        const int side = juce::jlimit (juce::jmin (100, r.getWidth() / 3), r.getHeight(),
-                                       (int) ((float) r.getWidth() * 0.36f));
+        const int side = juce::jlimit (juce::jmin (76, r.getWidth() / 4), r.getHeight(),
+                                       (int) ((float) r.getWidth() * 0.26f));
+        vowel.setBounds (r.removeFromRight (side));
+        r.removeFromRight (4);
         radial.setBounds (r.removeFromRight (side));
         r.removeFromRight (4);
         linear.setBounds (r);
@@ -364,6 +548,7 @@ public:
 private:
     juce::Component& linear;
     juce::Component& radial;
+    juce::Component& vowel;
 };
 
 // Realtime status row under the visualizer. Shows the estimated internal
@@ -4200,8 +4385,11 @@ public:
         syncLockUI();
 
         setResizable (true, true);
-        setResizeLimits (440, 320, 900, contentHeight + 50);
-        setSize (560, juce::jmin (contentHeight + 42, kMaxInitialHeight));
+        // wider than before (v0.30.2): the VISUALIZER row now holds the
+        // linear graph plus two donuts, which needs the extra width to
+        // breathe. Narrower still works — the donuts shrink.
+        setResizeLimits (440, 320, 1100, contentHeight + 50);
+        setSize (680, juce::jmin (contentHeight + 42, kMaxInitialHeight));
 
         // sliders build their value boxes before this editor's LookAndFeel is
         // attached to them, so push the theme colours down explicitly
@@ -4604,11 +4792,13 @@ private:
     juce::TooltipWindow tooltipWindow { this, 350 };
     juce::Viewport  viewport;    // scroll container
     juce::Component content;     // holds every row; taller than the window
-    // VISUALIZER: one shared analysis, two renderings side by side
+    // VISUALIZER: one shared spectrum analysis feeding the linear graph and
+    // the radial donut, plus the vowel-mix donut (its own data source)
     SpectrumData       specData { proc };
     SpectrumView       spectrum { specData };
     RadialSpectrumView radial   { specData };
-    VisualizerRow      vizRow   { spectrum, radial };
+    VowelDonut         vowel    { proc };
+    VisualizerRow      vizRow   { spectrum, radial, vowel };
     StatusView      status { proc };
     OutputMeter     outMeter { proc };
     MatchingPanel   matchingPanel { proc };

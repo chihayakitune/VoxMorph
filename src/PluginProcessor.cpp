@@ -559,6 +559,23 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     else
         engine.process (m, m, n);
 
+    // AEIOU vowel readout for the UI donut. The engine only tracks vowels
+    // while the AEIOU Character warp is on (it is what drives the tracking),
+    // so publish that flag too and let the UI show an inactive state rather
+    // than drawing values that stopped updating.
+    {
+        const bool vaLive = p.vowelAdapt && p.vowelAdaptAmt > 1.0e-4f;
+        uiVowelActive.store (vaLive, std::memory_order_relaxed);
+        if (vaLive)
+        {
+            uiVowelH   .store (engine.vowelHeight(),     std::memory_order_relaxed);
+            uiVowelF   .store (engine.vowelFrontness(),  std::memory_order_relaxed);
+            uiVowelConf.store (engine.vowelConfidence(), std::memory_order_relaxed);
+        }
+        else
+            uiVowelConf.store (0.0f, std::memory_order_relaxed);
+    }
+
     // Latency estimate = engine lookahead (changes with Low Latency Mode)
     // + enabled hosted FX plugins. Pitch/Formant/Voice Quality/Breath run
     // inside the same grain pipeline and add no delay of their own. The UI

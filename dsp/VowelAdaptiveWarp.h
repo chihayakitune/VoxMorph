@@ -197,6 +197,31 @@ public:
     float vowelFrontness()   const { return frontness; }
     float confidence()       const { return conf; }
 
+    // Per-anchor blend weights for a (height, frontness) coordinate,
+    // normalised to sum 1 = the "how much /a/, /i/, /u/, /e/, /o/ is this"
+    // mix. Added in v0.30.2 so the UI can DISPLAY the vowel mix this class is
+    // acting on instead of re-deriving it from the spectrum with a second,
+    // unvalidated estimator.
+    //
+    // NOTE: this repeats the weight formula inside process() on purpose.
+    // process() accumulates w * map and divides by the sum at the end; making
+    // it call this instead would normalise first and change the arithmetic in
+    // the last bits, which is not worth any risk to the DSP. Keep the two in
+    // sync — they are deliberately adjacent.
+    static void anchorWeights (float h, float f, float* wOut5)
+    {
+        float sum = 0.0f;
+        for (int a = 0; a < kAnchors; ++a)
+        {
+            const float dh = h - kAnchorH[a];
+            const float df = f - kAnchorF[a];
+            wOut5[a] = 1.0f / (dh * dh + df * df + 0.02f);
+            sum += wOut5[a];
+        }
+        for (int a = 0; a < kAnchors; ++a)
+            wOut5[a] = sum > 0.0f ? wOut5[a] / sum : 1.0f / (float) kAnchors;
+    }
+
 private:
     // coordinate normalization ranges (log2 Hz / log2 ratio). Fixed for the
     // first prototype; clamped, so out-of-range voices saturate gracefully.
