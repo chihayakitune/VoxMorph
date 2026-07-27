@@ -189,10 +189,49 @@ public:
     std::atomic<float> uiVowelH { 0.5f }, uiVowelF { 0.5f }, uiVowelConf { 0.0f };
     std::atomic<bool>  uiVowelActive { false };
 
-    // OUTPUT meter (v0.30.0): level of what actually leaves the plugin, i.e.
-    // after mute, output gain, ASMR pan and the Post FX chain. Written on the
-    // audio thread, read by the editor's meter at ~30 Hz.
-    std::atomic<float> uiOutRms { 0.0f }, uiOutPeak { 0.0f };
+    // ---- UI level meters (v0.30.0, per channel since v0.30.3) -------------
+    // Written on the audio thread, read by the editor at ~30 Hz. Fast attack
+    // / slow release on the RMS and a decaying peak hold, both driven by TIME
+    // constants so the ballistics never depend on the host buffer size.
+    struct LevelMeter
+    {
+        std::atomic<float> rms { 0.0f }, peak { 0.0f };
+
+        void reset() { rms.store (0.0f); peak.store (0.0f); }
+
+        void push (const float* d, int n, float dt)
+        {
+            if (d == nullptr || n <= 0) return;
+            float pk = 0.0f;
+            double sum = 0.0;
+            for (int i = 0; i < n; ++i)
+            {
+                const float a = std::abs (d[i]);
+                if (a > pk) pk = a;
+                sum += (double) d[i] * d[i];
+            }
+            if (! std::isfinite (pk)) pk = 0.0f;
+            push ((float) std::sqrt (sum / (double) n), pk, dt);
+        }
+
+        void push (float rmsNow, float peakNow, float dt)
+        {
+            float r = rms.load (std::memory_order_relaxed);
+            r += (1.0f - std::exp (-dt / (rmsNow > r ? 0.02f : 0.25f))) * (rmsNow - r);
+            rms.store (std::isfinite (r) ? r : 0.0f, std::memory_order_relaxed);
+
+            float p = peak.load (std::memory_order_relaxed);
+            p = peakNow > p ? peakNow : p * std::exp (-dt / 0.45f);
+            peak.store (std::isfinite (p) ? p : 0.0f, std::memory_order_relaxed);
+        }
+    };
+
+    // uiIn*  = the raw device/host input, measured BEFORE the noise gate and
+    //          the Pre FX so the meter still shows your mic while gated.
+    // uiOut* = what actually leaves the plugin: after mute, output gain, the
+    //          ASMR position and the Post FX chain.
+    // With a mono bus both channels of a pair carry the same signal.
+    LevelMeter uiInL, uiInR, uiOutL, uiOutR;
 
     // Visualizer taps: mono input (pre-conversion) and output (as heard),
     // written on the audio thread, read by the editor's SpectrumView.

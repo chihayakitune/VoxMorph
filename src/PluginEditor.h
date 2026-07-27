@@ -518,37 +518,218 @@ private:
     bool  active = false;
 };
 
-// VISUALIZER row (v0.30.1, extended v0.30.2): the linear spectrum on the
-// left, then the radial version of the same data, then the AEIOU vowel mix.
-// The two donuts are square and as tall as the row; on narrow windows they
-// shrink rather than disappearing.
+// ---------------------------------------------------------------------------
+// Level rings, v0.30.3 — the four level meters (input L/R and output L/R) as
+// one donut: four concentric progress rings, outer to inner
+//   IN L (mint) / IN R (mint, darker) / OUT L (pink) / OUT R (pink, darker)
+// Each ring fills clockwise from the top over the same -60 .. +6 dB scale the
+// OUTPUT section's bar uses, with a peak-hold tick that turns red at 0 dBFS.
+//
+// Input is measured before the noise gate and the Pre FX (so you can see your
+// mic even while the gate has it shut); output is what actually leaves the
+// plugin. With a mono bus the L and R of a pair read the same.
+class LevelRingsDonut : public juce::Component, public juce::SettableTooltipClient,
+                        private juce::Timer
+{
+public:
+    explicit LevelRingsDonut (VoxMorphProcessor& p) : proc (p)
+    {
+        setTooltip (vmTip (
+            "All four level meters in one dial. From the outside in: input L, input R, "
+            "output L, output R - mint is the input, pink is the converted output, and "
+            "the outer ring of each pair is the left channel. Each ring fills clockwise "
+            "from the top over -60 to +6 dB, and the small tick is the recent peak; it "
+            "turns red when a channel hits 0 dBFS. The input is measured before the noise "
+            "gate, so it keeps showing your mic even while the gate is closed. With a "
+            "mono input or output the two rings of that pair read the same.",
+            "入力L/R・出力L/Rの4つのレベルを1つにまとめた表示です。外側から順に 入力L / "
+            "入力R / 出力L / 出力R で、ミントが入力・ピンクが変換後の出力、各ペアの外側が"
+            "左チャンネルです。各リングは真上から時計回りに-60〜+6dBで伸び、小さな目盛りが"
+            "直近のピークです。0dBFSに達すると赤くなります。入力はノイズゲートより前で"
+            "測っているので、ゲートが閉じている間もマイクの状態が分かります。モノラルの"
+            "場合は各ペアの2本が同じ値になります。"));
+        startTimerHz (30);
+    }
+
+private:
+    static constexpr int kR = 4;                    // rings: inL, inR, outL, outR
+
+    // -60 .. +6 dB over a 270 deg sweep with the gap at the BOTTOM. A full
+    // 360 deg ring was tried first and rejected: with no start, no end and no
+    // marked 0 dB the arcs gave no sense of "how close am I to clipping", and
+    // the peak tick (which always sits ahead of the RMS arc) read as a stray
+    // mark floating in empty track.
+    static constexpr float kA0     = 1.25f * juce::MathConstants<float>::pi;  // 7:30
+    static constexpr float kSweep  = 1.50f * juce::MathConstants<float>::pi;  // 270 deg
+    static constexpr float kZeroDb = 60.0f / 66.0f;    // where 0 dBFS lands
+
+    static float pos (float lin)                    // linear -> 0..1 on the scale
+    {
+        const float db = juce::Decibels::gainToDecibels (lin, -60.0f);
+        return juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 66.0f);
+    }
+
+    static float angleAt (float p) { return kA0 + p * kSweep; }
+
+    static void strokeArc (juce::Graphics& g, juce::Point<float> c, float r,
+                           float from, float to, float w, juce::Colour col, bool round)
+    {
+        if (to <= from) return;
+        juce::Path a;
+        a.addCentredArc (c.x, c.y, r, r, 0.0f, angleAt (from), angleAt (to), true);
+        g.setColour (col);
+        g.strokePath (a, juce::PathStrokeType (w, juce::PathStrokeType::curved,
+                                round ? juce::PathStrokeType::rounded
+                                      : juce::PathStrokeType::butt));
+    }
+
+    static juce::Colour colourFor (int i)
+    {
+        static const juce::Colour c[kR] = {
+            juce::Colour (0xff54c0aa),   // IN  L  mint
+            juce::Colour (0xff3f9c88),   // IN  R  mint, darker
+            juce::Colour (0xfff08ba5),   // OUT L  pink
+            juce::Colour (0xffcf6d86)    // OUT R  pink, darker
+        };
+        return c[juce::jlimit (0, kR - 1, i)];
+    }
+
+    void timerCallback() override
+    {
+        if (! isShowing()) return;
+        const VoxMorphProcessor::LevelMeter* src[kR] = {
+            &proc.uiInL, &proc.uiInR, &proc.uiOutL, &proc.uiOutR };
+        bool changed = false;
+        for (int i = 0; i < kR; ++i)
+        {
+            const float r = pos (src[i]->rms .load (std::memory_order_relaxed));
+            const float p = pos (src[i]->peak.load (std::memory_order_relaxed));
+            const float pdb = juce::Decibels::gainToDecibels (
+                                  src[i]->peak.load (std::memory_order_relaxed), -60.0f);
+            if (r != lvl[i] || p != pkPos[i]) changed = true;
+            lvl[i] = r;  pkPos[i] = p;  clip[i] = pdb >= -0.1f;
+        }
+        if (changed) repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced (2.0f);
+        g.setColour (juce::Colours::white);
+        g.fillRoundedRectangle (b, 8.0f);
+        g.setColour (juce::Colour (0xffe9d8dd));
+        g.drawRoundedRectangle (b, 8.0f, 1.0f);
+
+        const auto  c    = b.getCentre();
+        const float rOut = 0.5f * juce::jmin (b.getWidth(), b.getHeight()) - 9.0f;
+        if (rOut < 26.0f) return;
+        const float rIn  = rOut * 0.40f;
+
+        g.setGradientFill (juce::ColourGradient (juce::Colour (0xfffafcfd), c.x, c.y - rOut,
+                                                 juce::Colour (0xffeceff3), c.x, c.y + rOut, false));
+        g.fillEllipse (juce::Rectangle<float> (rOut * 2.0f, rOut * 2.0f).withCentre (c));
+        g.setColour (juce::Colour (0x14000000));
+        g.drawEllipse (juce::Rectangle<float> (rOut * 2.0f, rOut * 2.0f).withCentre (c), 1.0f);
+
+        const float rTop  = rOut - 3.0f;             // clear of the dish outline
+        const float band  = rTop - rIn;
+        const float gap   = band * 0.06f;
+        const float ringW = (band - gap * (float) (kR - 1)) / (float) kR;
+
+        for (int i = 0; i < kR; ++i)
+        {
+            const float rMid = rTop - ((float) i * (ringW + gap)) - ringW * 0.5f;
+
+            strokeArc (g, c, rMid, 0.0f, 1.0f, ringW,                     // track
+                       juce::Colour (0x12000000), false);
+            strokeArc (g, c, rMid, kZeroDb, 1.0f, ringW,                  // 0 dB..+6
+                       juce::Colour (0x22e23b52), false);                 // danger zone
+
+            if (lvl[i] > 0.004f)
+                strokeArc (g, c, rMid, 0.0f, lvl[i], ringW * 0.92f, colourFor (i), true);
+
+            if (pkPos[i] > 0.004f)                                        // peak tick
+            {
+                const float a  = angleAt (pkPos[i]);
+                const float s  = std::sin (a), co = std::cos (a);
+                const float r0 = rMid - ringW * 0.5f, r1 = rMid + ringW * 0.5f;
+                g.setColour (clip[i] ? juce::Colour (0xffe23b52)
+                                     : colourFor (i).darker (0.45f));
+                g.drawLine (c.x + r0 * s, c.y - r0 * co,
+                            c.x + r1 * s, c.y - r1 * co, 1.8f);
+            }
+        }
+
+        // 0 dBFS marker across all four rings, so "how close am I to clipping"
+        // is answerable at a glance
+        {
+            const float a = angleAt (kZeroDb);
+            const float s = std::sin (a), co = std::cos (a);
+            g.setColour (juce::Colour (0x66e23b52));
+            g.drawLine (c.x + (rIn + 1.0f) * s, c.y - (rIn + 1.0f) * co,
+                        c.x + rTop * s,         c.y - rTop * co, 1.0f);
+        }
+
+        // centre puck + IN / OUT colour legend
+        juce::Path hole;
+        hole.addEllipse (juce::Rectangle<float> (rIn * 2.0f, rIn * 2.0f).withCentre (c));
+        juce::DropShadow (juce::Colour (0x3a000000), 11, { 0, 3 }).drawForPath (g, hole);
+        g.setGradientFill (juce::ColourGradient (juce::Colours::white,      c.x, c.y - rIn,
+                                                 juce::Colour (0xffe7ebef), c.x, c.y + rIn, false));
+        g.fillPath (hole);
+
+        if (rIn >= 19.0f)
+        {
+            g.setFont (juce::Font (juce::FontOptions (juce::jmin (11.0f, rIn * 0.46f),
+                                                      juce::Font::bold)));
+            g.setColour (colourFor (0));
+            g.drawText ("IN", juce::Rectangle<float> (rIn * 1.7f, rIn * 0.7f)
+                                  .withCentre ({ c.x, c.y - rIn * 0.34f }).toNearestInt(),
+                        juce::Justification::centred);
+            g.setColour (colourFor (2));
+            g.drawText ("OUT", juce::Rectangle<float> (rIn * 1.7f, rIn * 0.7f)
+                                   .withCentre ({ c.x, c.y + rIn * 0.34f }).toNearestInt(),
+                        juce::Justification::centred);
+        }
+    }
+
+    VoxMorphProcessor& proc;
+    float lvl[kR]   = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float pkPos[kR] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    bool  clip[kR]  = { false, false, false, false };
+};
+
+// VISUALIZER row (v0.30.1, extended v0.30.2 / v0.30.3): the linear spectrum
+// on the left, then three square donuts — the radial spectrum, the AEIOU
+// vowel mix and the four level rings. On narrow windows the donuts shrink
+// rather than disappearing.
 class VisualizerRow : public juce::Component
 {
 public:
-    VisualizerRow (juce::Component& lin, juce::Component& rad, juce::Component& vow)
-        : linear (lin), radial (rad), vowel (vow)
+    VisualizerRow (juce::Component& lin, std::initializer_list<juce::Component*> donutList)
+        : linear (lin), donuts (donutList)
     {
         addAndMakeVisible (linear);
-        addAndMakeVisible (radial);
-        addAndMakeVisible (vowel);
+        for (auto* d : donuts) addAndMakeVisible (*d);
     }
 
     void resized() override
     {
         auto r = getLocalBounds();
-        const int side = juce::jlimit (juce::jmin (76, r.getWidth() / 4), r.getHeight(),
-                                       (int) ((float) r.getWidth() * 0.26f));
-        vowel.setBounds (r.removeFromRight (side));
-        r.removeFromRight (4);
-        radial.setBounds (r.removeFromRight (side));
-        r.removeFromRight (4);
+        const int n    = juce::jmax (1, (int) donuts.size());
+        const int side = juce::jlimit (juce::jmin (70, r.getWidth() / (n + 1)), r.getHeight(),
+                                       (int) ((float) r.getWidth() * 0.20f));
+        for (int i = (int) donuts.size(); --i >= 0;)
+        {
+            donuts[(size_t) i]->setBounds (r.removeFromRight (side));
+            r.removeFromRight (4);
+        }
         linear.setBounds (r);
     }
 
 private:
     juce::Component& linear;
-    juce::Component& radial;
-    juce::Component& vowel;
+    std::vector<juce::Component*> donuts;
 };
 
 // Realtime status row under the visualizer. Shows the estimated internal
@@ -904,8 +1085,12 @@ private:
     void timerCallback() override
     {
         if (! isShowing()) return;
-        const float r = proc.uiOutRms .load (std::memory_order_relaxed);
-        const float p = proc.uiOutPeak.load (std::memory_order_relaxed);
+        // the louder of the two output channels — the standard reading for a
+        // single-bar level meter
+        const float r = juce::jmax (proc.uiOutL.rms .load (std::memory_order_relaxed),
+                                    proc.uiOutR.rms .load (std::memory_order_relaxed));
+        const float p = juce::jmax (proc.uiOutL.peak.load (std::memory_order_relaxed),
+                                    proc.uiOutR.peak.load (std::memory_order_relaxed));
         if (r == rms && p == pk) return;               // idle: no repaint
         rms = r;  pk = p;
         repaint();
@@ -4385,11 +4570,11 @@ public:
         syncLockUI();
 
         setResizable (true, true);
-        // wider than before (v0.30.2): the VISUALIZER row now holds the
-        // linear graph plus two donuts, which needs the extra width to
+        // wider than before (v0.30.2 / v0.30.3): the VISUALIZER row now holds
+        // the linear graph plus three donuts, which needs the extra width to
         // breathe. Narrower still works — the donuts shrink.
-        setResizeLimits (440, 320, 1100, contentHeight + 50);
-        setSize (680, juce::jmin (contentHeight + 42, kMaxInitialHeight));
+        setResizeLimits (440, 320, 1300, contentHeight + 50);
+        setSize (800, juce::jmin (contentHeight + 42, kMaxInitialHeight));
 
         // sliders build their value boxes before this editor's LookAndFeel is
         // attached to them, so push the theme colours down explicitly
@@ -4798,7 +4983,8 @@ private:
     SpectrumView       spectrum { specData };
     RadialSpectrumView radial   { specData };
     VowelDonut         vowel    { proc };
-    VisualizerRow      vizRow   { spectrum, radial, vowel };
+    LevelRingsDonut    levels   { proc };
+    VisualizerRow      vizRow   { spectrum, { &radial, &vowel, &levels } };
     StatusView      status { proc };
     OutputMeter     outMeter { proc };
     MatchingPanel   matchingPanel { proc };

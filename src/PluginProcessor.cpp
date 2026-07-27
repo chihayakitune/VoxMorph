@@ -230,7 +230,8 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     rmsSm = 0.0f;  loudSec = 0.0f;  muteSec = 0.0f;  muteGain = 1.0f;
     gateEnv = 0.0f;  gateGain = 1.0f;  panL = 1.0f;  panR = 1.0f;
     gainSm = juce::Decibels::decibelsToGain (pGain->load());
-    uiOutRms.store (0.0f);  uiOutPeak.store (0.0f);   // OUTPUT meter ballistics
+    uiInL.reset();  uiInR.reset();                    // UI meter ballistics
+    uiOutL.reset(); uiOutR.reset();
 
     fxSr = sampleRate;  fxBlk = samplesPerBlock;
     fxScratch.setSize (2, samplesPerBlock);
@@ -410,6 +411,18 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const int ch = buffer.getNumChannels();
     if ((int) monoScratch.size() < n)
         monoScratch.assign ((size_t) n, 0.0f);
+
+    const float meterDt = (float) n / (float) std::max (1.0, getSampleRate());
+
+    // INPUT meters: the raw signal as it arrives, i.e. before the noise gate
+    // and the Pre FX, so the meter still shows your mic while the gate has
+    // it shut. buffer still holds the untouched input at this point (the
+    // conversion works in monoScratch / scratchL / scratchR).
+    if (ch > 0)
+    {
+        uiInL.push (buffer.getReadPointer (0), n, meterDt);
+        uiInR.push (buffer.getReadPointer (ch > 1 ? 1 : 0), n, meterDt);
+    }
 
     PsolaEngine::Params p;
     p.pitchSemi     = pPitch->load();
@@ -742,36 +755,13 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         prevPos.store (pp + n >= pl ? -1 : pp + n);
     }
 
-    // OUTPUT meter (v0.30.0): measured on the finished buffer, so it shows
-    // exactly what leaves the plugin (mute, gain, ASMR pan, Post FX and the
-    // Matching target preview all included). Fast attack / slow release with
-    // TIME constants, so the ballistics do not depend on the buffer size.
+    // OUTPUT meters: measured on the finished buffer, so they show exactly
+    // what leaves the plugin (mute, gain, ASMR pan, Post FX and the Matching
+    // target preview all included).
+    if (ch > 0)
     {
-        float pk = 0.0f;
-        double sum = 0.0;
-        for (int c = 0; c < ch; ++c)
-        {
-            const float* d = buffer.getReadPointer (c);
-            for (int i = 0; i < n; ++i)
-            {
-                const float a = std::abs (d[i]);
-                if (a > pk) pk = a;
-                sum += (double) d[i] * d[i];
-            }
-        }
-        if (! std::isfinite (pk)) pk = 0.0f;
-        const float rms = (float) std::sqrt (sum / (double) std::max (1, n * ch));
-        const float dt  = (float) n / (float) std::max (1.0, getSampleRate());
-
-        float r = uiOutRms.load (std::memory_order_relaxed);
-        const float aR = 1.0f - std::exp (-dt / (rms > r ? 0.02f : 0.25f));
-        r += aR * (rms - r);
-        uiOutRms.store (std::isfinite (r) ? r : 0.0f, std::memory_order_relaxed);
-
-        float hold = uiOutPeak.load (std::memory_order_relaxed);
-        hold = pk > hold ? pk                              // instant attack,
-                         : hold * std::exp (-dt / 0.45f);  // 450 ms hold-decay
-        uiOutPeak.store (std::isfinite (hold) ? hold : 0.0f, std::memory_order_relaxed);
+        uiOutL.push (buffer.getReadPointer (0), n, meterDt);
+        uiOutR.push (buffer.getReadPointer (ch > 1 ? 1 : 0), n, meterDt);
     }
 }
 
