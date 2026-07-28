@@ -42,6 +42,19 @@ inline juce::String vmTip (const char* en, const char* jp)
     return juce::String::fromUTF8 (en) + "\n\n" + juce::String::fromUTF8 (jp);
 }
 
+// Performance Mode (v0.31.0): refresh rate for views that only DRAW. Nothing
+// that touches audio, parameter handling or a clip warning goes through here
+// — this exists so the redraw/analysis load on the message thread drops while
+// the user is running a 64 / 128-sample device buffer. Views call it from
+// their own timerCallback and re-arm the timer when the answer changes, which
+// is why the helper is a plain function rather than a base class: the timer
+// classes below are unrelated and already derive from juce::Timer privately.
+inline int vmDrawHz (const VoxMorphProcessor& p, int baseHz)
+{
+    return p.uiPerfMode.load (std::memory_order_relaxed)
+             ? juce::jmax (2, (baseHz * 2) / 3) : baseHz;
+}
+
 // Shared spectrum analysis (v0.30.1). One FFT pair per frame feeds BOTH the
 // linear SpectrumView and the radial donut view — each frame is two
 // 4096-point FFTs, so letting the donut analyse separately would double that
@@ -62,6 +75,9 @@ public:
         startTimerHz (30);
     }
 
+    // the editor is going away, so the audio thread must stop filling the taps
+    ~SpectrumData() override { proc.uiWantsViz.store (false, std::memory_order_relaxed); }
+
     void addView (juce::Component* c) { views.push_back (c); }
 
     const std::vector<float>& in()  const { return smIn;  }   // INPUT column dB
@@ -72,10 +88,32 @@ private:
 
     void timerCallback() override
     {
+        if (const int hz = vmDrawHz (proc, 30); hz != rateHz)
+        {
+            rateHz = hz;                 // Performance Mode changed the rate
+            startTimerHz (hz);
+        }
+
         bool anyShowing = false;
         for (auto& v : views)
             if (v != nullptr && v->isShowing()) { anyShowing = true; break; }
+
+        // Tell the audio thread whether the input/output taps are worth
+        // filling at all. While no spectrum view is on screen nobody reads
+        // them, and writing them costs two passes over every block.
+        if (anyShowing != wanted)
+        {
+            wanted = anyShowing;
+            if (anyShowing) onPos = proc.vizPos.load (std::memory_order_acquire);
+            proc.uiWantsViz.store (anyShowing, std::memory_order_relaxed);
+        }
         if (! anyShowing) return;
+
+        // after switching the taps back on, wait until a full FFT window of
+        // fresh material has been written — otherwise the first frame would
+        // analyse whatever the ring still held from the last time it was on
+        if (proc.vizPos.load (std::memory_order_acquire) - onPos < kN)
+            return;
 
         analyze (proc.vizIn,  smIn);
         analyze (proc.vizOut, smOut);
@@ -118,6 +156,9 @@ private:
     VoxMorphProcessor& proc;
     std::vector<float> re, im, smIn, smOut;
     std::vector<juce::Component::SafePointer<juce::Component>> views;
+    int  rateHz = 30;         // current timer rate (Performance Mode lowers it)
+    bool wanted = false;      // last value published to proc.uiWantsViz
+    int  onPos  = 0;          // vizPos when the taps were switched back on
 };
 
 // Spectrum visualizer: INPUT (mint) and converted OUTPUT (pink) spectra
@@ -394,6 +435,8 @@ private:
 
     void timerCallback() override
     {
+        if (const int hz = vmDrawHz (proc, 30); hz != rateHz)
+        { rateHz = hz; startTimerHz (hz); }   // Performance Mode
         if (! isShowing()) return;
 
         const bool  live = proc.uiVowelActive.load (std::memory_order_relaxed);
@@ -513,6 +556,7 @@ private:
     }
 
     VoxMorphProcessor& proc;
+    int rateHz = 30;   // current timer rate; Performance Mode lowers it
     float sm[kV] = { 0.2f, 0.2f, 0.2f, 0.2f, 0.2f };
     float fade = 0.22f;
     bool  active = false;
@@ -609,6 +653,8 @@ private:
 
     void timerCallback() override
     {
+        if (const int hz = vmDrawHz (proc, 30); hz != rateHz)
+        { rateHz = hz; startTimerHz (hz); }   // Performance Mode
         if (! isShowing()) return;
         // order must match idx(): L-in, L-out, R-in, R-out
         const VoxMorphProcessor::LevelMeter* src[kR] = {
@@ -712,6 +758,7 @@ private:
     }
 
     VoxMorphProcessor& proc;
+    int rateHz = 30;   // current timer rate; Performance Mode lowers it
     float lvl[kR]   = { 0.0f, 0.0f, 0.0f, 0.0f };
     float pkPos[kR] = { 0.0f, 0.0f, 0.0f, 0.0f };
     bool  clip[kR]  = { false, false, false, false };
@@ -762,14 +809,14 @@ public:
     explicit StatusView (VoxMorphProcessor& p) : proc (p)
     {
         setTooltip (juce::String::fromUTF8 (
-            "Estimated delay inside VoxMorph: engine lookahead (43 ms; half in Low Latency "
-            "Mode) + enabled external FX plugins; the standalone app also adds the audio "
+            "Estimated delay inside VoxMorph: engine lookahead (43 ms; half with Legacy Low "
+            "Latency) + enabled external FX plugins; the standalone app also adds the audio "
             "device buffers. Pitch / Formant / Voice Quality / Breath run inside one shared "
             "pipeline and add no delay of their own. Delays outside the app (OS, OBS, "
             "Discord, audio interface driver) are NOT included. "
             "LOW < 35 ms, MID 35-70 ms, HIGH > 70 ms.")
             + "\n\n" + juce::String::fromUTF8 (
-            "VoxMorph内部の推定遅延です。エンジンの先読み(43ms、Low Latency Mode時は約半分)+"
+            "VoxMorph内部の推定遅延です。エンジンの先読み(43ms、Legacy Low Latency時は約半分)+"
             "有効な外部FXプラグインの合計で、スタンドアロン版はオーディオバッファ分も加算します。"
             "Pitch/Formant/Voice Quality/Breathは同一パイプライン内の処理のため追加遅延は"
             "ありません。OS・OBS・Discord・オーディオインターフェースのドライバなど、アプリ外の"
@@ -780,6 +827,8 @@ public:
 private:
     void timerCallback() override
     {
+        if (const int hz = vmDrawHz (proc, 4); hz != rateHz)
+        { rateHz = hz; startTimerHz (hz); }   // Performance Mode
         if (! isShowing()) return;
         const double fs = proc.getSampleRate() > 0 ? proc.getSampleRate() : 48000.0;
         const int eng = proc.uiLatencySamples.load (std::memory_order_relaxed)
@@ -833,6 +882,7 @@ private:
     }
 
     VoxMorphProcessor& proc;
+    int rateHz = 4;   // current timer rate; Performance Mode lowers it
     float engMs = 0.0f, fxMs = 0.0f, bufMs = 0.0f;
     bool  known = false;
 };
@@ -908,6 +958,46 @@ inline juce::AudioDeviceManager* vmDeviceManager()
         return &h->deviceManager;
    #endif
     return nullptr;
+}
+
+// Performance Mode buffer helper (v0.31.0, STANDALONE ONLY).
+//
+// Device buffer size and engine lookahead are different things: this only
+// touches the device buffer, and the engine's analysis is never shortened to
+// match it. Prefers 64, then 128, then 256 samples, taking the first size the
+// current device actually offers; if applying it fails the previous setup is
+// restored, and the caller keeps the old size so the user can go back by hand.
+// Returns the size that ended up active, or 0 if nothing could be applied.
+inline int vmApplyBufferSize (int wanted)
+{
+    auto* dm = vmDeviceManager();
+    if (dm == nullptr) return 0;
+    auto* dev = dm->getCurrentAudioDevice();
+    if (dev == nullptr) return 0;
+
+    const auto sizes = dev->getAvailableBufferSizes();
+    if (! sizes.contains (wanted)) return 0;
+
+    auto setup = dm->getAudioDeviceSetup();
+    const int previous = setup.bufferSize;
+    if (previous == wanted) return wanted;
+
+    setup.bufferSize = wanted;
+    if (dm->setAudioDeviceSetup (setup, true).isNotEmpty())
+    {
+        setup.bufferSize = previous;          // re-init failed: put it back
+        dm->setAudioDeviceSetup (setup, true);
+        return 0;
+    }
+    return wanted;
+}
+
+inline int vmCurrentBufferSize()
+{
+    if (auto* dm = vmDeviceManager())
+        if (auto* dev = dm->getCurrentAudioDevice())
+            return dev->getCurrentBufferSizeSamples();
+    return 0;
 }
 
 inline juce::StringArray vmOutputDeviceNames()
@@ -1102,6 +1192,8 @@ private:
 
     void timerCallback() override
     {
+        if (const int hz = vmDrawHz (proc, 30); hz != rateHz)
+        { rateHz = hz; startTimerHz (hz); }   // Performance Mode
         if (! isShowing()) return;
         // the louder of the two output channels — the standard reading for a
         // single-bar level meter
@@ -1162,6 +1254,7 @@ private:
     }
 
     VoxMorphProcessor& proc;
+    int rateHz = 30;   // current timer rate; Performance Mode lowers it
     float rms = -1.0f, pk = -1.0f;
 };
 
@@ -3126,7 +3219,12 @@ public:
     }
 
 private:
-    void timerCallback() override { if (isShowing()) repaint(); }
+    void timerCallback() override
+    {
+        if (const int hz = vmDrawHz (proc, 30); hz != rateHz)
+        { rateHz = hz; startTimerHz (hz); }   // Performance Mode
+        if (isShowing()) repaint();
+    }
 
     juce::Rectangle<float> circleBounds() const
     {
@@ -3206,6 +3304,7 @@ private:
     }
 
     VoxMorphProcessor& proc;
+    int rateHz = 30;   // current timer rate; Performance Mode lowers it
     juce::RangedAudioParameter *px = nullptr, *py = nullptr;
 };
 
@@ -3483,7 +3582,58 @@ public:
         };
         initHead (hDevice,  "AUDIO DEVICE");
         initHead (hMonitor, "MONITOR");
+        initHead (hPerf,    "PERFORMANCE");
         initHead (hSafety,  "SAFETY");
+
+        // ---- Performance Mode buffer helper (v0.31.0) ----------------------
+        // Assistance, not automation: Performance Mode never rewrites the
+        // device setup on its own, because the smallest buffer a machine can
+        // sustain depends on the interface and on whatever else is running.
+        // The user presses the button, and can always press Restore (or use
+        // the device panel above) to go back.
+        perfRow = std::make_unique<ParamRow> (proc, "perfmode", ParamRow::Kind::toggle,
+            "Performance Mode",
+            vmTip ("Reduces the work VoxMorph does OUTSIDE the audio conversion (display and "
+                   "analysis refresh) so a small device buffer is easier to sustain. The "
+                   "converted sound is identical with it on or off.",
+                   "変換そのもの以外の処理(表示・解析の更新)を軽くして、小さいバッファでも"
+                   "音が途切れにくくします。変換後の音はオン/オフで完全に同じです。"));
+        addAndMakeVisible (*perfRow);
+
+        bufLbl.setFont (juce::Font (juce::FontOptions (13.0f)));
+        addAndMakeVisible (bufLbl);
+
+        bufBtn.setTooltip (vmTip (
+            "Tries to set the audio buffer to 64 samples, then 128, then 256 - whichever the "
+            "current device offers first. Lower buffer = lower in/out delay, but more risk of "
+            "dropouts, so listen for crackles afterwards and press Restore (or pick a size in "
+            "the device panel above) if you hear any. This changes the DEVICE buffer only: "
+            "the conversion engine's own lookahead and its analysis quality are untouched.",
+            "オーディオバッファを64サンプル、無理なら128、それも無理なら256サンプルに"
+            "設定します(現在のデバイスが対応する最初のサイズ)。バッファが小さいほど"
+            "入出力の遅延は減りますが音切れのリスクは上がるので、設定後にプチプチ音が"
+            "出ないか確認し、出るようならRestore(または上のデバイス欄で手動選択)で"
+            "戻してください。変更するのはデバイスのバッファだけで、変換エンジンの"
+            "先読みや解析品質には一切触れません。"));
+        bufBtn.onClick = [this] { optimizeBuffer(); };
+        addAndMakeVisible (bufBtn);
+
+        bufBackBtn.setTooltip (vmTip (
+            "Puts the audio buffer back to the size it had before the last Optimize.",
+            "直前のOptimizeを押す前のバッファサイズに戻します。"));
+        bufBackBtn.setEnabled (false);
+        bufBackBtn.onClick = [this]
+        {
+            if (bufBefore > 0 && vmApplyBufferSize (bufBefore) > 0)
+                bufBackBtn.setEnabled (false);
+            refreshBufferLabel();
+        };
+        addAndMakeVisible (bufBackBtn);
+
+        bufNote.setFont (juce::Font (juce::FontOptions (11.5f)));
+        bufNote.setColour (juce::Label::textColourId, juce::Colour (0xff9aa5a2));
+        bufNote.setJustificationType (juce::Justification::topLeft);
+        addAndMakeVisible (bufNote);
 
         if (auto* dm = vmDeviceManager())
         {
@@ -3546,16 +3696,17 @@ public:
         };
         addAndMakeVisible (closeBtn);
 
-        setSize (600, 640);
+        setSize (600, 780);
         sendLookAndFeelChange();
         refreshMonitorList();
+        refreshBufferLabel();
     }
 
     ~AudioSettingsPanel() override { setLookAndFeel (nullptr); }
 
     void visibilityChanged() override
     {
-        if (isVisible()) refreshMonitorList();
+        if (isVisible()) { refreshMonitorList(); refreshBufferLabel(); }
     }
 
     void resized() override
@@ -3566,6 +3717,19 @@ public:
         r.removeFromBottom (6);
         autoMuteRow->setBounds (r.removeFromBottom (28));
         hSafety.setBounds (r.removeFromBottom (24));
+        r.removeFromBottom (10);
+
+        bufNote.setBounds (r.removeFromBottom (46));
+        {
+            auto br = r.removeFromBottom (30);
+            bufBackBtn.setBounds (br.removeFromRight (90).reduced (2, 2));
+            br.removeFromRight (4);
+            bufBtn    .setBounds (br.removeFromRight (150).reduced (2, 2));
+            bufLbl    .setBounds (br);
+        }
+        r.removeFromBottom (4);
+        perfRow->setBounds (r.removeFromBottom (28));
+        hPerf.setBounds (r.removeFromBottom (24));
         r.removeFromBottom (6);
         monNote.setBounds (r.removeFromBottom (46));
         auto mr = r.removeFromBottom (30);
@@ -3582,6 +3746,56 @@ public:
     void paint (juce::Graphics& g) override { g.fillAll (juce::Colour (0xfffcf9f9)); }
 
 private:
+    // Try 64 -> 128 -> 256 and keep the first size that the device accepts.
+    // Nothing is changed unless a size actually applies; on failure
+    // vmApplyBufferSize() has already restored the previous setup.
+    void optimizeBuffer()
+    {
+        const int before = vmCurrentBufferSize();
+        int applied = 0;
+        for (int want : { 64, 128, 256 })
+            if ((applied = vmApplyBufferSize (want)) > 0)
+                break;
+
+        if (applied > 0 && applied != before)
+        {
+            bufBefore = before;
+            bufBackBtn.setEnabled (before > 0);
+        }
+        else if (applied == 0)
+        {
+            bufNote.setText (juce::String::fromUTF8 (
+                "64 / 128 / 256サンプルはこのデバイスでは選べませんでした。設定は変更して"
+                "いません。上のデバイス欄で使えるサイズを確認してください。\n"
+                "None of 64 / 128 / 256 could be applied - nothing was changed."),
+                juce::dontSendNotification);
+            refreshBufferLabel (false);
+            return;
+        }
+        refreshBufferLabel();
+    }
+
+    void refreshBufferLabel (bool resetNote = true)
+    {
+        const int b = vmCurrentBufferSize();
+        const double sr = proc.getSampleRate() > 0 ? proc.getSampleRate() : 48000.0;
+        // what the user cares about: in + out buffer, i.e. the round trip
+        const double ms = b > 0 ? 2000.0 * b / sr : 0.0;
+        bufLbl.setText (b > 0
+            ? juce::String::fromUTF8 ("バッファ / Buffer: ") + juce::String (b)
+                + " samples  (" + juce::String (ms, 1) + " ms in+out)"
+            : juce::String::fromUTF8 ("バッファ / Buffer: -- (デバイス未起動)"),
+            juce::dontSendNotification);
+
+        if (resetNote)
+            bufNote.setText (juce::String::fromUTF8 (
+                "小さいほど遅延は減りますが、音切れが出たらRestoreか上のデバイス欄で戻して"
+                "ください。変換エンジンの先読み・音質はこの設定では変わりません。\n"
+                "Smaller = less delay but more dropout risk. The engine's lookahead and "
+                "audio quality do not change with this."),
+                juce::dontSendNotification);
+    }
+
     void refreshMonitorList()
     {
         const juce::ScopedValueSetter<bool> guard (updating, true);
@@ -3608,11 +3822,14 @@ private:
     VoxMorphProcessor& proc;
     juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
     juce::TooltipWindow  tips { this, 400 };
-    juce::Label hDevice, hMonitor, hSafety, monLbl, monNote;
+    juce::Label hDevice, hMonitor, hPerf, hSafety, monLbl, monNote, bufLbl, bufNote;
     std::unique_ptr<juce::AudioDeviceSelectorComponent> sel;
     juce::ComboBox   monBox;
     juce::TextButton rescanBtn { "Rescan" }, closeBtn { "Close" };
-    std::unique_ptr<ParamRow> autoMuteRow;
+    juce::TextButton bufBtn { juce::String::fromUTF8 ("Optimize buffer") },
+                     bufBackBtn { "Restore" };
+    std::unique_ptr<ParamRow> autoMuteRow, perfRow;
+    int  bufBefore = 0;      // buffer size before the last Optimize (0 = none)
     bool updating = false;
 };
 
@@ -3626,7 +3843,7 @@ public:
         setUsingNativeTitleBar (true);
         setContentOwned (new AudioSettingsPanel (p), true);
         setResizable (true, false);
-        setResizeLimits (480, 420, 1000, 1000);
+        setResizeLimits (480, 480, 1000, 1100);
         centreWithSize (getWidth(), getHeight());
         setVisible (true);
     }
@@ -3697,6 +3914,33 @@ public:
                    "合成的に聞こえる場合は0のままにしてください。"));
         addAndMakeVisible (*breathRow);
 
+        // Legacy Low Latency (moved here in v0.31.0, parameter id "lowlat"
+        // unchanged). This is the OLD approach to latency: it shortens the
+        // engine's lookahead and narrows its analysis, so it costs quality.
+        // The new Performance Mode (MAIN tab, ADVANCED) is the quality-neutral
+        // route and the two are completely independent — this one is kept
+        // frozen so existing presets, sessions and automation keep working.
+        lowLatRow = std::make_unique<ParamRow> (proc, "lowlat", ParamRow::Kind::toggle,
+            "Legacy Low Latency",
+            vmTip ("EXPERIMENTAL / LEGACY. The older way of cutting delay: it halves the "
+                   "engine lookahead (43 ms -> about 21 ms) by shortening the analysis, so "
+                   "pitch tracking bottoms out near 90 Hz, grains get narrower and the "
+                   "Natural Air spectral cleanup cannot run. Deep voices and sustained "
+                   "vowels can audibly suffer. It is kept for people already relying on it. "
+                   "For lower delay WITHOUT a quality cost, use Performance Mode on the MAIN "
+                   "tab together with a smaller device buffer. Ignored while Low Voice Mode "
+                   "is on. Off = the normal, full-quality engine.",
+                   "実験的機能 / 旧方式。遅延を削る古いやり方で、解析条件を短くすることで"
+                   "エンジンの先読みを半分(43ms→約21ms)にします。その代償として"
+                   "ピッチ検出の下限が約90Hzまで上がり、グレイン幅も狭くなり、"
+                   "Natural Airのスペクトルクリーンアップが動作しません。低い声や"
+                   "持続した母音では音質低下が分かる場合があります。すでにこの機能を"
+                   "使っている方のために残しています。音質を落とさずに遅延を下げたい"
+                   "場合は、MAINタブのPerformance Modeとデバイスバッファの縮小を"
+                   "使ってください。Low Voice Modeがオンの間は無効です。"
+                   "オフ=通常のフル品質エンジン。"));
+        addAndMakeVisible (*lowLatRow);
+
         closeBtn.onClick = [this]
         {
             if (auto* dw = findParentComponentOfClass<juce::DocumentWindow>())
@@ -3704,7 +3948,7 @@ public:
         };
         addAndMakeVisible (closeBtn);
 
-        setSize (600, 240);
+        setSize (600, 280);
         sendLookAndFeelChange();
     }
 
@@ -3719,6 +3963,8 @@ public:
         gciRow->setBounds (r.removeFromTop (28));
         r.removeFromTop (4);
         breathRow->setBounds (r.removeFromTop (30));
+        r.removeFromTop (4);
+        lowLatRow->setBounds (r.removeFromTop (28));
         closeBtn.setBounds (r.removeFromBottom (30).removeFromRight (100).reduced (0, 2));
     }
 
@@ -3729,7 +3975,7 @@ private:
     juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
     juce::TooltipWindow  tips { this, 400 };
     juce::Label heading, note;
-    std::unique_ptr<ParamRow> gciRow, breathRow;
+    std::unique_ptr<ParamRow> gciRow, breathRow, lowLatRow;
     juce::TextButton closeBtn { "Close" };
 };
 
@@ -4483,13 +4729,23 @@ public:
                  "非常に低い声やボーカルフライでもピッチ追跡を継続します。発声によっては、"
                  "元の低周期の質感が強く残る場合があります。"));
 
-        addToggleRow ("lowlat", "Low Latency Mode",
-            tip ("Halves the conversion delay (43 ms -> about 21 ms) for live streaming and "
-                 "monitoring. Trade-off: pitch tracking bottoms out around 90 Hz, so very deep "
-                 "voices may track worse. Ignored while Low Voice Mode is on.",
-                 "変換遅延を半分(43ms→約21ms)にします。配信やモニタリング向け。"
-                 "代わりにピッチ検出の下限が約90Hzに上がるため、非常に低い声では追跡が"
-                 "落ちる場合があります。Low Voice Modeがオンの間は無効です。"));
+        // Performance Mode (v0.31.0). Replaces the old Low Latency toggle in
+        // this list; that one is now "Legacy Low Latency" in the BETA window.
+        addToggleRow ("perfmode", "Performance Mode",
+            tip ("Helps VoxMorph run steadily at small audio buffers (64 / 128 / 256 samples) "
+                 "WITHOUT changing the sound. Pitch, Formant, Natural Air and the engine "
+                 "lookahead are all exactly the same with this on or off - what it lowers is "
+                 "the refresh rate of the displays, which frees up the machine for the audio. "
+                 "In the standalone app it also unlocks the buffer helper in Audio Settings. "
+                 "It is not a 'make the delay smaller' switch on its own: the delay drops "
+                 "because a smaller device buffer becomes practical.",
+                 "小さいオーディオバッファ(64/128/256サンプル)でも安定して動くように"
+                 "支援するモードです。音は一切変わりません - Pitch・Formant・Natural Air・"
+                 "エンジンの先読みはオン/オフで完全に同じで、下げるのは表示の更新頻度だけ"
+                 "です(その分の余力が音声処理に回ります)。スタンドアロン版では"
+                 "Audio Settings内のバッファ調整も使えるようになります。"
+                 "これ自体が遅延を減らすスイッチではなく、小さいバッファを実用にできる"
+                 "結果として遅延が縮む、という機能です。"));
         addToggleRow ("stereo", "Stereo Input (Binaural)",
             tip ("For binaural / ASMR stereo microphones: the left and right inputs run through "
                  "two independent conversion engines in parallel, keeping the stereo image. "
@@ -4514,11 +4770,12 @@ public:
                  "女声化なら140〜180が目安です。"));
         addButtonRow ("Experimental", "BETA...",
             tip ("Opens the BETA window with the experimental controls (GCI Grain Sync, "
-                 "Breath). They are kept out of the main list because their quality is "
-                 "still being tuned; every one of them defaults to the classic behaviour.",
-                 "実験中の機能(GCI Grain Sync、Breath)をまとめたBETAウィンドウを開きます。"
-                 "品質を調整中のため通常の一覧からは外していますが、既定値はいずれも"
-                 "従来どおりの動作です。"),
+                 "Breath, Legacy Low Latency). They are kept out of the main list because "
+                 "their quality is still being tuned; every one of them defaults to the "
+                 "classic behaviour.",
+                 "実験中の機能(GCI Grain Sync、Breath、Legacy Low Latency)をまとめた"
+                 "BETAウィンドウを開きます。品質を調整中のため通常の一覧からは外して"
+                 "いますが、既定値はいずれも従来どおりの動作です。"),
             [this]
             {
                 if (betaWin == nullptr)
@@ -4583,6 +4840,12 @@ public:
             redoBtn.setEnabled (proc.history.canRedo());
             if (lastLockState != proc.lockedIds.joinIntoString (","))
                 syncLockUI();                    // e.g. host restored state
+            // level metering costs the audio thread a pass per channel, so
+            // only ask for it while a meter is actually on screen (MAIN tab
+            // visible). The ballistics settle in ~20 ms, well inside the
+            // ~330 ms it can take this poller to notice a tab switch.
+            proc.uiWantsMeters.store (levels.isShowing() || outMeter.isShowing(),
+                                      std::memory_order_relaxed);
         };
         histPoll.startTimerHz (3);
         syncLockUI();
@@ -4601,6 +4864,9 @@ public:
 
     ~VoxMorphEditor() override
     {
+        // nothing is left to read the display taps: stop the audio thread
+        // filling them (SpectrumData clears uiWantsViz in its own destructor)
+        proc.uiWantsMeters.store (false, std::memory_order_relaxed);
         setLookAndFeel (nullptr);
         tooltipWindow.setLookAndFeel (nullptr);
     }

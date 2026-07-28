@@ -104,8 +104,21 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::ParameterID { "lowvoice", 1 }, "Low Voice Mode", false));
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "automute", 1 }, "Auto-Mute on Feedback", true));
+    // Legacy Low Latency (v0.31.0: moved to the BETA window, id unchanged).
+    // This is the OLD experimental mode: it buys latency by changing the
+    // engine's analysis conditions (half the lookahead, pitch floor up to
+    // ~90 Hz, narrower grain caps), i.e. it trades quality for delay. The id,
+    // range and default are frozen so old sessions, presets and automation
+    // lanes keep working exactly as before. Do NOT reuse it for anything.
     layout.add (std::make_unique<juce::AudioParameterBool> (
-                juce::ParameterID { "lowlat", 1 }, "Low Latency Mode", false));
+                juce::ParameterID { "lowlat", 1 }, "Legacy Low Latency (Beta)", false));
+    // Performance Mode (v0.31.0). A NEW, independent switch that never
+    // touches any DSP quality condition — see the Performance Mode notes in
+    // PluginProcessor.h. It only reduces work that does not affect the
+    // converted samples (display/analysis refresh), so small device buffers
+    // become easier to sustain. Can be on at the same time as "lowlat".
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "perfmode", 1 }, "Performance Mode", false));
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "stereo", 1 }, "Stereo Input (Binaural)", false));
     layout.add (std::make_unique<P> (juce::ParameterID { "pitchfloor", 1 }, "Pitch Floor (Hz)",
@@ -192,6 +205,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pFloor     = apvts.getRawParameterValue ("pitchfloor");
     pAutoMute  = apvts.getRawParameterValue ("automute");
     pLowLat    = apvts.getRawParameterValue ("lowlat");
+    pPerf      = apvts.getRawParameterValue ("perfmode");
     pRobotHz   = apvts.getRawParameterValue ("robotHz");
     pMix       = apvts.getRawParameterValue ("mix");
     pGain      = apvts.getRawParameterValue ("gain");
@@ -287,6 +301,7 @@ juce::String VoxMorphProcessor::addFx (bool post, const juce::File& vst3)
     {
         const juce::ScopedLock sl (fxLock);
         (post ? postChain : preChain).add (slot.release());
+        publishFxCount();
     }
     saveFxChains();
     return {};
@@ -300,6 +315,7 @@ void VoxMorphProcessor::removeFx (bool post, int index)
         auto& c = post ? postChain : preChain;
         if (juce::isPositiveAndBelow (index, c.size()))
             old.reset (c.removeAndReturn (index));
+        publishFxCount();
     }
     if (old != nullptr && old->plugin != nullptr)
         old->plugin->releaseResources();   // audio thread can no longer see it
@@ -414,11 +430,23 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 
     const float meterDt = (float) n / (float) std::max (1.0, getSampleRate());
 
+    // Display-only taps are skipped whenever nothing is on screen to read
+    // them (editor closed, or the meters / visualizer scrolled out of view).
+    // Each one is a full extra pass over the block; with a 64-sample device
+    // buffer that overhead is a real share of the callback, and it changes
+    // no audio whatsoever. See uiWantsMeters / uiWantsViz in the header.
+    const bool wantMeters = uiWantsMeters.load (std::memory_order_relaxed);
+    const bool wantViz    = uiWantsViz   .load (std::memory_order_relaxed);
+
+    // Performance Mode is republished for the UI timers and NEVER given to
+    // the engine: no DSP decision anywhere reads it. See PluginProcessor.h.
+    uiPerfMode.store (pPerf->load() > 0.5f, std::memory_order_relaxed);
+
     // INPUT meters: the raw signal as it arrives, i.e. before the noise gate
     // and the Pre FX, so the meter still shows your mic while the gate has
     // it shut. buffer still holds the untouched input at this point (the
     // conversion works in monoScratch / scratchL / scratchR).
-    if (ch > 0)
+    if (wantMeters && ch > 0)
     {
         uiInL.push (buffer.getReadPointer (0), n, meterDt);
         uiInR.push (buffer.getReadPointer (ch > 1 ? 1 : 0), n, meterDt);
@@ -443,6 +471,10 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.f3Shift = pF3S->load();  p.f3Gain = pF3G->load();
     p.vowelAdapt    = pVAdapt->load() > 0.5f;      // AEIOU Character
     p.vowelAdaptAmt = pVAmount->load() * 0.01f;    // % -> 0..1
+    // The 30-float map is only read while the warp is running; at 0 % (or
+    // off) the engine ignores it, so building it would be pure work. The
+    // copy still happens on the very block that switches the feature on.
+    if (p.vowelAdapt && p.vowelAdaptAmt > 1.0e-4f)
     {
         // Character selection -> per-vowel map. Custom reads the 15 APVTS
         // values; every other choice copies the immutable built-in preset
@@ -493,7 +525,11 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         for (int i = 0; i < n; ++i) m[i] = 0.5f * (L[i] + R[i]);
     }
 
-    // Pre FX chain (standalone external plugins, e.g. a de-noiser)
+    // Pre FX chain (standalone external plugins, e.g. a de-noiser).
+    // fxCount is the message thread's published slot total; while it is 0
+    // (every plugin build, and the app until FX are added) there is nothing
+    // to run, so the lock is not even attempted.
+    if (fxCount.load (std::memory_order_relaxed) > 0)
     {
         bool ranPre = false;
         const juce::ScopedTryLock tl (fxLock);
@@ -524,9 +560,9 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         {
             sanitizeFx (m, n);
             if (stereoMode) { sanitizeFx (sL, n); sanitizeFx (sR, n); }
+            if (stereoMode)  // the FX changed sL/sR: re-derive the analysis sum
+                for (int i = 0; i < n; ++i) m[i] = 0.5f * (sL[i] + sR[i]);
         }
-        if (stereoMode)
-            for (int i = 0; i < n; ++i) m[i] = 0.5f * (sL[i] + sR[i]);
     }
 
     // Noise gate: while the input stays below the threshold, fade it out.
@@ -550,8 +586,9 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
 
     const int vp = vizPos.load (std::memory_order_relaxed);
-    for (int i = 0; i < n; ++i)
-        vizIn[(size_t) ((vp + i) & (kVizLen - 1))] = m[i];
+    if (wantViz)
+        for (int i = 0; i < n; ++i)
+            vizIn[(size_t) ((vp + i) & (kVizLen - 1))] = m[i];
 
     if (capturing.load() && ! capFromOutput.load())   // ANALYZE: capture raw input
     {
@@ -596,6 +633,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     // has been stable for 0.5 s, because each setLatencySamples() call can
     // make a DAW rebuild its delay compensation (audible interruption).
     {
+        if (fxCount.load (std::memory_order_relaxed) > 0)
         {
             const juce::ScopedTryLock tl (fxLock);
             if (tl.isLocked())
@@ -608,6 +646,8 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                 fxLatSamples = fx;
             }
         }
+        else
+            fxLatSamples = 0;   // no slots: nothing can be contributing delay
         const int totalLat = engine.latencySamples() + fxLatSamples;
         uiFxLatSamples.store (fxLatSamples, std::memory_order_relaxed);
         uiLatencySamples.store (totalLat, std::memory_order_relaxed);
@@ -631,21 +671,31 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const bool fbActive = wrapperType == wrapperType_Standalone
                        && pAutoMute->load() > 0.5f;
     {
-        double sum = 0.0;
-        for (int i = 0; i < n; ++i) sum += (double) m[i] * m[i];
-        const float rms = (float) std::sqrt (sum / std::max (1, n));
         const float dt = (float) n / (float) std::max (1.0, getSampleRate());
-        // time-based smoothing (~50 ms) so behaviour does NOT depend on the
-        // host buffer size; threshold high enough that loud singing can't
-        // trigger it — genuine runaway feedback reaches near full scale
-        const float aR = std::min (1.0f, dt / 0.05f);
-        rmsSm += aR * (rms - rmsSm);
 
         if (fbActive)
         {
+            double sum = 0.0;
+            for (int i = 0; i < n; ++i) sum += (double) m[i] * m[i];
+            const float rms = (float) std::sqrt (sum / std::max (1, n));
+            // time-based smoothing (~50 ms) so behaviour does NOT depend on
+            // the host buffer size; threshold high enough that loud singing
+            // can't trigger it — genuine runaway feedback reaches full scale
+            const float aR = std::min (1.0f, dt / 0.05f);
+            rmsSm += aR * (rms - rmsSm);
+
             if (rmsSm > 0.70f) loudSec += dt;
             else               loudSec = std::max (0.0f, loudSec - 2.0f * dt);
             if (loudSec > 1.5f) { muteSec = 3.0f; loudSec = 0.0f; }
+        }
+        else
+        {
+            // Detector switched off (or a plugin build, where it never runs):
+            // the level scan was its only consumer, so skip it entirely. The
+            // state is cleared rather than frozen, so switching the feature
+            // back on starts from silence and still needs a full 1.5 s of
+            // runaway level before it can mute — no stale trigger.
+            rmsSm = 0.0f;  loudSec = 0.0f;
         }
         if (muteSec > 0.0f) muteSec -= dt;
 
@@ -668,14 +718,22 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     // Output gain, smoothed per sample (no zipper noise when the slider
     // moves), baked into m / sL / sR so the visualizer and the Refine
     // capture below see the exact same level as the speakers
+    // Zero-value bypass: at 0 dB, once the smoother has settled on unity, the
+    // per-sample multiply is a no-op. The smoother is one-pole so it only
+    // approaches 1.0 asymptotically; it is snapped the moment the remaining
+    // error is below 1e-6 (= -120 dB, far under any audible step) and the
+    // loop then stops until the slider moves again.
     {
         const float gT = juce::Decibels::decibelsToGain (pGain->load());
-        for (int i = 0; i < n; ++i)
-        {
-            gainSm += 0.002f * (gT - gainSm);
-            m[i] *= gainSm;
-            if (stereoMode) { sL[i] *= gainSm; sR[i] *= gainSm; }
-        }
+        if (gT == 1.0f && std::abs (gainSm - 1.0f) < 1.0e-6f)
+            gainSm = 1.0f;
+        else
+            for (int i = 0; i < n; ++i)
+            {
+                gainSm += 0.002f * (gT - gainSm);
+                m[i] *= gainSm;
+                if (stereoMode) { sL[i] *= gainSm; sR[i] *= gainSm; }
+            }
     }
 
     // ASMR pseudo-position: constant-power pan (X) + distance attenuation,
@@ -687,21 +745,33 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const float panPhase = (ax + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
     const float tL = dg * std::cos (panPhase) * juce::MathConstants<float>::sqrt2;
     const float tR = dg * std::sin (panPhase) * juce::MathConstants<float>::sqrt2;
+    // Centre position = unity on both sides, so once the pan smoothers have
+    // converged the whole stage is a copy. Same snap-and-skip rule as the
+    // output gain above (the copy is also what lets the compiler memcpy it).
+    const bool panNeutral = (ax == 0.0f && ay == 0.0f)
+                         && std::abs (panL - 1.0f) < 1.0e-6f
+                         && std::abs (panR - 1.0f) < 1.0e-6f;
+    if (panNeutral) { panL = 1.0f; panR = 1.0f; }
     for (int c = 0; c < ch; ++c)
     {
         float* d = buffer.getWritePointer (c);
         const float t = ch == 1 ? dg : (c == 0 ? tL : tR);
         float& sm = c == 0 ? panL : panR;
         const float* src = stereoMode ? (c == 0 ? sL : sR) : m;
-        for (int i = 0; i < n; ++i)
-        {
-            sm += 0.002f * (t - sm);
-            d[i] = sm * src[i];
-        }
+        if (panNeutral)
+            std::copy (src, src + n, d);
+        else
+            for (int i = 0; i < n; ++i)
+            {
+                sm += 0.002f * (t - sm);
+                d[i] = sm * src[i];
+            }
     }
 
     // Post FX chain (standalone external plugins) on the converted output;
-    // the target-file preview below stays unfiltered
+    // the target-file preview below stays unfiltered. Skipped without even
+    // taking the lock while no slots exist (see the Pre FX chain above).
+    if (fxCount.load (std::memory_order_relaxed) > 0)
     {
         bool ranPost = false;
         const juce::ScopedTryLock tl (fxLock);
@@ -728,8 +798,11 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                 sanitizeFx (buffer.getWritePointer (c), n);
     }
 
-    for (int i = 0; i < n; ++i)
-        vizOut[(size_t) ((vp + i) & (kVizLen - 1))] = m[i];
+    if (wantViz)
+        for (int i = 0; i < n; ++i)
+            vizOut[(size_t) ((vp + i) & (kVizLen - 1))] = m[i];
+    // the write position advances either way, so the reader can tell how much
+    // fresh material has arrived since it asked for the taps to be filled
     vizPos.store (vp + n, std::memory_order_release);
 
     if (capturing.load() && capFromOutput.load())     // ANALYZE: capture converted
@@ -758,7 +831,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     // OUTPUT meters: measured on the finished buffer, so they show exactly
     // what leaves the plugin (mute, gain, ASMR pan, Post FX and the Matching
     // target preview all included).
-    if (ch > 0)
+    if (wantMeters && ch > 0)
     {
         uiOutL.push (buffer.getReadPointer (0), n, meterDt);
         uiOutR.push (buffer.getReadPointer (ch > 1 ? 1 : 0), n, meterDt);

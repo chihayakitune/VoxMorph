@@ -152,6 +152,35 @@ public:
     };
     ParamHistory history;
 
+    // ---- Performance Mode (v0.31.0, parameter id "perfmode") --------------
+    // A switch for running comfortably at small device buffers (64 / 128 /
+    // 256 samples) WITHOUT giving up any conversion quality.
+    //
+    // What it must never do — and does not do anywhere in this codebase:
+    // change the pitch detector, the formant path, Natural Air (including
+    // its FFT cleanup), the minimum tracked f0, the analysis ranges, grain
+    // width / placement / guard, the windows, the smoothing, or the engine
+    // lookahead. PsolaEngine does not read this parameter at all; the audio
+    // it produces is identical with the mode on and off.
+    //
+    // What it does: lowers the refresh rate of purely visual work (spectrum
+    // analysis, donuts, meters) so the message thread competes less with the
+    // audio callback, and — standalone only — unlocks the device buffer
+    // helper in Audio Settings. Everything else in this pass (the zero-value
+    // DSP bypasses) is unconditional and applies in every mode, because a
+    // bypass that produces identical samples has no reason to be optional.
+    //
+    // Mirrors the parameter for the UI timers (message thread writes it).
+    std::atomic<bool> uiPerfMode { false };
+
+    // Display-only tap gates, written by the editor (message thread) and read
+    // by processBlock. Each tap is an extra pass over the block, so nothing
+    // on screen means no work at all: the plugin with its window closed pays
+    // nothing for meters or the visualizer. Set false whenever the editor
+    // goes away, otherwise the audio thread would keep filling buffers that
+    // nobody reads.
+    std::atomic<bool> uiWantsMeters { false }, uiWantsViz { false };
+
     // STATUS row (UI): estimated internal latency in samples, updated on the
     // audio thread. uiLatencySamples = engine lookahead + enabled hosted FX;
     // uiFxLatSamples = the hosted-FX share of that (for the breakdown text).
@@ -281,6 +310,12 @@ public:
     void saveFxChains();
     void loadFxChains();
 
+    // Total FX slots in both chains, republished (under fxLock) whenever the
+    // message thread edits a chain. processBlock reads it to decide whether
+    // taking the try-lock is worth it at all — with no slots, which is every
+    // plugin build, the FX stages cost nothing.
+    std::atomic<int> fxCount { 0 };
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
 
@@ -314,7 +349,12 @@ private:
     std::atomic<float>* pLowVoice  = nullptr;
     std::atomic<float>* pFloor     = nullptr;
     std::atomic<float>* pAutoMute  = nullptr;
-    std::atomic<float>* pLowLat    = nullptr;
+    std::atomic<float>* pLowLat    = nullptr;   // Legacy Low Latency (Beta)
+    std::atomic<float>* pPerf      = nullptr;   // Performance Mode
+
+    // call with fxLock held: republish the slot total for the audio thread
+    void publishFxCount() { fxCount.store (preChain.size() + postChain.size(),
+                                           std::memory_order_relaxed); }
 
     // latency bookkeeping: last hosted-FX latency sum (audio thread) and the
     // debounce state for host PDC notifications (frequent setLatencySamples

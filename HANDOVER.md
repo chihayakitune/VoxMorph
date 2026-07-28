@@ -1,6 +1,6 @@
 # VoxMorph 開発引き継ぎ書 (AIセッション用)
 
-最終更新: v0.30.4 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+最終更新: v0.31.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
 
 ## プロジェクト概要
 
@@ -33,7 +33,7 @@
 
 ## 主要パラメータ(内部ID)
 
-pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, vadapt/vamount/vcharacter(AEIOU Character, 既定オフ/60%/Natural)+Custom15値(va_{a,i,u,e,o}_f{1,2,3}), range(抑揚)/center, breath2(Beta), air(Natural Air, 0〜1.5・標準経路常時使用), airshine(Air Shine, >6kHz抜け感0〜6dB), 【deprecated no-op: airband/air2/air2low=旧セッション互換のため登録のみ】, gci(GCI同期), hifreq/hipitch/hiformant(High Rangeガード), tilt, jitter, robot/robotHz, lowvoice, lowlat, pitchfloor, automute, gate(ノイズゲート), asmrx/asmry(ASMR位置), mix, gain
+pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, vadapt/vamount/vcharacter(AEIOU Character, 既定オフ/60%/Natural)+Custom15値(va_{a,i,u,e,o}_f{1,2,3}), range(抑揚)/center, breath2(Beta), air(Natural Air, 0〜1.5・標準経路常時使用), airshine(Air Shine, >6kHz抜け感0〜6dB), 【deprecated no-op: airband/air2/air2low=旧セッション互換のため登録のみ】, gci(GCI同期), hifreq/hipitch/hiformant(High Rangeガード), tilt, jitter, robot/robotHz, lowvoice, lowlat(Legacy Low Latency、BETAウィンドウ), perfmode(Performance Mode), pitchfloor, automute, gate(ノイズゲート), asmrx/asmry(ASMR位置), mix, gain
 
 ## 重要な設計判断・経緯
 
@@ -52,6 +52,14 @@ pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, vadapt/
 - **v0.22.1: グレイン経路A/B実験フック+実験レポート**。低音+12stゴーストの系統実験(詳細=`GRAIN_AB_REPORT.md`)。結論: ①グレイン幅は主因でない(現行適応則がほぼ最適、0.5Pでも+1.5dB/body-13%) ②GCIは無関係(ONでむしろ悪化) ③再利用パターンの乱れとghostが強相関(-0.84) ④**可聴ゴーストの主因は有声/無声判定**: 入力の周期倍加区間(53Hz<通常モード下限60Hz)と減衰テールが無声判定→無声経路はピッチ変換しないため旧ピッチ素通し。**Low Voice Mode ONで解消方向**(+blend/avgで総合-26.9dB)。実験フック(Params: grainHalfP/grainBlend/grainAvg、全て既定オフ=bit-identical、UI非公開)と PSOLA_GRAIN_LOG(コンパイル時計測、プラグイン非影響)を追加。grainBlend=分数位置パルスクロスフェード(全シフトで艶↑・AM半減・middle ghost -48→-51dB)は実声試聴後に既定化を検討
 - **v0.22.0: Natural Air v2 スペクトルクリーンアップ(Phase 2先行)**。ユーザー実録(KITUNE、44.1kHz、+12st)で切り分け: middleレンジはair分離段階のF0周期漏れ(air完全オフ比+4.8dB)、**lowレンジのゴースト(-21.9dB)はair完全オフでも同値=グレイン再合成経路由来(+12stではグレイン幅が入力1周期を超え、奇数次入力倍音が出力倍音の中間に残る)で本件では未解決・別課題**。対策(ユーザー指示の方式2を採用): noiseBufは出力までDサンプル遅延の余裕があるため、1024点FFT/hop512/周期Hann OLA(ユニティ再構成)を**追加レイテンシゼロ**で挿入し(processAirFx)、有声時に入力F0整数倍近傍(6kHz以下のみ、幅±max(1, 2%C)を間隔の35%でキャップ)のビンを倍音間フロア(隣接中点magの小さい方×1.4)へクランプ。>6kHzは不変=**Air Shine完全維持**。f0<~130Hz(倍音間隔<3bin)はクランプ無効(低域はlowCons/クレストガードが担当)。Low Latencyモード(D<窓長)は従来どおり生バイパス+airFxHopは追従のみ。方式1(定常母音でBand0-2に上限)はairband=4000代理で比較→ゴースト低減は同等(-48.0 vs -47.8)だが中低域エアを構造的に失うため**不採用**。実測(KITUNE_middle入力をエンジン通し、+12st): air経路ghost -43.2→**-47.8dB**(air0=-48.0と一致)、6-16k・Shine特性・レベル不変。offline_testに+12st持続母音ゴースト回帰(ghostDb、fftForViz流用)追加。CPUオフライン代理: v2計1.90%(legacy 0.94%、クリーンアップ分+0.12%)。※ユーザー音声ファイルはローカル解析のみ、リポジトリ非収載
 - **v0.21.0: 低音ゴースト修正 + Air Shine**。ユーザー実声評価(v0.20.0): ウィスパー良好・ビブラート/グライドの中域ゴースト大幅改善、ただし**低い「あー」持続で旧ピッチゴースト**、高域の抜けはさらに強化したい。①原因=period doubling/交互周期/軽いフライの倍音漏れは**2Pで相関しPでは弱い**ため非周期と誤認(offline再現: サブハーモニック-15%でb1のkeepが0.99まで上昇)。対策: 漏れ判定の候補ラグを{P, 2P, P/2}に拡張(各±2%、ストライド2+±1精密化、分母エネルギーはprefix和でO(1))。②さらに**クレストファクタガード**: ランダム周期ジッタのパルス残差は「どのラグでも無相関=技術的には非周期」だが旧ピッチに聴こえる。息ノイズ(ガウス的、crest~3.5)に対しパルス残差はcrest≫6で明確分離→crest4.5-7でkeepをフェードアウト(90Hz定常のrel diff 0.042→0.006)。③低F0(<130Hz)ではb0/b1のkeep上昇レートを減速(lowCons)。検証: サブハーモニックb1 keep 0.99→0.14、全既存回帰PASS維持。**Air Shine(airshineパラメータ、0〜6dB、既定0)**: v2専用、最上段バンド(>6kHz)の**noiseBuf再加算ゲインのみ**を持ち上げる(harmBuf側の減算・中低域は不変)。breathy実測: +6dBで6-16k帯域比0.0176→0.0291、1-4k・RMSはほぼ不変。CPUオフライン代理計測: legacy 0.97%→v2 1.78%(+0.8%/コア)
+
+- **v0.31.0: Performance Mode 新設 + 旧Low LatencyのBeta移動 + ゼロ値バイパス監査(ChatGPT指示書ベース)**。目的=**音質を1ミリも変えずに**小さいデバイスバッファ(64/128/256)を実用にすること。①**Performance Mode(新パラメータ `perfmode`、既定オフ)**: `PsolaEngine` は**このパラメータを一切読まない**(processBlockで `uiPerfMode` へ publish するだけ)。効果は(a)描画専用タイマーの更新頻度を2/3へ(SpectrumDataの4096点FFT×2、母音/レベルドーナツ、OutputMeter、SonarPad、StatusView)(b)スタンドアロンのAudio SettingsにPERFORMANCE節(バッファ調整)を出す、の2点のみ。**「遅延が下がるスイッチ」ではないと UI 文言に明記**。②**旧Low LatencyはBETAウィンドウへ移動し表示名を「Legacy Low Latency」に**。**パラメータID `lowlat` ・範囲・既定値・DSPは完全に凍結**(旧プリセット/セッション/オートメーション互換)。DSP実装(先読み半減・追跡下限90Hz・グレイン上限縮小・Air FFTクリーンアップ無効)は1行も触っていない。両モードは独立で同時ONにできる。③**ゼロ値・OFFバイパスは全モード共通**(Performance Mode限定にしない=同じ出力になる処理を任意にする理由が無い): エンジン側=`mix==1.0` でdryリング読み出しをスキップ(`1.0f*wet+0.0f*dry` は IEEE で wet と完全一致)/Natural Airが静まりD+窓ぶん排出しきったら noiseBuf クリア・processAirFxのFFT段・air再加算を丸ごと停止/AEIOU amount 0 のとき30floatマップ複製を省略。プロセッサ側=**表示タップの需要ゲート**(`uiWantsMeters`/`uiWantsViz`。エディタ非表示・タブ非表示なら4本のレベルメーター走査と2本のビジュアライザーリング書き込みを完全停止=**プラグインでウィンドウを閉じていれば無料**)/Auto-Muteオフ時はRMS走査ごとスキップ(状態はリセットして再ONで誤爆させない)/Output Gainが0dBかつ平滑収束後は乗算ループ停止(誤差<1e-6=-120dBでスナップ)/ASMR位置が中央かつ収束後は `std::copy`/FXスロット0本なら try-lock すら取らない(`fxCount` atomic)。④**スタンドアロンのバッファ支援**: Audio Settings に「Optimize buffer」(64→128→256を順に試し、デバイスが持つ最初のサイズを採用。**再初期化に失敗したら元の設定へ自動復帰**)と「Restore」(直前のサイズへ手動復帰)。**Performance ModeのON/OFFがデバイス設定を勝手に書き換えることは無い**(押した時だけ)。プラグイン版はホストのバッファに一切介入しない。⑤**エンジン先読みの短縮は今回やっていない**(指示書どおり別課題)。
+
+  **検証**: (a)**`test/bitexact.cpp` を新設**して12構成(ピッチ±・air・shine・低音・LowVoice・Legacy LowLat・robot・tilt/jitter・breath/GCI・vowel adapt、ブロック32〜512)の**全出力サンプルを変更前後で `cmp` し完全一致**を確認。**この確認が今回の主たる根拠**(offline_testは挙動と品質を見るもので、「サンプルが動いていない」は見ない)。dsp/ を触る最適化は今後もこれを使うこと。(b)offline_test 全PASS、**出力テキストは新規1行を除き変更前とバイト一致**。(c)AU/VST3/Standalone相当を `-Wall -Wextra -Wshadow` で通し**新規警告ゼロ**(pristineとdiff一致)。
+
+  **途中で踏んだ罠(重要)**: air の遊休バイパスを入れた最初の版で**リングバッファ1周(32768サンプル≒0.68秒)前の古いエアが再生された**。遊休中に noiseBuf/noiseFx のクリアを止めると、復帰時に「読み出し位置=書き込み位置-D」の区間だけ誰もクリアしていない状態になるため。対策=**遊休から復帰する瞬間に D+窓ぶんだけ明示的にクリアする**(`airActive && airTail == 0` の分岐)。実測で最大3.1e-2、その地点の正規信号が2.4e-2=**局所的に本来の音より大きい**レベルだった。この差は bitexact.cpp でしか出せず、offline_test に入れようとした3種類のアサーション(ブロックサイズ非依存/無音区間の残留/履歴の異なる2エンジン比較)は**どれも検出できなかった**ので、offline_test 側には「無音は無音のまま」までを入れ、限界をコメントに明記してある。**なおこの調査で分かった既存事実: エンジンの出力はブロックサイズを変えるとサンプル一致しない**(air完全オフでも最大1.26。初回ピッチロックのタイミングがずれてグレイン格子の位相が恒久的にずれるため)。HANDOVERの「全挙動バッファ非依存」は**検出周期・スケジューリング・デジッパ等の挙動**の話であって、ビット一致の主張ではない — 今後ブロックサイズ間の比較をテストに使わないこと。
+
+  **ユーザー実機確認の重点**: Performance Mode ON/OFFで音が変わらないこと(特にPitch/Formant/Natural Air)、64/128/256での安定性と実遅延、Optimize buffer 後の音切れ有無とRestoreで戻せること、Legacy Low Latencyが従来どおり動くこと、旧プリセット/旧セッションが読めること、Analyzer/Visualizer表示中と非表示時のCPU差、DAWでウィンドウを閉じている間のCPU差。
 
 - **v0.30.4: レベルドーナツをL/R左右分割レイアウトへ変更(ユーザー指定)**。同心4リング(外→内に inL/inR/outL/outR)をやめ、**左半分=Lチャンネル・右半分=Rチャンネル、各半分に2列(外側=入力ミント / 内側=出力ピンク)**に再構成。**両半分とも下から12時へ向かって伸び、12時がスケール最大**(ユーザー指定)。左右が鏡写しになるため、**パンやマイクの左右差が非対称としてすぐ見える**(ASMRパン時の見え方をSVGで確認)。実装は `angleAt(side, p)`: 左半分は `π+kGapB` から時計回り、右半分は `π-kGapB` から反時計回り、どちらも `π-kGapB-kGapT` のスパン(JUCEの角度は0=真上・時計回り。`addCentredArc` は from>to でも逆回りに描いてくれるので右半分もそのまま渡せる)。**下側のギャップ kGapB=0.17 は上側 kGapT=0.10 より意図的に広い**: 最初 0.07/0.07 で描いたらL/Rの弧が下でつながって1本のU字に見え、2つのメーターと認識できなかったため。色は**L/Rが位置で区別できるようになったので濃淡バリエーションを廃止**し、入力ミント/出力ピンクの2色のみに整理。中央パックは「IN/OUT」から**「L | R」**表記へ変更(半分がどちらのチャンネルかを直接示すため。入力/出力の区別は色とツールチップが担う)。0dBFS基準線とレッドゾーンは左右それぞれに描画。**検証**: `dsp/` 無変更。AU/VST3相当・スタンドアロン相当の両構成でエラー0
 
@@ -121,4 +129,4 @@ pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, vadapt/
 
 ## 引き継ぎ手順
 
-新セッションで: このファイルと、必要に応じ `DESIGN.md` / `dsp/PsolaEngine.h` を読む。検証はサンドボックスで `g++ -O2 -std=c++17 test/offline_test.cpp` → `python3 test/analyze.py`(要numpy)。修正ファイルはユーザーに渡し、アップロード先フォルダを明記すること。
+新セッションで: このファイルと、必要に応じ `DESIGN.md` / `dsp/PsolaEngine.h` を読む。検証はサンドボックスで `g++ -O2 -std=c++17 test/offline_test.cpp` → `python3 test/analyze.py`(要numpy)。**`dsp/` を「音を変えずに」触る変更では、加えて `test/bitexact.cpp` で変更前後の出力を `cmp` すること**(使い方はファイル冒頭)。修正ファイルはユーザーに渡し、アップロード先フォルダを明記すること。

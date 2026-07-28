@@ -397,6 +397,20 @@ static std::vector<float> runToggles (const std::vector<float>& in,
     return out;
 }
 
+// same as run(), but with a caller-chosen host block size
+static std::vector<float> runBlocked (const std::vector<float>& in,
+                                      const PsolaEngine::Params& p, int B)
+{
+    PsolaEngine eng;
+    eng.prepare (FS);
+    eng.setParams (p);
+    std::vector<float> out (in.size(), 0.0f);
+    for (size_t i = 0; i < in.size(); i += (size_t) B)
+        eng.process (in.data() + i, out.data() + i,
+                     (int) std::min ((size_t) B, in.size() - i));
+    return out;
+}
+
 static std::vector<float> run (const std::vector<float>& in, const PsolaEngine::Params& p)
 {
     PsolaEngine eng;
@@ -1214,6 +1228,49 @@ int main()
         const bool ok = (g1 - g0) < 1.5 && (g2 - g0) < 1.5
                      && ! hasBad (o1) && ! hasBad (o2) && ! hasBad (o3);
         std::printf ("spectral air cleanup: %s\n", ok ? "PASS" : "FAIL");
+        if (! ok) ++naFail;
+    }
+
+    // (v0.31.0) Idle-drain bypass of the air path. Once Natural Air has been
+    // quiet long enough for its lookahead delay and cleanup window to empty,
+    // the engine stops clearing / FFT-ing / re-adding those buffers (they are
+    // all zeros by then). This checks the visible half of that: a long silent
+    // gap must still come out silent, at every block size, and the wake-up
+    // afterwards must not arrive as a step.
+    //
+    // NOTE ON SCOPE: this does NOT prove the bypass is sample-exact. The ring
+    // buffers wrap every 32768 samples, so a wake-up that failed to clear the
+    // lookahead window would replay material from one wrap earlier — audible,
+    // but landing on top of the real signal rather than in the silence, so no
+    // single-run metric here separates it. That property was verified instead
+    // by comparing raw output against a stored pre-change reference; see
+    // test/bitexact.cpp, which is the tool to use for any further work in
+    // here that is meant to leave the samples untouched.
+    {
+        auto gap = makeVowel (120.0, 120.0, 3.0);
+        for (size_t i = (size_t) (FS * 1.0); i < (size_t) (FS * 1.7) && i < gap.size(); ++i)
+            gap[i] = 0.0f;                       // long silence: air path drains
+
+        P pa; pa.pitchSemi = 7.0f; pa.airPreserve = 1.0f; pa.airShineDb = 3.0f;
+
+        double residue = 0.0, step = 0.0;
+        bool   bad = false;
+        for (int B : { 64, 128, 256, 512, 1024 })      // several idle cadences
+        {
+            const auto o = runBlocked (gap, pa, B);
+            // deep inside the silence everything upstream has drained: any
+            // sample here is material the bypass failed to clear
+            for (size_t i = (size_t) (FS * 1.3); i < (size_t) (FS * 1.65); ++i)
+                residue = std::max (residue, (double) std::abs (o[i]));
+            // and the wake-up must not arrive as a jump
+            for (size_t i = (size_t) (FS * 1.7); i + 1 < (size_t) (FS * 2.1); ++i)
+                step = std::max (step, (double) std::abs (o[i + 1] - o[i]));
+            bad = bad || hasBad (o);
+        }
+
+        const bool ok = residue < 1.0e-4 && step < 0.25 && ! bad;
+        std::printf ("air idle-drain bypass: silence residue=%.2e  re-onset step=%.3f  %s\n",
+                     residue, step, ok ? "PASS" : "FAIL");
         if (! ok) ++naFail;
     }
 

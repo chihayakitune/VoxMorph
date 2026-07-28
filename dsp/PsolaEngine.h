@@ -204,6 +204,8 @@ public:
         for (int i = 0; i < kFxN; ++i)
             hannFx[(size_t) i] = 0.5f * (1.0f - std::cos (2.0f * (float) M_PI * (float) i / (float) kFxN));
         airFxHop = kFxN;
+        airActive = false;
+        airTail   = 0;      // every air buffer was just zero-filled above
         for (int b = 0; b < 4; ++b)
         { aB[b] = 0.0f; airFloorE[b] = 0.0; gS2[b] = 0.0f; gB2[b] = 0.0f; }
         airPrevP  = curP;
@@ -305,10 +307,14 @@ public:
 
         // AEIOU Character: off (or amount 0) must be a perfect no-op, so
         // the enable flag collapses into the amount. The map is copied at
-        // this control-rate call (30 floats, clamped inside setMap).
-        vaw.setMap (q.vowelMap);
+        // this control-rate call (30 floats, clamped inside setMap) — but
+        // only while the feature is actually running: at amount 0 the warp
+        // never reads the map, and the copy happens in the same call that
+        // brings the amount above zero, so switching on is unchanged.
         const float vaAmt = q.vowelAdapt
                           ? std::clamp (q.vowelAdaptAmt, 0.0f, 2.0f) : 0.0f;
+        if (vaAmt > 1.0e-4f)
+            vaw.setMap (q.vowelMap);
         vaw.setAmount (vaAmt);
         const bool vaOnNew = vaAmt > 1.0e-4f;
         if (vaOn && ! vaOnNew)
@@ -397,6 +403,23 @@ public:
                     gMax  = std::max ({ gMax, gS2[b], gB2[b] });
                 }
                 airActive = tMax > 0.0f || gMax > 1.0e-4f;
+                // Waking up from a fully drained idle stretch: while idle the
+                // air buffers were left alone, so the lookahead window behind
+                // the write head still holds whatever the ring carried one
+                // wrap ago. Clear exactly the span that will be read (and
+                // overlap-added into) before the running stages catch up, so
+                // the first grains after the pause see the same zeros they
+                // would have seen with the clears running continuously.
+                if (airActive && airTail == 0)
+                {
+                    const int span = D + kFxN + 8;
+                    for (int i = 1; i <= span; ++i)
+                    {
+                        const size_t idx = (size_t) ((start - i) & kMask);
+                        noiseBuf[idx] = 0.0f;
+                        noiseFx[idx]  = 0.0f;
+                    }
+                }
                 if (airActive)
                 {
                     for (int i = 0; i < n; ++i)
@@ -446,12 +469,25 @@ public:
                 }
                 else
                 {
-                    for (int i = 0; i < n; ++i)
-                    {
-                        const size_t idx = (size_t) ((start + i) & kMask);
-                        harmBuf[idx]  = inBuf[idx];
-                        noiseBuf[idx] = 0.0f;
-                    }
+                    // Idle air path. While the tail of a previously active
+                    // stretch is still travelling through the D-sample delay
+                    // the noise buffer must keep being cleared; once that has
+                    // fully drained every buffer downstream is already zero,
+                    // so the clear (and, below, the FFT stage and the air
+                    // re-addition) can stop entirely. Same samples either way.
+                    if (airTail > 0)
+                        for (int i = 0; i < n; ++i)
+                        {
+                            const size_t idx = (size_t) ((start + i) & kMask);
+                            harmBuf[idx]  = inBuf[idx];
+                            noiseBuf[idx] = 0.0f;
+                        }
+                    else
+                        for (int i = 0; i < n; ++i)
+                        {
+                            const size_t idx = (size_t) ((start + i) & kMask);
+                            harmBuf[idx] = inBuf[idx];
+                        }
                     airSplit.reset();
                     for (int b = 0; b < 4; ++b) { gS2[b] = 0.0f; gB2[b] = 0.0f; }
                     airP = curP;
@@ -459,6 +495,12 @@ public:
                 }
             }
         }
+
+        // has the air path anything to contribute to the output right now?
+        // (active, or still draining the lookahead delay + the FFT window)
+        const bool airOut = airActive || airTail > 0;
+        if (airActive) airTail = D + kFxN + 2048;
+        else           airTail = std::max (0, airTail - n);
 
         // dezipper: glide the conversion ratios over ~40 ms so parameter
         // moves (or host automation) never step audibly between grains
@@ -484,7 +526,7 @@ public:
         // D-sample delay slack, so it adds no latency. Needs D >= window;
         // in Low Latency mode the air passes through raw instead.
         const bool airFxOn = D >= kFxN + 8;
-        if (airFxOn)
+        if (airFxOn && airOut)
         {
             while (airFxHop <= writePos)
             {
@@ -499,6 +541,10 @@ public:
             placeGrain();
 
         const bool doTilt = (gLow != 1.0f || gHigh != 1.0f);
+        // Full wet is by far the normal setting: 1.0f * wet + 0.0f * dry is
+        // exactly wet in IEEE arithmetic, so skipping the dry ring read and
+        // the crossfade there produces identical samples.
+        const bool doDry  = mix < 1.0f;
 
         for (int i = 0; i < n; ++i)
         {
@@ -508,7 +554,7 @@ public:
             float wet = nrm > 1.0e-3f ? accBuf[idx] / std::max (nrm, 0.25f) : 0.0f;
 
             const int64_t di = oi - D;
-            if (di >= 0)                                  // un-pitched breath
+            if (airOut && di >= 0)                        // un-pitched breath
                 wet += airFxOn ? noiseFx[(size_t) (di & kMask)]
                                : noiseBuf[(size_t) (di & kMask)];
 
@@ -518,11 +564,14 @@ public:
                 wet = gLow * tiltLp + gHigh * (wet - tiltLp);
             }
 
-            float dry = 0.0f;
-            if (di >= 0)
-                dry = inBuf[(size_t) (di & kMask)];
+            if (doDry)
+            {
+                const float dry = di >= 0 ? inBuf[(size_t) (di & kMask)] : 0.0f;
+                out[i] = mix * wet + (1.0f - mix) * dry;
+            }
+            else
+                out[i] = wet;
 
-            out[i] = mix * wet + (1.0f - mix) * dry;
             accBuf[idx]  = 0.0f;
             normBuf[idx] = 0.0f;
         }
@@ -1615,6 +1664,10 @@ private:
     std::vector<float> hannFx;            // periodic Hann window table
     int64_t airFxHop  = 1024;             // next hop boundary to process
     bool    airActive = false;            // air path carried signal this chunk
+    // samples still to drain after the air path goes quiet (lookahead delay
+    // + cleanup window). While it is 0 every air buffer is known to be all
+    // zeros, so the clear / FFT / re-addition stages are skipped outright.
+    int     airTail   = 0;
 
     float grainHalfPOv = 0.0f;            // experimental width override (0 = off)
     bool  grainBlendOn = false;           // experimental pulse-grain crossfade
