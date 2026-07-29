@@ -263,11 +263,27 @@ public:
     LevelMeter uiInL, uiInR, uiOutL, uiOutR;
 
     // Visualizer taps: mono input (pre-conversion) and output (as heard),
-    // written on the audio thread, read by the editor's SpectrumView.
+    // written on the audio thread, read by the editor's SpectrumData.
+    //
+    // The UI reads a 4096-sample window out of these rings while the audio
+    // thread keeps writing, so the samples themselves are atomics accessed
+    // with relaxed ordering: that makes the overlap a well-defined race-free
+    // read (and keeps Thread Sanitizer quiet) without any lock on the audio
+    // thread. A relaxed float load/store is a plain move on every platform we
+    // build for -- the static_assert below is what keeps that true.
+    //
+    // vizPos is the running write position and doubles as the generation
+    // counter: the reader takes it before and after copying a window and
+    // drops the frame if the writer advanced far enough to have overwritten
+    // any of it (see SpectrumData::timerCallback). It is unsigned so the wrap
+    // after 2^32 samples (~25 h at 48 kHz) is defined and differences stay
+    // exact across it.
     static constexpr int kVizLen = 16384;              // power of two
-    std::vector<float> vizIn  = std::vector<float> ((size_t) kVizLen, 0.0f);
-    std::vector<float> vizOut = std::vector<float> ((size_t) kVizLen, 0.0f);
-    std::atomic<int>   vizPos { 0 };
+    static_assert (std::atomic<float>::is_always_lock_free,
+                   "the visualizer taps must never lock on the audio thread");
+    std::vector<std::atomic<float>> vizIn  = std::vector<std::atomic<float>> ((size_t) kVizLen);
+    std::vector<std::atomic<float>> vizOut = std::vector<std::atomic<float>> ((size_t) kVizLen);
+    std::atomic<unsigned>           vizPos { 0 };
 
     // ANALYZE tab support. capBuf: mic capture, up to 15 s (raw input,
     // pre-engine); capTarget = requested length in samples.

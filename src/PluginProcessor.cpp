@@ -585,10 +585,11 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         }
     }
 
-    const int vp = vizPos.load (std::memory_order_relaxed);
+    const unsigned vp = vizPos.load (std::memory_order_relaxed);
     if (wantViz)
         for (int i = 0; i < n; ++i)
-            vizIn[(size_t) ((vp + i) & (kVizLen - 1))] = m[i];
+            vizIn[(size_t) ((vp + (unsigned) i) & (unsigned) (kVizLen - 1))]
+                .store (m[i], std::memory_order_relaxed);
 
     if (capturing.load() && ! capFromOutput.load())   // ANALYZE: capture raw input
     {
@@ -800,10 +801,12 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 
     if (wantViz)
         for (int i = 0; i < n; ++i)
-            vizOut[(size_t) ((vp + i) & (kVizLen - 1))] = m[i];
+            vizOut[(size_t) ((vp + (unsigned) i) & (unsigned) (kVizLen - 1))]
+                .store (m[i], std::memory_order_relaxed);
     // the write position advances either way, so the reader can tell how much
-    // fresh material has arrived since it asked for the taps to be filled
-    vizPos.store (vp + n, std::memory_order_release);
+    // fresh material has arrived since it asked for the taps to be filled --
+    // and, while reading, how close we have come to overwriting its window
+    vizPos.store (vp + (unsigned) n, std::memory_order_release);
 
     if (capturing.load() && capFromOutput.load())     // ANALYZE: capture converted
     {                                                 // output (before file preview)

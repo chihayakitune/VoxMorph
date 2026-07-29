@@ -70,6 +70,8 @@ public:
     {
         re.assign ((size_t) kN, 0.0f);
         im.assign ((size_t) kN, 0.0f);
+        winIn .assign ((size_t) kN, 0.0f);
+        winOut.assign ((size_t) kN, 0.0f);
         smIn .assign ((size_t) kCols, kFloor);
         smOut.assign ((size_t) kCols, kFloor);
         startTimerHz (30);
@@ -112,24 +114,48 @@ private:
         // after switching the taps back on, wait until a full FFT window of
         // fresh material has been written — otherwise the first frame would
         // analyse whatever the ring still held from the last time it was on
-        if (proc.vizPos.load (std::memory_order_acquire) - onPos < kN)
+        if (proc.vizPos.load (std::memory_order_acquire) - onPos < (unsigned) kN)
             return;
 
-        analyze (proc.vizIn,  smIn);
-        analyze (proc.vizOut, smOut);
+        // Take a copy of both windows against ONE write position (the two
+        // curves should show the same moment), then check how far the audio
+        // thread got while we were copying. It writes forward from `pos`, so
+        // it needs kVizLen - kN samples before it reaches the oldest sample
+        // we took; past that the copy mixes two different moments and the
+        // frame is dropped rather than drawn. The margin is 12288 samples
+        // (~256 ms at 48 kHz), so this only ever fires if the message thread
+        // was stalled for that long -- normal frames are never lost.
+        const unsigned pos = proc.vizPos.load (std::memory_order_acquire);
+        grabWindow (proc.vizIn,  pos, winIn);
+        grabWindow (proc.vizOut, pos, winOut);
+        if (proc.vizPos.load (std::memory_order_acquire) - pos
+              > (unsigned) (VoxMorphProcessor::kVizLen - kN))
+            return;
+
+        analyze (winIn,  smIn);
+        analyze (winOut, smOut);
 
         for (auto& v : views)
             if (v != nullptr && v->isShowing()) v->repaint();
     }
 
+    // copy the kN samples ending at `pos` out of one tap ring. Relaxed loads:
+    // the ordering that matters is the acquire on vizPos around the call.
+    void grabWindow (const std::vector<std::atomic<float>>& src,
+                     unsigned pos, std::vector<float>& dest) const
+    {
+        const unsigned mask = (unsigned) VoxMorphProcessor::kVizLen - 1;
+        for (int i = 0; i < kN; ++i)
+            dest[(size_t) i] = src[(size_t) ((pos - (unsigned) kN + (unsigned) i) & mask)]
+                                   .load (std::memory_order_relaxed);
+    }
+
     void analyze (const std::vector<float>& src, std::vector<float>& dest)
     {
-        const int pos  = proc.vizPos.load (std::memory_order_acquire);
-        const int mask = VoxMorphProcessor::kVizLen - 1;
         for (int i = 0; i < kN; ++i)
         {
             const float w = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi * (float) i / (float) kN);
-            re[(size_t) i] = src[(size_t) ((pos - kN + i) & mask)] * w;
+            re[(size_t) i] = src[(size_t) i] * w;
             im[(size_t) i] = 0.0f;
         }
         PsolaEngine::fftForViz (re.data(), im.data(), kN);
@@ -155,10 +181,11 @@ private:
 
     VoxMorphProcessor& proc;
     std::vector<float> re, im, smIn, smOut;
+    std::vector<float> winIn, winOut;   // the tap windows this frame analyses
     std::vector<juce::Component::SafePointer<juce::Component>> views;
-    int  rateHz = 30;         // current timer rate (Performance Mode lowers it)
-    bool wanted = false;      // last value published to proc.uiWantsViz
-    int  onPos  = 0;          // vizPos when the taps were switched back on
+    int      rateHz = 30;     // current timer rate (Performance Mode lowers it)
+    bool     wanted = false;  // last value published to proc.uiWantsViz
+    unsigned onPos  = 0;      // vizPos when the taps were switched back on
 };
 
 // Spectrum visualizer: INPUT (mint) and converted OUTPUT (pink) spectra
