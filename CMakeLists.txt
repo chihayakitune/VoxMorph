@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(VoxMorph VERSION 0.31.1)
+project(VoxMorph VERSION 0.31.2)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,6 +35,14 @@ juce_add_plugin(VoxMorph
 
 target_sources(VoxMorph PRIVATE src/PluginProcessor.cpp)
 target_include_directories(VoxMorph PRIVATE dsp)
+
+# ANOKOE UI art (v0.31.2). Every PNG in assets/ is compiled into the binary,
+# so nothing has to be installed alongside the plugin. Names in BinaryData are
+# the file names with '.' replaced by '_' — code looks them up by string
+# through BinaryData::getNamedResource(), so adding art here is enough.
+file(GLOB ANOKOE_ASSETS "${CMAKE_CURRENT_SOURCE_DIR}/assets/*.png")
+juce_add_binary_data(AnokoeAssets SOURCES ${ANOKOE_ASSETS})
+target_link_libraries(VoxMorph PRIVATE AnokoeAssets)
 
 if (MSVC)
     target_compile_options(VoxMorph PRIVATE /utf-8)   # 日本語UI文字列のため

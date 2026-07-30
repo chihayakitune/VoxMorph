@@ -3,6 +3,9 @@
 #include "VoiceAnalyzer.h"
 #include "MatchingEngine.h"
 #include "SampleTargetCatalog.h"
+#include "AnokoeWidgets.h"
+
+namespace ak = anokoe;   // ANOKOE skin: colours, art and skinned widgets
 
 // StandalonePluginHolder gives access to the standalone wrapper's state
 // saving (used for the Cmd+S shortcut). Only present in the standalone build.
@@ -222,10 +225,7 @@ private:
     void paint (juce::Graphics& g) override
     {
         auto b = getLocalBounds().toFloat().reduced (2.0f);
-        g.setColour (juce::Colours::white);
-        g.fillRoundedRectangle (b, 8.0f);
-        g.setColour (juce::Colour (0xffe9d8dd));
-        g.drawRoundedRectangle (b, 8.0f, 1.0f);
+        ak::paintCard (g, b);
 
         auto r = b.reduced (10.0f, 10.0f);
         g.setColour (juce::Colour (0x12000000));                   // grid
@@ -246,8 +246,8 @@ private:
             g.drawHorizontalLine ((int) y, r.getX(), r.getRight());
         }
 
-        drawCurve (g, data.in(),  r, juce::Colour (0xff54bda1));   // input: mint
-        drawCurve (g, data.out(), r, juce::Colour (0xfff08ba5));   // output: pink
+        drawCurve (g, data.in(),  r, ak::seriesIn);   // input: mint
+        drawCurve (g, data.out(), r, ak::seriesOut);   // output: pink
 
         g.setFont (juce::Font (juce::FontOptions (11.0f)));        // legend
         g.setColour (juce::Colour (0xff54bda1));
@@ -370,10 +370,7 @@ private:
     void paint (juce::Graphics& g) override
     {
         auto b = getLocalBounds().toFloat().reduced (2.0f);
-        g.setColour (juce::Colours::white);
-        g.fillRoundedRectangle (b, 8.0f);
-        g.setColour (juce::Colour (0xffe9d8dd));
-        g.drawRoundedRectangle (b, 8.0f, 1.0f);
+        ak::paintCard (g, b);
 
         const auto  c    = b.getCentre();
         const float rOut = 0.5f * juce::jmin (b.getWidth(), b.getHeight()) - 9.0f;
@@ -452,7 +449,7 @@ private:
     {
         static const juce::Colour c[kV] = {
             juce::Colour (0xfff08ba5),   // A  pink   (matches the output curve)
-            juce::Colour (0xff54c0aa),   // I  mint   (matches the input curve)
+            juce::Colour (0xff7999db),   // I  mint   (matches the input curve)
             juce::Colour (0xffa79ee0),   // U  lavender
             juce::Colour (0xffe3a63c),   // E  amber
             juce::Colour (0xff6fb2dc)    // O  sky
@@ -488,10 +485,7 @@ private:
     void paint (juce::Graphics& g) override
     {
         auto b = getLocalBounds().toFloat().reduced (2.0f);
-        g.setColour (juce::Colours::white);
-        g.fillRoundedRectangle (b, 8.0f);
-        g.setColour (juce::Colour (0xffe9d8dd));
-        g.drawRoundedRectangle (b, 8.0f, 1.0f);
+        ak::paintCard (g, b);
 
         const auto  c    = b.getCentre();
         const float rOut = 0.5f * juce::jmin (b.getWidth(), b.getHeight()) - 9.0f;
@@ -508,7 +502,7 @@ private:
         if (! active)
         {
             drawPuck (g, c, rIn);          // puck FIRST — the message sits on top
-            g.setColour (juce::Colour (0xff9aa5a2));
+            g.setColour (juce::Colour (0xff8f9ab5));
             g.setFont (juce::Font (juce::FontOptions (10.5f)));
             g.drawFittedText ("AEIOU Character\nis off",
                               box.toNearestInt(), juce::Justification::centred, 2);
@@ -557,14 +551,14 @@ private:
 
         // dominant vowel + its share in the hole
         const float topShare = juce::jmax (0.0f, sm[top]) / sum;
-        g.setColour (juce::Colour (0xff2e2e32).withMultipliedAlpha (juce::jmax (0.35f, fade)));
+        g.setColour (ak::ink.withMultipliedAlpha (juce::jmax (0.35f, fade)));
         g.setFont (juce::Font (juce::FontOptions (juce::jmin (22.0f, rIn * 0.9f),
                                                   juce::Font::bold)));
         g.drawText (kLbl[top],
                     juce::Rectangle<float> (rIn * 1.6f, rIn * 0.95f)
                         .withCentre ({ c.x, c.y - rIn * 0.20f }).toNearestInt(),
                     juce::Justification::centred);
-        g.setColour (juce::Colour (0xff9aa5a2));
+        g.setColour (juce::Colour (0xff8f9ab5));
         g.setFont (juce::Font (juce::FontOptions (juce::jmin (11.0f, rIn * 0.42f))));
         g.drawText (juce::String (juce::roundToInt (topShare * 100.0f)) + "%",
                     juce::Rectangle<float> (rIn * 1.6f, rIn * 0.6f)
@@ -673,7 +667,7 @@ private:
     // side is already carried by which half of the dial you are looking at
     static juce::Colour laneColour (int lane)
     {
-        return lane == 0 ? juce::Colour (0xff54c0aa) : juce::Colour (0xfff08ba5);
+        return lane == 0 ? juce::Colour (0xff7999db) : juce::Colour (0xfff08ba5);
     }
 
     static int idx (int side, int lane) { return side * kLane + lane; }
@@ -702,10 +696,7 @@ private:
     void paint (juce::Graphics& g) override
     {
         auto b = getLocalBounds().toFloat().reduced (2.0f);
-        g.setColour (juce::Colours::white);
-        g.fillRoundedRectangle (b, 8.0f);
-        g.setColour (juce::Colour (0xffe9d8dd));
-        g.drawRoundedRectangle (b, 8.0f, 1.0f);
+        ak::paintCard (g, b);
 
         const auto  c    = b.getCentre();
         const float rOut = 0.5f * juce::jmin (b.getWidth(), b.getHeight()) - 9.0f;
@@ -870,42 +861,69 @@ private:
         repaint();
     }
 
+    // v0.31.0: drawn as the ANOKOE latency donut. The numbers, the thresholds
+    // and the breakdown text are unchanged from v0.17.0 — only the skin moved.
     void paint (juce::Graphics& g) override
     {
-        auto b = getLocalBounds().toFloat().reduced (2.0f, 1.0f);
-        g.setColour (juce::Colours::white);
-        g.fillRoundedRectangle (b, 6.0f);
-        g.setColour (juce::Colour (0xffe9d8dd));
-        g.drawRoundedRectangle (b, 6.0f, 1.0f);
+        ak::paintCard (g, getLocalBounds().toFloat());
 
-        auto r = b.reduced (10.0f, 0.0f).toNearestInt();
-        g.setColour (juce::Colour (0xff2e2e32));
-        g.setFont (juce::Font (juce::FontOptions (12.5f)));
         const float ms = engMs + fxMs + bufMs;
-        g.drawText ("Latency: " + (known ? juce::String (ms, 1) + " ms" : juce::String ("--")),
-                    r, juce::Justification::centredLeft);
+        auto r = getLocalBounds().reduced (8);
+        auto textArea = r.removeFromBottom (46);
+        const float side = (float) juce::jmin (r.getWidth(), r.getHeight());
+        const auto art = juce::Rectangle<float> (side, side)
+                             .withCentre ({ (float) r.getCentreX(), (float) r.getCentreY() });
 
+        ak::drawFitted (g, ak::image ("ui_donuts_base_png"), art);
+        if (known && side > 30.0f)
+        {
+            // ring fills over 0..120 ms, coloured by the same LOW/MID/HIGH bands
+            const float frac = juce::jlimit (0.02f, 1.0f, ms / 120.0f);
+            juce::Path arc;
+            const float rad = side * 0.363f;
+            arc.addCentredArc (art.getCentreX(), art.getCentreY(), rad, rad, 0.0f,
+                               0.0f, frac * juce::MathConstants<float>::twoPi, true);
+            g.setColour (chipColour().withAlpha (0.9f));
+            g.strokePath (arc, juce::PathStrokeType (side * 0.072f,
+                              juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        }
+        ak::drawFitted (g, ak::image ("ui_donuts_center_png"), art);
+
+        auto l1 = textArea.removeFromTop (20);
+        const auto text = "Latency: " + (known ? juce::String (ms, 1) + " ms"
+                                               : juce::String ("--"));
+        auto tb = l1.withSizeKeepingCentre (juce::jmin (l1.getWidth(), 158), 20);
+        g.setColour (ak::ink);
+        g.setFont (ak::font (12.0f));
+        g.drawText (text, tb.removeFromLeft (juce::jmax (56, tb.getWidth() - 46)),
+                    juce::Justification::centredRight, false);
         if (known)
         {
-            const bool low = ms < 35.0f, mid = ms < 70.0f;    // badge
-            g.setColour (low ? juce::Colour (0xff54c0aa)
-                       : mid ? juce::Colour (0xffe3a63c)
-                             : juce::Colour (0xfff08ba5));
-            const juce::Rectangle<float> chip ((float) r.getX() + 132.0f,
-                                               b.getCentreY() - 8.0f, 44.0f, 16.0f);
-            g.fillRoundedRectangle (chip, 8.0f);
+            auto chip = tb.reduced (3, 2);
+            g.setColour (chipColour());
+            g.fillRoundedRectangle (chip.toFloat(), 9.0f);
             g.setColour (juce::Colours::white);
-            g.setFont (juce::Font (juce::FontOptions (10.5f, juce::Font::bold)));
-            g.drawText (low ? "LOW" : mid ? "MID" : "HIGH",
-                        chip.toNearestInt(), juce::Justification::centred);
+            g.setFont (ak::font (10.0f, true));
+            g.drawText (chipText(), chip, juce::Justification::centred, false);
 
-            g.setColour (juce::Colour (0xff9aa5a2));           // breakdown
-            g.setFont (juce::Font (juce::FontOptions (11.0f)));
             juce::String d = "engine " + juce::String (engMs, 1)
                            + " + FX " + juce::String (fxMs, 1);
-            if (bufMs > 0.0f) d += " + buffer " + juce::String (bufMs, 1);
-            g.drawText (d + " ms", r, juce::Justification::centredRight);
+            if (bufMs > 0.0f) d += " + buf " + juce::String (bufMs, 1);
+            g.setColour (ak::heading.withAlpha (0.8f));
+            g.setFont (ak::font (10.0f));
+            g.drawText (d + " ms", textArea, juce::Justification::centredTop, false);
         }
+    }
+
+    juce::String chipText() const
+    {
+        const float ms = engMs + fxMs + bufMs;
+        return ms < 35.0f ? "LOW" : ms < 70.0f ? "MID" : "HIGH";
+    }
+    juce::Colour chipColour() const
+    {
+        const float ms = engMs + fxMs + bufMs;
+        return ms < 35.0f ? ak::badge : ms < 70.0f ? ak::badgeMid : ak::badgeHigh;
     }
 
     VoxMorphProcessor& proc;
@@ -1065,52 +1083,95 @@ inline juce::String vmSetOutputDevice (const juce::String& name)
     return dm->setAudioDeviceSetup (s, true);
 }
 
-// ---- reusable parameter row (for the BETA / Audio Settings windows) -------
-// Same [control] [↺] [🔒] set as the MAIN tab rows, but self-contained: it
-// owns its lock wiring and re-reads the lock state on a 4 Hz timer, so a lock
-// toggled on the MAIN tab (or restored by the host) stays in sync here.
-class ParamRow : public juce::Component, private juce::Timer
+// ---- reusable parameter row (v0.31.0: the only row type in the skinned UI) -
+// One row = [control] [value] [reset] [lock], skinned with the ANOKOE art.
+// Kinds cover everything the UI needs: a horizontal slider, a checkbox, a big
+// rotary knob, a dropdown, or a plain action button.
+//
+// The row owns its lock wiring but does NOT poll: whoever hosts a set of rows
+// calls refreshLock() on them (the editor does it from its 3 Hz history poll,
+// the BETA / Audio Settings windows from their own small timer), so a lock
+// toggled anywhere — or restored by the host — stays in sync everywhere.
+class ParamRow : public juce::Component
 {
 public:
-    enum class Kind { toggle, slider };
+    enum class Kind { slider, toggle, knob, combo, button };
 
+    // slider / toggle / knob / combo
     ParamRow (VoxMorphProcessor& p, const juce::String& paramId, Kind k,
-              const juce::String& displayName, const juce::String& tipText)
-        : proc (p), id (paramId), kind (k)
+              const juce::String& displayName, const juce::String& tipText,
+              ak::Tone t = ak::Tone::blue)
+        : proc (&p), id (paramId), kind (k), tone (t)
     {
-        rp = proc.apvts.getParameter (id);
+        rp = proc->apvts.getParameter (id);
 
-        if (kind == Kind::toggle)
-        {
-            toggle.setButtonText (displayName);
-            toggle.setTooltip (tipText);
-            addAndMakeVisible (toggle);
-            if (rp != nullptr)
-                bAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
-                           proc.apvts, id, toggle);
-        }
-        else
-        {
-            name.setText (displayName, juce::dontSendNotification);
-            name.setTooltip (tipText);
-            name.setFont (juce::Font (juce::FontOptions (13.0f)));
+        name.setText (displayName, juce::dontSendNotification);
+        name.setTooltip (tipText);
+        name.setFont (ak::font (12.5f));
+        name.setColour (juce::Label::textColourId, ak::ink);
+        if (kind != Kind::toggle)
             addAndMakeVisible (name);
 
-            slider.setSliderStyle (juce::Slider::LinearHorizontal);
-            slider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 74, 22);
-            slider.setTextBoxIsEditable (true);
-            slider.setTooltip (tipText);
-            addAndMakeVisible (slider);
-            if (rp != nullptr)
-            {
-                sAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
-                           proc.apvts, id, slider);
-                slider.setDoubleClickReturnValue (
-                    true, (double) rp->convertFrom0to1 (rp->getDefaultValue()));
-            }
+        switch (kind)
+        {
+            case Kind::toggle:
+                toggle.setButtonText (displayName);
+                toggle.setTooltip (tipText);
+                addAndMakeVisible (toggle);
+                if (rp != nullptr)
+                    bAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
+                               proc->apvts, id, toggle);
+                break;
+
+            case Kind::slider:
+            case Kind::knob:
+                slider.setSliderStyle (kind == Kind::knob
+                                         ? juce::Slider::RotaryHorizontalVerticalDrag
+                                         : juce::Slider::LinearHorizontal);
+                if (kind == Kind::knob)
+                    slider.setRotaryParameters (ak::knobStart(), ak::knobEnd(), true);
+                slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+                slider.setTooltip (tipText);
+                addAndMakeVisible (slider);
+                addAndMakeVisible (value);
+                value.setName ("vmValue");
+                value.setTooltip (tipText);
+                value.setFont (ak::font (12.0f));
+                value.setJustificationType (juce::Justification::centredRight);
+                value.setEditable (false, true, false);
+                value.setColour (juce::Label::textColourId, ak::ink);
+                value.onTextChange = [this]
+                {
+                    slider.setValue (slider.getValueFromText (value.getText()),
+                                     juce::sendNotificationSync);
+                    syncValueText();
+                };
+                slider.onValueChange = [this] { syncValueText(); };
+                if (rp != nullptr)
+                {
+                    sAtt = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+                               proc->apvts, id, slider);
+                    slider.setDoubleClickReturnValue (
+                        true, (double) rp->convertFrom0to1 (rp->getDefaultValue()));
+                }
+                syncValueText();
+                break;
+
+            case Kind::combo:
+                if (auto* cp = dynamic_cast<juce::AudioParameterChoice*> (rp))
+                    for (int i = 0; i < cp->choices.size(); ++i)
+                        combo.addItem (cp->choices[i], i + 1);
+                combo.setTooltip (tipText);
+                addAndMakeVisible (combo);
+                if (rp != nullptr)
+                    cAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
+                               proc->apvts, id, combo);
+                break;
+
+            case Kind::button:
+                break;
         }
 
-        reset.setButtonText (juce::String::fromUTF8 ("\xE2\x86\xBA"));
         reset.setTooltip (vmTip ("Reset to default.", "初期値に戻します。"));
         reset.onClick = [this]
         {
@@ -1121,71 +1182,149 @@ public:
         };
         lock.onClick = [this]
         {
-            proc.setParamLocked (id, ! proc.isParamLocked (id));
+            proc->setParamLocked (id, ! proc->isParamLocked (id));
             refreshLock();
+            if (onLockChanged) onLockChanged();
         };
         addAndMakeVisible (reset);
         addAndMakeVisible (lock);
-
         refreshLock();
-        startTimerHz (4);
+    }
+
+    // plain action button row (no parameter): [label] [button]
+    ParamRow (const juce::String& displayName, const juce::String& btnText,
+              const juce::String& tipText, std::function<void()> onClick)
+        : kind (Kind::button)
+    {
+        juce::ignoreUnused (displayName);
+        action.setButtonText (btnText);
+        action.setTooltip (tipText);
+        action.onClick = std::move (onClick);
+        addAndMakeVisible (action);
+    }
+
+    // Called by the host panel to mirror the current lock state into the row.
+    void refreshLock()
+    {
+        if (kind == Kind::button || proc == nullptr) return;
+        const bool locked = proc->isParamLocked (id);
+        lock.setImage (locked ? "ui_mark_S_Lock_png" : "ui_mark_S_Unlock_png");
+        lock.setTooltip (locked
+            ? vmTip ("Locked: this value cannot be changed - not by knobs, the reset arrow, "
+                     "presets, Reset All or Matching. Click to unlock.",
+                     "ロック中のため変更できません(手動操作・リセット・プリセット・Reset All・"
+                     "Matchingのすべてから保護)。クリックで解除します。")
+            : vmTip ("Lock this parameter: protects the value from manual edits, the reset "
+                     "arrow, preset loading, Reset All and Matching.",
+                     "この項目をロックします。手動操作・リセット・プリセット読込・Reset All・"
+                     "Matchingから値を保護します。"));
+        toggle.setEnabled (! locked);
+        slider.setEnabled (! locked);
+        combo .setEnabled (! locked);
+        value .setEnabled (! locked);
+        name  .setEnabled (! locked);
+        reset .setEnabled (! locked);
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        if (kind != Kind::button && proc != nullptr && proc->isParamLocked (id))
+        {
+            g.setColour (ak::muteFill.withAlpha (0.55f));
+            g.fillRoundedRectangle (getLocalBounds().toFloat().reduced (1.0f, 1.0f), 8.0f);
+        }
     }
 
     void resized() override
     {
         auto r = getLocalBounds();
-        lock.setBounds  (r.removeFromRight (30).reduced (3));
-        reset.setBounds (r.removeFromRight (30).reduced (3));
+
+        if (kind == Kind::button)
+        {
+            action.setBounds (r.withSizeKeepingCentre (juce::jmin (150, r.getWidth()),
+                                                       juce::jmin (28, r.getHeight())));
+            return;
+        }
+
+        if (kind == Kind::knob)
+        {
+            // knob centred above a read-out line: [label] .. [value][reset][lock]
+            auto readout = r.removeFromBottom (26);
+            lock .setBounds (readout.removeFromRight (20).withSizeKeepingCentre (20, 22));
+            reset.setBounds (readout.removeFromRight (20).withSizeKeepingCentre (20, 22));
+            readout.removeFromRight (2);
+            value.setBounds (readout.removeFromRight (ak::kValueW).reduced (0, 2));
+            readout.removeFromRight (6);
+            name.setBounds (readout);
+
+            const int side = juce::jmin (juce::jmin (r.getHeight(), r.getWidth()), ak::kKnobH);
+            slider.setBounds (juce::Rectangle<int> (side, side)
+                                  .withCentre ({ r.getCentreX(), r.getCentreY() }));
+            return;
+        }
+
+        lock .setBounds (r.removeFromRight (20).withSizeKeepingCentre (20, 22));
+        reset.setBounds (r.removeFromRight (20).withSizeKeepingCentre (20, 22));
+        r.removeFromRight (2);
+
         if (kind == Kind::toggle)
-            toggle.setBounds (r.withTrimmedLeft (4));
+        {
+            toggle.setBounds (r.withTrimmedLeft (2));
+            return;
+        }
+
+        // slider / combo rows: [label] [control] [value]
+        const bool tall = r.getHeight() >= 50;      // stacked (label над control)
+        auto ctrl = r;
+        if (tall)
+        {
+            name.setBounds (r.removeFromTop (r.getHeight() / 2 - 2));
+            ctrl = r;
+        }
         else
         {
-            name.setBounds (r.removeFromLeft (168));
-            slider.setBounds (r);
+            const int lw = juce::jlimit (60, ak::kLabelW, r.getWidth() / 3);
+            name.setBounds (r.removeFromLeft (lw));
+            ctrl = r;
         }
+        if (kind == Kind::combo)
+        {
+            combo.setBounds (ctrl.reduced (0, juce::jmax (0, (ctrl.getHeight() - 28) / 2)));
+            return;
+        }
+        value.setBounds (ctrl.removeFromRight (ak::kValueW).reduced (0, 4));
+        ctrl.removeFromRight (4);
+        slider.setBounds (ctrl);
     }
+
+    juce::ToggleButton& getToggle() { return toggle; }
+    juce::ComboBox&     getCombo()  { return combo; }
+    juce::TextButton&   getButton() { return action; }
+    std::function<void()> onLockChanged;
 
 private:
-    void timerCallback() override
+    void syncValueText()
     {
-        if (isShowing() && proc.isParamLocked (id) != shownLocked)
-            refreshLock();
+        if (rp == nullptr) return;
+        value.setText (slider.getTextFromValue (slider.getValue()), juce::dontSendNotification);
     }
 
-    void refreshLock()
-    {
-        const bool locked = proc.isParamLocked (id);
-        shownLocked = locked;
-        lock.setButtonText (juce::String::fromUTF8 (locked ? "\xF0\x9F\x94\x92"      // 🔒
-                                                           : "\xF0\x9F\x94\x93"));   // 🔓
-        lock.setColour (juce::TextButton::buttonColourId,
-                        locked ? juce::Colour (0xffffe9ef) : juce::Colours::white);
-        lock.setTooltip (locked
-            ? vmTip ("Locked: this value cannot be changed - not by knobs, the reset arrow, "
-                     "presets, Reset All or Matching. Click to unlock.",
-                     "ロック中のため変更できません(手動操作・↺・プリセット・Reset All・"
-                     "Matchingのすべてから保護)。クリックで解除します。")
-            : vmTip ("Lock this parameter: protects the value from manual edits, the reset "
-                     "arrow, preset loading, Reset All and Matching.",
-                     "この項目をロックします。手動操作・↺・プリセット読込・Reset All・"
-                     "Matchingから値を保護します。"));
-        toggle.setEnabled (! locked);
-        slider.setEnabled (! locked);
-        name  .setEnabled (! locked);
-        reset .setEnabled (! locked);
-    }
-
-    VoxMorphProcessor& proc;
+    VoxMorphProcessor* proc = nullptr;
     juce::String id;
     Kind kind;
+    ak::Tone tone { ak::Tone::blue };
     juce::RangedAudioParameter* rp = nullptr;
-    juce::Label        name;
+    juce::Label        name, value;
     juce::Slider       slider;
     juce::ToggleButton toggle;
-    juce::TextButton   reset, lock;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> sAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bAtt;
-    bool shownLocked = false;
+    juce::ComboBox     combo;
+    juce::TextButton   action;
+    ak::IconButton     reset { "reset", "ui_mark_S_Reset_png" };
+    ak::IconButton     lock  { "lock",  "ui_mark_S_Unlock_png" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   sAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   bAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> cAtt;
 };
 
 // ---- OUTPUT section level meter (v0.30.0) ---------------------------------
@@ -1233,49 +1372,49 @@ private:
         repaint();
     }
 
+    // v0.31.0: the ANOKOE volume strip art. The -60..+6 dB reading and the
+    // ballistics are unchanged; only the drawing moved to the new skin.
     void paint (juce::Graphics& g) override
     {
         auto row = getLocalBounds();
-        auto lbl = row.removeFromLeft (168);
-        g.setColour (juce::Colour (0xff2e2e32));
-        g.setFont (juce::Font (juce::FontOptions (13.0f)));
-        g.drawText ("Output Level", lbl, juce::Justification::centredLeft);
-
-        // value read-out on the right, in the same slot the sliders use
-        auto valBox = row.removeFromRight (74).reduced (0, 4);
+        auto valBox = row.removeFromRight (56).reduced (0, 4);
         row.removeFromRight (4);
 
-        auto bar = row.toFloat().reduced (0.0f, 7.0f);
-        g.setColour (juce::Colour (0xffe9e9e9));
-        g.fillRoundedRectangle (bar, 4.0f);
-
-        // scale ticks at -40 / -20 / -12 / -6 / 0 dB
-        g.setColour (juce::Colour (0xffd6d6d6));
-        for (float db : { -40.0f, -20.0f, -12.0f, -6.0f, 0.0f })
+        auto bar = row.toFloat().reduced (0.0f, 3.0f);
+        const auto base = ak::image ("ui_volume_basew_png");
+        const auto fill = ak::image ("ui_volume_fill_png");
+        if (base.isValid())
+            g.drawImage (base, bar, juce::RectanglePlacement::stretchToFit, false);
+        else
         {
-            const float x = bar.getX() + bar.getWidth() * juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 66.0f);
-            g.fillRect (x, bar.getY(), 1.0f, bar.getHeight());
+            g.setColour (juce::Colour (0xffe9edfb));
+            g.fillRoundedRectangle (bar, 5.0f);
         }
 
         const float peakDb = juce::Decibels::gainToDecibels (pk, -60.0f);
-        const juce::Colour fill = peakDb >= -0.1f ? juce::Colour (0xfff08ba5)     // clipping
-                                : peakDb >= -6.0f ? juce::Colour (0xffe3a63c)     // hot
-                                                  : juce::Colour (0xff54c0aa);    // fine
         const float w = bar.getWidth() * pos (rms);
         if (w > 1.0f)
         {
-            g.setColour (fill);
-            g.fillRoundedRectangle (bar.withWidth (w), 4.0f);
+            juce::Graphics::ScopedSaveState ss (g);
+            g.reduceClipRegion (bar.withWidth (w).getSmallestIntegerContainer());
+            if (fill.isValid())
+                g.drawImage (fill, bar, juce::RectanglePlacement::stretchToFit, false);
+            else
+            {
+                g.setColour (ak::seriesOut);
+                g.fillRoundedRectangle (bar.withWidth (w), 5.0f);
+            }
         }
-        if (pk > 0.0f)                                  // peak marker
+        if (pk > 0.0f)
         {
-            g.setColour (fill.darker (0.25f));
-            g.fillRect (bar.getX() + juce::jmax (1.5f, bar.getWidth() * pos (pk) - 1.5f),
+            g.setColour (peakDb >= -0.1f ? juce::Colour (0xffe23b52)
+                                         : ak::heading.withAlpha (0.7f));
+            g.fillRect (bar.getX() + juce::jmax (1.0f, bar.getWidth() * pos (pk) - 1.0f),
                         bar.getY(), 2.0f, bar.getHeight());
         }
 
-        g.setColour (juce::Colour (0xff2e2e32));
-        g.setFont (juce::Font (juce::FontOptions (11.5f)));
+        g.setColour (ak::ink);
+        g.setFont (ak::font (11.0f));
         g.drawText (pk > 0.0f ? juce::String (peakDb, 1) + " dB" : juce::String ("-inf"),
                     valBox, juce::Justification::centredRight);
     }
@@ -1379,10 +1518,7 @@ public:
     void paint (juce::Graphics& g) override
     {
         auto b = getLocalBounds().toFloat().reduced (2.0f);
-        g.setColour (juce::Colours::white);
-        g.fillRoundedRectangle (b, 8.0f);
-        g.setColour (juce::Colour (0xffe9d8dd));
-        g.drawRoundedRectangle (b, 8.0f, 1.0f);
+        ak::paintCard (g, b);
         auto r = b.reduced (10.0f, 10.0f);
 
         g.setFont (juce::Font (juce::FontOptions (10.0f)));
@@ -1646,7 +1782,7 @@ public:
 
         const juce::Colour bg = selected ? juce::Colour (0xff54bda1)  // mint
                                          : juce::Colour (0xfffcfaf9); // near-white
-        const juce::Colour edge = selected ? juce::Colour (0xff45bda5)
+        const juce::Colour edge = selected ? ak::heading
                                            : juce::Colour (0xffe4dadd);
         g.setColour (bg);
         g.fillRoundedRectangle (b, 10.0f);
@@ -1743,7 +1879,7 @@ public:
         {
             l.setText (t, juce::dontSendNotification);
             l.setFont (juce::Font (juce::FontOptions (13.5f, juce::Font::bold)));
-            l.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+            l.setColour (juce::Label::textColourId, ak::heading);
             addAndMakeVisible (l);
         };
         // ASCII only -- avoids any codepage confusion on Windows toolchains
@@ -1844,7 +1980,7 @@ public:
             addAndMakeVisible (*l);
         }
         matchStatus.setFont (juce::Font (juce::FontOptions (11.5f, juce::Font::bold)));
-        matchStatus.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+        matchStatus.setColour (juce::Label::textColourId, ak::heading);
         matchStatus.setJustificationType (juce::Justification::centred);
 
         graph.you       = &prof1;
@@ -1930,6 +2066,12 @@ public:
         showSavePreset (false); // hide the name editor
         updateMatchStatus();
         startTimerHz (10);
+    }
+
+    // v0.31.2: sits on the ANOKOE page gradient, so it draws its own card
+    void paint (juce::Graphics& g) override
+    {
+        ak::paintCard (g, getLocalBounds().toFloat());
     }
 
     void resized() override
@@ -2673,7 +2815,7 @@ public:
     {
         heading.setText ("PRESETS", juce::dontSendNotification);
         heading.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-        heading.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+        heading.setColour (juce::Label::textColourId, ak::heading);
         addAndMakeVisible (heading);
 
         help.setJustificationType (juce::Justification::topLeft);
@@ -2708,7 +2850,7 @@ public:
         addAndMakeVisible (pGraph);
         pvLbl.setJustificationType (juce::Justification::topLeft);
         pvLbl.setFont (juce::Font (juce::FontOptions (11.0f)));
-        pvLbl.setColour (juce::Label::textColourId, juce::Colour (0xff9aa5a2));
+        pvLbl.setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
         pvLbl.setText (juce::String::fromUTF8 (
             "プレビュー: 標準的な声(ミント)がこのプリセットでどう変わるか(ピンク)のイメージ。"),
             juce::dontSendNotification);
@@ -2716,15 +2858,15 @@ public:
 
         hProfiles.setText ("PROFILES", juce::dontSendNotification);
         hProfiles.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-        hProfiles.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+        hProfiles.setColour (juce::Label::textColourId, ak::heading);
         addAndMakeVisible (hProfiles);
 
         pNameEdit.setTextToShowWhenEmpty (juce::String::fromUTF8 ("プロファイル名"),
-                                          juce::Colour (0xff9aa5a2));
+                                          juce::Colour (0xff8f9ab5));
         pNameEdit.setFont (juce::Font (juce::FontOptions (13.0f)));
-        pNameEdit.setColour (juce::TextEditor::textColourId, juce::Colour (0xff2e2e32));
+        pNameEdit.setColour (juce::TextEditor::textColourId, ak::ink);
         pNameEdit.setColour (juce::TextEditor::backgroundColourId, juce::Colours::white);
-        pNameEdit.setColour (juce::TextEditor::outlineColourId, juce::Colour (0xffdedede));
+        pNameEdit.setColour (juce::TextEditor::outlineColourId, ak::line);
         addAndMakeVisible (pNameEdit);
 
         saveMyBtn.setTooltip (juce::String::fromUTF8 ("ANALYZEタブで測定したMyVoiceプロファイルを"
@@ -2737,11 +2879,11 @@ public:
         addAndMakeVisible (saveTgtBtn);
 
         nameEdit.setTextToShowWhenEmpty (juce::String::fromUTF8 ("新しいプリセット名"),
-                                         juce::Colour (0xff9aa5a2));
+                                         juce::Colour (0xff8f9ab5));
         nameEdit.setFont (juce::Font (juce::FontOptions (13.0f)));
-        nameEdit.setColour (juce::TextEditor::textColourId, juce::Colour (0xff2e2e32));
+        nameEdit.setColour (juce::TextEditor::textColourId, ak::ink);
         nameEdit.setColour (juce::TextEditor::backgroundColourId, juce::Colours::white);
-        nameEdit.setColour (juce::TextEditor::outlineColourId, juce::Colour (0xffdedede));
+        nameEdit.setColour (juce::TextEditor::outlineColourId, ak::line);
         addAndMakeVisible (nameEdit);
 
         saveBtn.setTooltip (juce::String::fromUTF8 ("現在の設定を上の名前で保存します(同名は上書き)。"
@@ -2759,7 +2901,7 @@ public:
 
         pathLbl.setJustificationType (juce::Justification::topLeft);
         pathLbl.setFont (juce::Font (juce::FontOptions (10.5f)));
-        pathLbl.setColour (juce::Label::textColourId, juce::Colour (0xff9aa5a2));
+        pathLbl.setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
         pathLbl.setText (juce::String::fromUTF8 ("保存先: ") + presetDir().getFullPathName(),
                          juce::dontSendNotification);
         addAndMakeVisible (pathLbl);
@@ -2777,6 +2919,12 @@ public:
     {
         if (isVisible())
             refreshList();
+    }
+
+    // v0.31.2: sits on the ANOKOE page gradient, so it draws its own card
+    void paint (juce::Graphics& g) override
+    {
+        ak::paintCard (g, getLocalBounds().toFloat());
     }
 
     void resized() override
@@ -3263,10 +3411,7 @@ private:
     void paint (juce::Graphics& g) override
     {
         auto b = getLocalBounds().toFloat().reduced (2.0f);
-        g.setColour (juce::Colours::white);
-        g.fillRoundedRectangle (b, 8.0f);
-        g.setColour (juce::Colour (0xffe9d8dd));
-        g.drawRoundedRectangle (b, 8.0f, 1.0f);
+        ak::paintCard (g, b);
 
         const auto c = circleBounds();
         const auto ctr = c.getCentre();
@@ -3279,7 +3424,7 @@ private:
         g.drawLine (c.getX(), ctr.y, c.getRight(), ctr.y, 1.0f);
         g.drawLine (ctr.x, c.getY(), ctr.x, c.getBottom(), 1.0f);
 
-        g.setColour (juce::Colour (0xff9aa5a2));
+        g.setColour (juce::Colour (0xff8f9ab5));
         g.setFont (juce::Font (juce::FontOptions (10.5f)));
         g.drawText ("FRONT", (int) ctr.x - 24, (int) c.getY() - 13, 48, 12, juce::Justification::centred);
         g.drawText ("BACK",  (int) ctr.x - 24, (int) c.getBottom() + 1, 48, 12, juce::Justification::centred);
@@ -3342,7 +3487,7 @@ public:
     {
         heading.setText ("ASMR POSITION", juce::dontSendNotification);
         heading.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-        heading.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+        heading.setColour (juce::Label::textColourId, ak::heading);
         addAndMakeVisible (heading);
 
         help.setJustificationType (juce::Justification::topLeft);
@@ -3367,6 +3512,12 @@ public:
         };
         addAndMakeVisible (resetBtn);
         addAndMakeVisible (pad);
+    }
+
+    // v0.31.2: sits on the ANOKOE page gradient, so it draws its own card
+    void paint (juce::Graphics& g) override
+    {
+        ak::paintCard (g, getLocalBounds().toFloat());
     }
 
     void resized() override
@@ -3416,11 +3567,11 @@ class FxChainPanel : public juce::Component
 public:
     explicit FxChainPanel (VoxMorphProcessor& p) : proc (p)
     {
-        lnf.setColour (juce::Label::textColourId,        juce::Colour (0xff2e2e32));
-        lnf.setColour (juce::ToggleButton::textColourId, juce::Colour (0xff2e2e32));
-        lnf.setColour (juce::ToggleButton::tickColourId, juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::Label::textColourId,        ak::ink);
+        lnf.setColour (juce::ToggleButton::textColourId, ak::ink);
+        lnf.setColour (juce::ToggleButton::tickColourId, juce::Colour (0xff7999db));
         lnf.setColour (juce::TextButton::buttonColourId, juce::Colours::white);
-        lnf.setColour (juce::TextButton::textColourOffId, juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::TextButton::textColourOffId, juce::Colour (0xff7999db));
         setLookAndFeel (&lnf);
 
         auto initHead = [this] (juce::Label& l, const char* en, const char* jp)
@@ -3428,7 +3579,7 @@ public:
             l.setText (juce::String (en) + "   " + juce::String::fromUTF8 (jp),
                        juce::dontSendNotification);
             l.setFont (juce::Font (juce::FontOptions (13.5f, juce::Font::bold)));
-            l.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+            l.setColour (juce::Label::textColourId, ak::heading);
             addAndMakeVisible (l);
         };
         initHead (preHead,  "Pre FX",  "(変換前・マイク入力に掛かる)");
@@ -3438,7 +3589,7 @@ public:
         addAndMakeVisible (preAdd);
         addAndMakeVisible (postAdd);
         note.setFont (juce::Font (juce::FontOptions (11.0f)));
-        note.setColour (juce::Label::textColourId, juce::Colour (0xff9aa5a2));
+        note.setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
         note.setText (juce::String::fromUTF8 ("上から順に処理されます。FXの遅延は補正されません。"
                                               "アプリ再起動後は再読み込みが必要です。"),
                       juce::dontSendNotification);
@@ -3502,7 +3653,7 @@ public:
         note.setBounds (r.removeFromTop (26));
     }
 
-    void paint (juce::Graphics& g) override { g.fillAll (juce::Colour (0xfffcf9f9)); }
+    void paint (juce::Graphics& g) override { g.fillAll (juce::Colour (0xfffafbff)); }
 
 private:
     struct Row : public juce::Component
@@ -3562,7 +3713,7 @@ class FxChainWindow : public juce::DocumentWindow
 public:
     explicit FxChainWindow (VoxMorphProcessor& p)
         : juce::DocumentWindow (juce::String::fromUTF8 ("Plugins — Pre / Post FX"),
-                                juce::Colour (0xfffcf9f9), juce::DocumentWindow::closeButton)
+                                juce::Colour (0xfffafbff), juce::DocumentWindow::closeButton)
     {
         setUsingNativeTitleBar (true);
         setContentOwned (new FxChainPanel (p), true);
@@ -3586,25 +3737,25 @@ public:
     {
         // this window is outside the editor's LookAndFeel scope, so give it
         // the same pastel-mint light theme (see AEIOUCharacterPanel)
-        lnf.setColour (juce::Slider::trackColourId,             juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::Slider::trackColourId,             juce::Colour (0xff7999db));
         lnf.setColour (juce::Slider::backgroundColourId,        juce::Colour (0xffe9e9e9));
-        lnf.setColour (juce::Slider::thumbColourId,             juce::Colour (0xff54c0aa));
-        lnf.setColour (juce::Slider::textBoxTextColourId,       juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::Slider::thumbColourId,             juce::Colour (0xff7999db));
+        lnf.setColour (juce::Slider::textBoxTextColourId,       ak::ink);
         lnf.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::white);
-        lnf.setColour (juce::Slider::textBoxOutlineColourId,    juce::Colour (0xffdedede));
-        lnf.setColour (juce::Label::textColourId,               juce::Colour (0xff2e2e32));
-        lnf.setColour (juce::ToggleButton::textColourId,        juce::Colour (0xff2e2e32));
-        lnf.setColour (juce::ToggleButton::tickColourId,        juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::Slider::textBoxOutlineColourId,    ak::line);
+        lnf.setColour (juce::Label::textColourId,               ak::ink);
+        lnf.setColour (juce::ToggleButton::textColourId,        ak::ink);
+        lnf.setColour (juce::ToggleButton::tickColourId,        juce::Colour (0xff7999db));
         lnf.setColour (juce::TextButton::buttonColourId,        juce::Colours::white);
-        lnf.setColour (juce::TextButton::textColourOffId,       juce::Colour (0xff54c0aa));
-        lnf.setColour (juce::ComboBox::textColourId,            juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::TextButton::textColourOffId,       juce::Colour (0xff7999db));
+        lnf.setColour (juce::ComboBox::textColourId,            ak::ink);
         setLookAndFeel (&lnf);
 
         auto initHead = [this] (juce::Label& l, const char* text)
         {
             l.setText (juce::String::fromUTF8 (text), juce::dontSendNotification);
             l.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-            l.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+            l.setColour (juce::Label::textColourId, ak::heading);
             addAndMakeVisible (l);
         };
         initHead (hDevice,  "AUDIO DEVICE");
@@ -3658,7 +3809,7 @@ public:
         addAndMakeVisible (bufBackBtn);
 
         bufNote.setFont (juce::Font (juce::FontOptions (11.5f)));
-        bufNote.setColour (juce::Label::textColourId, juce::Colour (0xff9aa5a2));
+        bufNote.setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
         bufNote.setJustificationType (juce::Justification::topLeft);
         addAndMakeVisible (bufNote);
 
@@ -3702,7 +3853,7 @@ public:
             "(MUTEを手で解除すると配信に戻り、同時にMONITORもオフになります)。"),
             juce::dontSendNotification);
         monNote.setFont (juce::Font (juce::FontOptions (11.5f)));
-        monNote.setColour (juce::Label::textColourId, juce::Colour (0xff9aa5a2));
+        monNote.setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
         monNote.setJustificationType (juce::Justification::topLeft);
         addAndMakeVisible (monNote);
 
@@ -3770,7 +3921,7 @@ public:
         if (sel != nullptr) sel->setBounds (r);
     }
 
-    void paint (juce::Graphics& g) override { g.fillAll (juce::Colour (0xfffcf9f9)); }
+    void paint (juce::Graphics& g) override { g.fillAll (juce::Colour (0xfffafbff)); }
 
 private:
     // Try 64 -> 128 -> 256 and keep the first size that the device accepts.
@@ -3865,7 +4016,7 @@ class AudioSettingsWindow : public juce::DocumentWindow
 public:
     explicit AudioSettingsWindow (VoxMorphProcessor& p)
         : juce::DocumentWindow (juce::String::fromUTF8 ("Audio Settings"),
-                                juce::Colour (0xfffcf9f9), juce::DocumentWindow::closeButton)
+                                juce::Colour (0xfffafbff), juce::DocumentWindow::closeButton)
     {
         setUsingNativeTitleBar (true);
         setContentOwned (new AudioSettingsPanel (p), true);
@@ -3886,22 +4037,22 @@ class BetaPanel : public juce::Component
 public:
     explicit BetaPanel (VoxMorphProcessor& p) : proc (p)
     {
-        lnf.setColour (juce::Slider::trackColourId,             juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::Slider::trackColourId,             juce::Colour (0xff7999db));
         lnf.setColour (juce::Slider::backgroundColourId,        juce::Colour (0xffe9e9e9));
-        lnf.setColour (juce::Slider::thumbColourId,             juce::Colour (0xff54c0aa));
-        lnf.setColour (juce::Slider::textBoxTextColourId,       juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::Slider::thumbColourId,             juce::Colour (0xff7999db));
+        lnf.setColour (juce::Slider::textBoxTextColourId,       ak::ink);
         lnf.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::white);
-        lnf.setColour (juce::Slider::textBoxOutlineColourId,    juce::Colour (0xffdedede));
-        lnf.setColour (juce::Label::textColourId,               juce::Colour (0xff2e2e32));
-        lnf.setColour (juce::ToggleButton::textColourId,        juce::Colour (0xff2e2e32));
-        lnf.setColour (juce::ToggleButton::tickColourId,        juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::Slider::textBoxOutlineColourId,    ak::line);
+        lnf.setColour (juce::Label::textColourId,               ak::ink);
+        lnf.setColour (juce::ToggleButton::textColourId,        ak::ink);
+        lnf.setColour (juce::ToggleButton::tickColourId,        juce::Colour (0xff7999db));
         lnf.setColour (juce::TextButton::buttonColourId,        juce::Colours::white);
-        lnf.setColour (juce::TextButton::textColourOffId,       juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::TextButton::textColourOffId,       juce::Colour (0xff7999db));
         setLookAndFeel (&lnf);
 
         heading.setText ("BETA", juce::dontSendNotification);
         heading.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-        heading.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+        heading.setColour (juce::Label::textColourId, ak::heading);
         addAndMakeVisible (heading);
 
         note.setText (juce::String::fromUTF8 (
@@ -3912,7 +4063,7 @@ public:
             "従来どおりの動作なので、合わなければそのままにしてください。"),
             juce::dontSendNotification);
         note.setFont (juce::Font (juce::FontOptions (11.5f)));
-        note.setColour (juce::Label::textColourId, juce::Colour (0xff9aa5a2));
+        note.setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
         note.setJustificationType (juce::Justification::topLeft);
         addAndMakeVisible (note);
 
@@ -3995,7 +4146,7 @@ public:
         closeBtn.setBounds (r.removeFromBottom (30).removeFromRight (100).reduced (0, 2));
     }
 
-    void paint (juce::Graphics& g) override { g.fillAll (juce::Colour (0xfffcf9f9)); }
+    void paint (juce::Graphics& g) override { g.fillAll (juce::Colour (0xfffafbff)); }
 
 private:
     VoxMorphProcessor& proc;
@@ -4011,7 +4162,7 @@ class BetaWindow : public juce::DocumentWindow
 public:
     explicit BetaWindow (VoxMorphProcessor& p)
         : juce::DocumentWindow (juce::String::fromUTF8 ("BETA \xE2\x80\x94 Experimental features"),
-                                juce::Colour (0xfffcf9f9), juce::DocumentWindow::closeButton)
+                                juce::Colour (0xfffafbff), juce::DocumentWindow::closeButton)
     {
         setUsingNativeTitleBar (true);
         setContentOwned (new BetaPanel (p), true);
@@ -4021,10 +4172,14 @@ public:
     void closeButtonPressed() override { setVisible (false); }
 };
 
-// Standalone options bar (shown above the tabs, STANDALONE ONLY): controls
-// that only make sense for the app — external FX chains, the audio device
-// settings (the old title-bar Options button moved here) and, since v0.30.0,
-// the MUTE / MONITOR pair.
+// ---------------------------------------------------------------------------
+// ANOKOE header bar (v0.31.0). Replaces the old standalone options strip:
+// branding on the left, and on the right the four controls from the design —
+// Monitor, Mute, Plugin and the gear (audio settings). Undo / Redo sit next to
+// them because the tab strip that used to carry them is gone.
+//
+// The four action controls are standalone-only, exactly as before: in a DAW
+// the host owns the audio device and the plugin chain.
 //
 // MUTE / MONITOR semantics (see also PluginProcessor.h):
 //   * MONITOR on  -> the output device is switched to the monitor device
@@ -4036,105 +4191,159 @@ public:
 //                    ends as well and the normal output device comes back.
 //   * While monitoring, MUTE does not silence anything (you are listening to
 //     yourself); it only marks where you land when monitoring stops.
-class FxBar : public juce::Component, private juce::Timer
+class HeaderBar : public juce::Component, private juce::Timer
 {
 public:
-    explicit FxBar (VoxMorphProcessor& p) : proc (p)
+    explicit HeaderBar (VoxMorphProcessor& p) : proc (p)
     {
-        plugBtn.setTooltip (juce::String::fromUTF8 (
-            "外部VST3プラグイン(Pre/Post FX)の管理ウィンドウを開きます。"));
-        plugBtn.onClick = [this]
-        {
-            if (fxWin == nullptr)
-                fxWin = std::make_unique<FxChainWindow> (proc);
-            else
-            {
-                fxWin->setVisible (true);
-                fxWin->toFront (true);
-            }
-        };
-        audioBtn.setTooltip (juce::String::fromUTF8 (
-            "オーディオ入出力デバイス・サンプルレート・バッファ、モニター出力先、"
-            "Auto-Mute on Feedback の設定を開きます。"));
-        audioBtn.onClick = [this]
-        {
-            if (audioWin == nullptr)
-                audioWin = std::make_unique<AudioSettingsWindow> (proc);
-            else
-            {
-                audioWin->setVisible (true);
-                audioWin->toFront (true);
-            }
-        };
+        standalone = proc.wrapperType == juce::AudioProcessor::wrapperType_Standalone;
 
-        muteBtn.setClickingTogglesState (true);
-        muteBtn.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xfff08ba5));
-        muteBtn.setColour (juce::TextButton::textColourOnId,   juce::Colours::white);
-        muteBtn.setTooltip (vmTip (
-            "Silences the output so nothing reaches your stream / virtual cable. The "
-            "conversion keeps running. Turning MUTE off while MONITOR is on also ends "
-            "monitoring (you are going live again).",
-            "出力を消音し、配信や仮想オーディオデバイスへ音が届かないようにします"
-            "(変換自体は動き続けます)。MONITORがオンのときにMUTEを解除すると、"
-            "配信に戻る操作とみなしてMONITORも自動でオフになります。"));
-        muteBtn.onClick = [this] { setMute (muteBtn.getToggleState(), true); };
+        subtitle.setText ("VoiceChanger & PluginHost", juce::dontSendNotification);
+        subtitle.setFont (ak::font (14.0f));
+        subtitle.setColour (juce::Label::textColourId, ak::heading);
+        addAndMakeVisible (subtitle);
 
-        monBtn.setClickingTogglesState (true);
-        monBtn.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xff54c0aa));
-        monBtn.setColour (juce::TextButton::textColourOnId,   juce::Colours::white);
-        monBtn.setTooltip (vmTip (
-            "Temporarily switches the app's OUTPUT to the monitor device set in Audio "
-            "Settings (typically your headphones), so you can check your voice without "
-            "sending it out. MUTE is switched on automatically and stays on when you turn "
-            "MONITOR off, so you never go live by accident.",
-            "出力先を Audio Settings で設定したモニター用デバイス(通常はヘッドホン)に"
-            "一時的に切り替え、配信に流さずに自分の声を確認できます。MUTEも自動でオンになり、"
-            "MONITORをオフに戻してもMUTEはオンのままです(不意に配信へ復帰しないための"
-            "安全動作)。"));
-        monBtn.onClick = [this] { setMonitor (monBtn.getToggleState()); };
-
-        msg.setFont (juce::Font (juce::FontOptions (11.5f)));
+        msg.setFont (ak::font (11.0f));
         msg.setColour (juce::Label::textColourId, juce::Colour (0xff8a7f83));
-        msg.setJustificationType (juce::Justification::centredLeft);
-
-        addAndMakeVisible (plugBtn);
-        addAndMakeVisible (audioBtn);
-        addAndMakeVisible (muteBtn);
-        addAndMakeVisible (monBtn);
+        msg.setJustificationType (juce::Justification::centredRight);
         addAndMakeVisible (msg);
 
-        syncButtons();
+        undoBtn.setTooltip (vmTip (
+            "Undo the last sound-changing operation: knob edits, a preset load, "
+            "'Reset All' or a Matching apply (each counts as one step). "
+            "Shortcut: Cmd+Z (Mac) / Ctrl+Z (Windows).",
+            "直前の「音が変わる操作」を取り消します。つまみ操作・プリセット読込・"
+            "Reset All・MatchingのMATCHが対象で、一括変更は1回のUndoで戻ります。"
+            "ショートカット: Cmd+Z (Mac) / Ctrl+Z (Windows)。"));
+        redoBtn.setTooltip (vmTip (
+            "Redo the operation you just undid. Shortcut: Shift+Cmd+Z (Mac) / "
+            "Shift+Ctrl+Z or Ctrl+Y (Windows).",
+            "取り消した操作をやり直します。ショートカット: Shift+Cmd+Z (Mac) / "
+            "Shift+Ctrl+ZまたはCtrl+Y (Windows)。"));
+        undoBtn.onClick = [this] { proc.history.undo(); };
+        redoBtn.onClick = [this] { proc.history.redo(); };
+        undoBtn.setEnabled (false);
+        redoBtn.setEnabled (false);
+        addAndMakeVisible (undoBtn);
+        addAndMakeVisible (redoBtn);
+
+        if (standalone)
+        {
+            monBtn.setTooltip (vmTip (
+                "Temporarily switches the app's OUTPUT to the monitor device set in Audio "
+                "Settings (typically your headphones), so you can check your voice without "
+                "sending it out. MUTE is switched on automatically and stays on when you turn "
+                "MONITOR off, so you never go live by accident.",
+                "出力先を Audio Settings で設定したモニター用デバイス(通常はヘッドホン)に"
+                "一時的に切り替え、配信に流さずに自分の声を確認できます。MUTEも自動でオンになり、"
+                "MONITORをオフに戻してもMUTEはオンのままです(不意に配信へ復帰しないための"
+                "安全動作)。"));
+            monBtn.onClick = [this] { setMonitor (monBtn.getToggleState()); };
+            addAndMakeVisible (monBtn);
+
+            muteBtn.setTooltip (vmTip (
+                "Silences the output so nothing reaches your stream / virtual cable. The "
+                "conversion keeps running. Turning MUTE off while MONITOR is on also ends "
+                "monitoring (you are going live again).",
+                "出力を消音し、配信や仮想オーディオデバイスへ音が届かないようにします"
+                "(変換自体は動き続けます)。MONITORがオンのときにMUTEを解除すると、"
+                "配信に戻る操作とみなしてMONITORも自動でオフになります。"));
+            muteBtn.onClick = [this] { setMute (muteBtn.getToggleState(), true); };
+            addAndMakeVisible (muteBtn);
+
+            plugBtn.setTooltip (juce::String::fromUTF8 (
+                "外部VST3プラグイン(Pre/Post FX)の管理ウィンドウを開きます。"));
+            plugBtn.setColour (juce::TextButton::buttonColourId, ak::pluginFill);
+            plugBtn.onClick = [this]
+            {
+                if (fxWin == nullptr) fxWin = std::make_unique<FxChainWindow> (proc);
+                else { fxWin->setVisible (true); fxWin->toFront (true); }
+            };
+            addAndMakeVisible (plugBtn);
+
+            gearBtn.setFramed (true);
+            gearBtn.setTooltip (juce::String::fromUTF8 (
+                "オーディオ入出力デバイス・サンプルレート・バッファ、モニター出力先、"
+                "Auto-Mute on Feedback の設定を開きます。"));
+            gearBtn.onClick = [this]
+            {
+                if (audioWin == nullptr) audioWin = std::make_unique<AudioSettingsWindow> (proc);
+                else { audioWin->setVisible (true); audioWin->toFront (true); }
+            };
+            addAndMakeVisible (gearBtn);
+
+            syncButtons();
+        }
         startTimerHz (4);
     }
 
     void resized() override
     {
-        auto r = getLocalBounds().reduced (8, 3);
-        plugBtn.setBounds (r.removeFromLeft (100));
-        r.removeFromLeft (6);
-        audioBtn.setBounds (r.removeFromLeft (126));
-        r.removeFromLeft (12);
-        muteBtn.setBounds (r.removeFromLeft (64));
-        r.removeFromLeft (6);
-        monBtn.setBounds (r.removeFromLeft (86));
-        r.removeFromLeft (10);
-        msg.setBounds (r);
+        auto r = getLocalBounds().reduced (18, 10);
+        auto right = r.removeFromRight (juce::jmin (r.getWidth() - 200,
+                                                    standalone ? 520 : 190));
+
+        auto row = right.withSizeKeepingCentre (right.getWidth(), 36);
+        if (standalone)
+        {
+            gearBtn.setBounds (row.removeFromRight (36));
+            row.removeFromRight (9);
+            plugBtn.setBounds (row.removeFromRight (juce::jmin (125, row.getWidth() / 3)));
+            row.removeFromRight (9);
+            muteBtn.setBounds (row.removeFromRight (juce::jmin (96, row.getWidth() / 3)));
+            row.removeFromRight (5);
+            monBtn.setBounds (row.removeFromRight (juce::jmin (112, row.getWidth() / 2)));
+            row.removeFromRight (12);
+        }
+        redoBtn.setBounds (row.removeFromRight (juce::jmin (58, row.getWidth() / 2)).reduced (0, 3));
+        row.removeFromRight (5);
+        undoBtn.setBounds (row.removeFromRight (juce::jmin (58, row.getWidth())).reduced (0, 3));
+
+        // branding: app icon, wordmark, subtitle (drawn in paint(); the label
+        // only needs its slot)
+        const int iconW = 58, logoW = juce::jlimit (110, 190, r.getWidth() / 3);
+        auto brand = r;
+        brand.removeFromLeft (iconW + 15 + logoW + 15);
+        subtitle.setBounds (brand.removeFromLeft (juce::jmax (0, brand.getWidth() - 4)));
+        msg.setBounds (subtitle.getBounds());
+        subtitle.setVisible (msg.getText().isEmpty());
     }
 
     void paint (juce::Graphics& g) override
     {
-        g.fillAll (juce::Colour (0xfff3eef0));
-        g.setColour (juce::Colour (0xffe4dadd));
+        g.setColour (ak::headerFill);
+        g.fillRect (getLocalBounds());
+        g.setColour (juce::Colour (0xffe8ebf5));
         g.drawLine (0.0f, (float) getHeight() - 0.5f, (float) getWidth(),
                     (float) getHeight() - 0.5f, 1.0f);
+
+        auto r = getLocalBounds().reduced (18, 10);
+        const int iconW = 58;
+        auto iconArea = r.removeFromLeft (iconW).withSizeKeepingCentre (iconW, iconW);
+        if (auto ic = ak::image ("icon_png"); ic.isValid())
+        {
+            juce::Graphics::ScopedSaveState ss (g);
+            juce::Path clip;
+            clip.addRoundedRectangle (iconArea.toFloat(), 11.0f);
+            g.reduceClipRegion (clip);
+            g.drawImage (ic, iconArea.toFloat(), juce::RectanglePlacement::fillDestination, false);
+        }
+        r.removeFromLeft (15);
+
+        const int logoW = juce::jlimit (110, 190, r.getWidth() / 3);
+        auto logoArea = r.removeFromLeft (logoW);
+        if (auto lg = ak::image ("ui_logo_ANOKOE_rendered_png"); lg.isValid())
+        {
+            const float h = juce::jmin ((float) logoArea.getHeight(),
+                                        (float) logoW * (float) lg.getHeight() / (float) lg.getWidth());
+            ak::drawFitted (g, lg, logoArea.toFloat().withSizeKeepingCentre ((float) logoW, h));
+        }
     }
 
 private:
     void setMute (bool on, bool userAction)
     {
         proc.muted.store (on);
-        // Un-muting means "I want to be heard again", so a monitoring session
-        // (which routes the output away from the normal device) has to end.
         if (userAction && ! on && proc.monitoring.load())
             setMonitor (false);
         syncButtons();
@@ -4149,7 +4358,7 @@ private:
             if (proc.monitorDeviceName.isEmpty())
             {
                 flash (juce::String::fromUTF8 (
-                    "モニター出力先が未設定です \xE2\x86\x92 Audio Settings... で選択してください"));
+                    "モニター出力先が未設定です → 歯車ボタンの Audio Settings で選択してください"));
                 syncButtons();
                 return;
             }
@@ -4172,8 +4381,7 @@ private:
                 vmSetOutputDevice (proc.preMonitorDeviceName);
             proc.preMonitorDeviceName.clear();
             proc.monitoring.store (false);
-            // MUTE is deliberately left as it is (see the class comment).
-            flash (juce::String::fromUTF8 ("モニター終了 \xE2\x80\x94 MUTEは継続中です"));
+            flash (juce::String::fromUTF8 ("モニター終了 — MUTEは継続中です"));
         }
         syncButtons();
     }
@@ -4187,32 +4395,44 @@ private:
     void flash (const juce::String& s)
     {
         msg.setText (s, juce::dontSendNotification);
+        subtitle.setVisible (false);
         msgSec = 5.0f;
     }
 
     void timerCallback() override
     {
-        // If the output device was changed behind our back (e.g. in the Audio
-        // Settings window, or the device disappeared), monitoring is no longer
-        // what the button claims — drop it, keeping MUTE on as usual.
-        if (proc.monitoring.load() && vmCurrentOutputDevice() != proc.monitorDeviceName)
+        undoBtn.setEnabled (proc.history.canUndo());
+        redoBtn.setEnabled (proc.history.canRedo());
+
+        if (standalone)
         {
-            proc.monitoring.store (false);
-            proc.preMonitorDeviceName.clear();
-            flash (juce::String::fromUTF8 ("出力デバイスが変更されたためモニターを終了しました"));
+            // if the output device changed behind our back, monitoring is no
+            // longer what the button claims — drop it, keeping MUTE on
+            if (proc.monitoring.load() && vmCurrentOutputDevice() != proc.monitorDeviceName)
+            {
+                proc.monitoring.store (false);
+                proc.preMonitorDeviceName.clear();
+                flash (juce::String::fromUTF8 ("出力デバイスが変更されたためモニターを終了しました"));
+            }
+            syncButtons();
         }
-        syncButtons();
 
         if (msgSec > 0.0f && (msgSec -= 0.25f) <= 0.0f)
+        {
             msg.setText ({}, juce::dontSendNotification);
+            subtitle.setVisible (true);
+        }
     }
 
     VoxMorphProcessor& proc;
-    juce::TextButton plugBtn { "Plugins..." }, audioBtn { "Audio Settings..." },
-                     muteBtn { "MUTE" }, monBtn { "MONITOR" };
-    juce::Label msg;
+    bool standalone = false;
+    juce::Label subtitle, msg;
+    ak::StatusButton monBtn  { "Monitor", "ui_mark_M_Monitor_png", false };
+    ak::StatusButton muteBtn { "Mute",    "ui_mark_M_Mute_png",    true  };
+    juce::TextButton plugBtn { "Plugin" }, undoBtn { "Undo" }, redoBtn { "Redo" };
+    ak::IconButton   gearBtn { "options", "ui_mark_S_Option_png", 20 };
     float msgSec = 0.0f;
-    std::unique_ptr<FxChainWindow>      fxWin;
+    std::unique_ptr<FxChainWindow>       fxWin;
     std::unique_ptr<AudioSettingsWindow> audioWin;
 };
 
@@ -4243,19 +4463,19 @@ public:
         // the DocumentWindow is outside the editor's LookAndFeel scope, so
         // give the panel the same pastel-mint light theme (otherwise JUCE's
         // default dark scheme paints labels/values white on white)
-        lnf.setColour (juce::Slider::trackColourId,             juce::Colour (0xff54c0aa));
+        lnf.setColour (juce::Slider::trackColourId,             juce::Colour (0xff7999db));
         lnf.setColour (juce::Slider::backgroundColourId,        juce::Colour (0xffe9e9e9));
-        lnf.setColour (juce::Slider::thumbColourId,             juce::Colour (0xff54c0aa));
-        lnf.setColour (juce::Slider::textBoxTextColourId,       juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::Slider::thumbColourId,             juce::Colour (0xff7999db));
+        lnf.setColour (juce::Slider::textBoxTextColourId,       ak::ink);
         lnf.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::white);
-        lnf.setColour (juce::Slider::textBoxOutlineColourId,    juce::Colour (0xffdedede));
-        lnf.setColour (juce::Label::textColourId,               juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::Slider::textBoxOutlineColourId,    ak::line);
+        lnf.setColour (juce::Label::textColourId,               ak::ink);
         lnf.setColour (juce::TextButton::buttonColourId,        juce::Colours::white);
-        lnf.setColour (juce::TextButton::textColourOffId,       juce::Colour (0xff54c0aa));
-        lnf.setColour (juce::ComboBox::textColourId,            juce::Colour (0xff2e2e32));
+        lnf.setColour (juce::TextButton::textColourOffId,       juce::Colour (0xff7999db));
+        lnf.setColour (juce::ComboBox::textColourId,            ak::ink);
         setLookAndFeel (&lnf);
         charLbl.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-        charLbl.setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+        charLbl.setColour (juce::Label::textColourId, ak::heading);
         addAndMakeVisible (charLbl);
 
         copyBtn.setTooltip (juce::String::fromUTF8 (
@@ -4292,7 +4512,7 @@ public:
         {
             secLbl[s].setText (secTxt[s], juce::dontSendNotification);
             secLbl[s].setFont (juce::Font (juce::FontOptions (12.5f, juce::Font::bold)));
-            secLbl[s].setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));
+            secLbl[s].setColour (juce::Label::textColourId, ak::heading);
             addAndMakeVisible (secLbl[s]);
         }
         static const char* vowTxt[5] = { "A / \xe3\x81\x82", "I / \xe3\x81\x84",
@@ -4523,7 +4743,7 @@ class AEIOUCharacterWindow : public juce::DocumentWindow
 public:
     explicit AEIOUCharacterWindow (VoxMorphProcessor& p)
         : juce::DocumentWindow ("AEIOU Character Detail",
-                                juce::Colour (0xfffcf9f9), juce::DocumentWindow::closeButton)
+                                juce::Colour (0xfffafbff), juce::DocumentWindow::closeButton)
     {
         setUsingNativeTitleBar (true);
         setContentOwned (new AEIOUCharacterPanel (p), true);
@@ -4533,6 +4753,34 @@ public:
     void closeButtonPressed() override { setVisible (false); }
 };
 
+// ===========================================================================
+// ANOKOE editor (v0.31.0)
+//
+// Layout (from the ANOKOE_UI_Offline prototype):
+//
+//   +-------------------------------------------------------------+
+//   | header: icon  ANOKOE  subtitle      Undo Redo Mon Mute Plug |
+//   +---------+---------------------------------------------------+
+//   | sidebar |  Main / Matching / ASMR / Visualizer / Presets     |
+//   |  Main   |  page content (Main = the card grid below)         |
+//   |  ...    |                                                   |
+//   +---------+---------------------------------------------------+
+//
+// Main page card grid (3 columns + a bottom row spanning all of them):
+//   col 1  PITCH · INTONATION · ADVANCED
+//   col 2  FORMANT
+//   col 3  preset bar · AIR · VOICE QUALITY
+//   bottom HIGH RANGE / LOW LIMIT · latency donut · OUTPUT
+//
+// HOW TO EDIT THIS UI (for future maintainers):
+//  - To add a control, add ONE line inside the relevant buildXxxCard() —
+//    slider / toggle / knob / combo / button rows are all ParamRow. The card
+//    stacks whatever it is given and the grid sizes itself from
+//    Card::preferredHeight(), so nothing else needs touching.
+//  - Colours, art and geometry live in AnokoeTheme.h; the skinned drawing of
+//    knobs / sliders / checkboxes lives in AnokoeWidgets.h.
+//  - The three analysis donuts (radial spectrum, AEIOU mix, level rings) and
+//    the linear spectrum live on the VISUALIZER page.
 class VoxMorphEditor : public juce::AudioProcessorEditor,
                        private juce::Timer
 {
@@ -4541,351 +4789,70 @@ public:
         : juce::AudioProcessorEditor (&p), proc (p)
     {
         tooltipWindow.setLookAndFeel (&tipLnf);
-        setWantsKeyboardFocus (true);   // for the Cmd+S shortcut
+        setWantsKeyboardFocus (true);          // Cmd+S / Cmd+Z shortcuts
+        setLookAndFeel (&lnfBlue);
 
-        // pastel mint theme (all colours in one place — edit freely)
-        mainLnf.setColour (juce::Slider::trackColourId,             juce::Colour (0xff54c0aa)); // mint fill
-        mainLnf.setColour (juce::Slider::backgroundColourId,        juce::Colour (0xffe9e9e9)); // rest of track
-        mainLnf.setColour (juce::Slider::thumbColourId,             juce::Colour (0xff54c0aa)); // mint thumb
-        mainLnf.setColour (juce::Slider::textBoxTextColourId,       juce::Colour (0xff2e2e32)); // value digits
-        mainLnf.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::white);
-        mainLnf.setColour (juce::Slider::textBoxOutlineColourId,    juce::Colour (0xffdedede));
-        mainLnf.setColour (juce::Label::textColourId,               juce::Colour (0xff2e2e32)); // body text
-        mainLnf.setColour (juce::ToggleButton::textColourId,        juce::Colour (0xff2e2e32));
-        mainLnf.setColour (juce::ToggleButton::tickColourId,        juce::Colour (0xff54c0aa));
-        mainLnf.setColour (juce::ToggleButton::tickDisabledColourId,juce::Colour (0xffbfd9d2));
-        mainLnf.setColour (juce::TextButton::buttonColourId,        juce::Colours::white);
-        mainLnf.setColour (juce::TextButton::textColourOffId,       juce::Colour (0xff54c0aa)); // reset arrows
-        setLookAndFeel (&mainLnf);
+        addAndMakeVisible (header);
 
-        // FX bar: standalone-only external plugin slots above the tabs
-        if (proc.wrapperType == juce::AudioProcessor::wrapperType_Standalone)
-            addAndMakeVisible (fxBar);
+        // ---- sidebar ----------------------------------------------------
+        static const struct { const char* label; const char* icon; } kPages[] = {
+            { "Main",       "ui_mark_L_Main_png"     },
+            { "Matching",   "ui_mark_L_Matching_png" },
+            { "ASMR",       "ui_mark_L_ASMR_png"     },
+            { "Visualizer", "ui_mark_L_Analyzer_png" },
+            { "Presets",    "ui_mark_S_Save_png"     },
+        };
+        for (int i = 0; i < (int) std::size (kPages); ++i)
+        {
+            auto* b = navButtons.add (new ak::SidebarButton (kPages[i].label, kPages[i].icon));
+            b->onClick = [this, i] { showPage (i); };
+            addAndMakeVisible (b);
+        }
 
-        // MAIN / ANALYZE tabs. The MAIN page holds the scrolling parameter
-        // list (viewport -> content); ANALYZE holds the profile tools.
-        addAndMakeVisible (tabs);
-        tabs.setTabBarDepth (30);
-        tabs.setColour (juce::TabbedComponent::outlineColourId, juce::Colours::transparentBlack);
-        tabs.setColour (juce::TabbedButtonBar::tabTextColourId,   juce::Colour (0xff9aa5a2));
-        tabs.setColour (juce::TabbedButtonBar::frontTextColourId, juce::Colour (0xff45bda5));
-        tabs.addTab ("MAIN",    juce::Colour (0xfffcf9f9), &mainPage,     false);
-        tabs.addTab ("MATCHING", juce::Colour (0xfffcf9f9), &matchingPanel, false);
-        tabs.addTab ("PRESETS", juce::Colour (0xfffcf9f9), &presetPanel,  false);
-        tabs.addTab ("ASMR",    juce::Colour (0xfffcf9f9), &asmrPanel,    false);
-        mainPage.fn = [this] { layoutMainPage(); };
+        // ---- pages ------------------------------------------------------
+        mainScroll.setViewedComponent (&mainPage, false);
+        mainScroll.setScrollBarsShown (true, false);
+        mainScroll.setScrollBarThickness (10);
+        pages.push_back (&mainScroll);
+        pages.push_back (&matchingPanel);
+        pages.push_back (&asmrPanel);
+        pages.push_back (&vizPage);
+        pages.push_back (&presetPanel);
+        for (auto* pg : pages) addChildComponent (pg);
 
-        // all rows are children of `content`, which scrolls inside `viewport`
-        mainPage.addAndMakeVisible (viewport);
-        viewport.setViewedComponent (&content, false);
-        viewport.setScrollBarsShown (true, false);
-        viewport.setScrollBarThickness (10);
+        buildMainPage();
+        buildVisualizerPage();
 
-        // PRESET bar (v0.30.0): picking from the dropdown applies immediately;
-        // Save asks overwrite / save-as, Delete asks for confirmation.
-        addSection ("PRESET");
-        presetBar = std::make_unique<PresetBar> (proc,
-                        [this] (const juce::String& s) { flashFooter (s); });
-        content.addAndMakeVisible (*presetBar);
-        items.push_back ({ presetBar.get(), 32 });
-
-        addSection ("VISUALIZER");
-        specData.addView (&spectrum);          // one FFT pair feeds both views
-        specData.addView (&radial);
-        content.addAndMakeVisible (vizRow);    // linear graph + radial donut
-        items.push_back ({ &vizRow, 168 });
-        content.addAndMakeVisible (status);    // realtime status (latency)
-        items.push_back ({ &status, 26 });
-
-        addSection ("PITCH");
-        addSliderRow ("pitch", "Pitch (semitones)",
-            tip ("Shifts the pitch in semitones. The timbre (formants) stays unchanged. "
-                 "Male-to-female: +5 to +7. Female-to-male: around -5.",
-                 "声の高さを半音単位で変えます。声色(フォルマント)は変わりません。"
-                 "女声化は+5〜+7、男声化は-5前後が目安。"));
-        addToggleRow ("robot", "Robotize",
-            tip ("Locks the pitch to one fixed note for a monotone robot voice. "
-                 "Choose the note with 'Robot Pitch' below.",
-                 "ピッチを一定の高さに固定し、抑揚のないロボット声にします。"
-                 "高さは下のRobot Pitchで指定します。"));
-        addSliderRow ("robotHz", "Robot Pitch (Hz)",
-            tip ("The fixed pitch (Hz) used while Robotize is on.",
-                 "Robotizeがオンのとき固定されるピッチ(Hz)。"));
-
-        addSection ("HIGH RANGE");
-        addSliderRow ("hifreq", "High Range Start (Hz)",
-            tip ("When your INPUT pitch (before conversion) rises above this - laughing, squealing, "
-                 "exclamations - the Pitch/Formant shifts blend smoothly toward the High amounts "
-                 "below, reaching them fully one octave up. Stops laughs from being shifted into "
-                 "unnaturally high tones. 0 = off. Try 250-350 Hz.",
-                 "入力(変換前)のピッチがこの値を超えると(笑い声・叫び・感嘆など)、ピッチ/"
-                 "フォルマントの変化量が下のHigh設定へ滑らかに移行し、1オクターブ上で完全に"
-                 "切り替わります。笑い声が不自然な高音まで上がるのを防ぎます。0=オフ。"
-                 "250〜350Hzが目安。"));
-        addSliderRow ("hipitch", "High Pitch Amount (%)",
-            tip ("How much of the Pitch shift remains in the high range. 100% = same as normal, "
-                 "0% = no shift there (laughs keep their natural pitch). Try 30-60%.",
-                 "高音域で残すPitchシフトの割合。100%=通常と同じ、0%=シフトなし(笑い声は"
-                 "地声の高さのまま)。30〜60%が目安。"));
-        addSliderRow ("hiformant", "High Formant Amount (%)",
-            tip ("How much of the Formant shift remains in the high range. Usually leave at 100% "
-                 "so the voice keeps its character while only the pitch settles down.",
-                 "高音域で残すFormantシフトの割合。通常は100%のまま(声色は保ちつつピッチだけ"
-                 "落ち着かせる)が自然です。"));
-
-        addSection ("FORMANT");
-        addSliderRow ("formant", "Formant (semitones)",
-            tip ("Changes the vocal-tract size = the timbre, without changing pitch. "
-                 "+ sounds younger/feminine, - sounds deeper/masculine. +3 to +4 for male-to-female.",
-                 "声道の長さ=声の響き・声色を変えます。ピッチは変わりません。"
-                 "+で若く/女性的に、-で太く/男性的に。女声化は+3〜+4が目安。"));
-        addSliderRow ("consonant", "Consonant Shift (st)",
-            tip ("Extra shift applied only to unvoiced consonants (s, sh...), added on top of Formant. "
-                 "Female consonants are brighter: try +2 to +3. Too much sounds like a lisp.",
-                 "無声子音(サ行・シャ行など)だけを追加でシフトします(Formantに加算)。"
-                 "女声の子音は明るいので+2〜+3が目安。上げすぎると舌足らずに聞こえます。"));
-        addSliderRow ("f1shift", "F1 Shift (st)",
-            tip ("Moves only the first formant (jaw openness / throat size), on top of the global "
-                 "Formant. Male-to-female sounds most natural with F1 raised LESS than F2: "
-                 "try F1 +1 to +2 when F2 is +2 to +4.",
-                 "第1フォルマント(顎の開き・喉の広さ)だけを動かします(全体Formantに加算)。"
-                 "女声化はF1をF2より控えめに上げると自然です(F2が+2〜+4のときF1は+1〜+2)。"));
-        addSliderRow ("f1gain", "F1 Gain (dB)",
-            tip ("Boost or cut around the first formant. Cutting a few dB thins out a 'boomy' "
-                 "chest resonance.",
-                 "第1フォルマント付近の強さ。数dB下げると胸に響く「太さ」が抜けます。"));
-        addSliderRow ("f2shift", "F2 Shift (st)",
-            tip ("Moves only the second formant (tongue position). The strongest single cue for "
-                 "perceived gender/age of the vowels: +2 to +4 sounds younger and more feminine.",
-                 "第2フォルマント(舌の位置)だけを動かします。母音の性別・年齢感に最も効く帯域で、"
-                 "+2〜+4で若く女性的に聞こえます。"));
-        addSliderRow ("f2gain", "F2 Gain (dB)",
-            tip ("Boost or cut around the second formant. A few dB of boost adds clarity and "
-                 "'presence' to the vowels.",
-                 "第2フォルマント付近の強さ。数dB上げると母音の明瞭さ・華やかさが出ます。"));
-        addSliderRow ("f3shift", "F3 Shift (st)",
-            tip ("Moves only the third formant (front cavity / lip area). Small shifts (+1 to +2) "
-                 "refine the impression of a shorter vocal tract.",
-                 "第3フォルマント(声道前部・唇まわり)だけを動かします。+1〜+2の小さめの操作で"
-                 "「声道が短い」印象を仕上げます。"));
-        addSliderRow ("f3gain", "F3 Gain (dB)",
-            tip ("Boost or cut around the third formant. Boosting adds sheen and 'sparkle' - "
-                 "this region carries much of a voice's charm.",
-                 "第3フォルマント付近の強さ。上げると艶・張りが出ます。声の「華」が乗る帯域です。"));
-        addToggleRow ("vadapt", "AEIOU Character",
-            tip ("Shapes the voice character by applying different F1-F3 adjustments to the "
-                 "estimated A/E/I/O/U vowel regions. Your manual F1-F3 settings remain the "
-                 "base values; the per-vowel offsets are added on top. Off = previous behaviour.",
-                 "発音中の「あ・い・う・え・お」を推定し、母音ごとにF1〜F3の響きを調整して"
-                 "声のキャラクターを作ります。手動のF1〜F3設定は基本値としてそのまま維持され、"
-                 "その上に母音別の補正が乗ります。オフ=従来どおり。"));
-        addComboRow ("vcharacter", "Character",
-            tip ("Choose the voice character:\n"
-                 "Natural - natural feminine balance / Soft - soft and rounded / "
-                 "Active - bright and energetic / Loli - small and youthful / "
-                 "Anime - exaggerated vowel contrast / Lily - clear, sweet feminine / "
-                 "Elegant - calm and refined / Uni - neutral and androgynous / "
-                 "Custom - your own A-I-U-E-O map (DETAIL...).",
-                 "声のキャラクターを選びます:\n"
-                 "Natural=自然な女性声 / Soft=柔らかい声 / Active=元気な声 / "
-                 "Loli=幼な声 / Anime=アニメ声 / Lily=百合声 / Elegant=お姉さん声 / "
-                 "Uni=中性声 / Custom=詳細モード(DETAIL...の母音別設定を使用)。"));
-        addSliderRow ("vamount", "AEIOU Amount (%)",
-            tip ("Strength of the selected character's per-vowel offsets. 0 % = identical "
-                 "to the feature being off, 100 % = the character map as designed, up to "
-                 "200 % emphasizes it further (larger internal limits apply above 100 %).",
-                 "選択したキャラクター補正の強さ。0%=機能オフと完全に同じ音、"
-                 "100%=設計どおりのキャラクター、200%まで上げるとさらに強調されます"
-                 "(100%超は内部上限を広げて適用)。"));
-        addButtonRow ("Vowel Detail", "DETAIL...",
-            tip ("Opens a window to view and edit the per-vowel F1-F3 settings. Built-in "
-                 "Characters are shown read-only; \"Copy to Custom\" makes them editable.",
-                 "母音別のF1〜F3設定を確認・編集するウィンドウを開きます。内蔵Characterは"
-                 "読み取り専用で、「Copy to Custom」でCustomへコピーすると編集できます。"),
-            [this]
-            {
-                if (aeiouWin == nullptr)
-                    aeiouWin = std::make_unique<AEIOUCharacterWindow> (proc);
-                else
-                {
-                    aeiouWin->setVisible (true);
-                    aeiouWin->toFront (true);
-                }
-            });
-
-        addSection ("INTONATION");
-        addSliderRow ("range", "Intonation Amount (%)",
-            tip ("Exaggerates or flattens the pitch movement (intonation). 100% = unchanged. "
-                 "Unlike 'Pitch', which moves the whole voice up or down, this scales only the movement. "
-                 "110-140% recommended for male-to-female.",
-                 "声の抑揚(音程の上がり下がり)を強調/抑制します。100%=変化なし。"
-                 "Pitchが声全体を平行移動するのに対し、こちらは動きの幅だけを変えます。"
-                 "女声化では110〜140%が目安です。"));
-        addSliderRow ("center", "Intonation Pivot (Hz)",
-            tip ("The pitch that intonation scaling expands around. Set it near the average pitch "
-                 "of the converted voice (200-250 Hz for a female voice). No effect at 100% Amount.",
-                 "抑揚を拡大/縮小するときの中心になる音程。変換後の声の平均的な高さに"
-                 "合わせてください(女声なら200〜250Hz)。Amountが100%のときは無効。"));
-
-        addSection ("VOICE QUALITY");
-        addSliderRow ("tilt", "Softness / Tilt (dB)",
-            tip ("Spectral tilt of the voice. + is softer and warmer, - is brighter and more present. "
-                 "Start around +/-2 dB.",
-                 "音色の傾き。+で柔らかく暖かい声、-で明るく張りのある声。±2dB程度から。"));
-        addSliderRow ("jitter", "Natural Jitter",
-            tip ("Adds tiny natural pitch fluctuations to reduce the 'machine' feel. Try around 0.1.",
-                 "ごく小さな音程の揺らぎを加え、変換の機械っぽさを和らげます。0.1前後から。"));
-        addSliderRow ("air", "Natural Air",
-            tip ("Preserves the natural breath and aperiodic detail of the voice while suppressing "
-                 "old-pitch harmonic leakage. Up to 1.0 the preserved amount increases at natural "
-                 "loudness; from 1.0 to 1.5 the preserved air is also emphasized. 0 = off.",
-                 "声に含まれる自然な息や非周期成分を保ちながら、元のピッチ成分が重なって聞こえる"
-                 "ゴーストを抑えます。1.0までは自然な音量のまま保持量が増え、1.0〜1.5では"
-                 "息成分を強調します。0=オフ。"));
-        addSliderRow ("airshine", "Air Shine (dB)",
-            tip ("Adds high-frequency openness and air above the preserved natural breath. Only "
-                 "the highest air band (above ~6 kHz) comes back louder; the mids and the "
-                 "harmonic body are untouched. Try 2-4 dB.",
-                 "Natural Airの高域に抜け感と明るさを加えます。約6kHz以上の空気感だけが"
-                 "持ち上がり、中音域や声の芯には触れません。まずは2〜4dBがおすすめ。"));
-
-        addSection ("ADVANCED");
-        addToggleRow ("lowvoice", "Low Voice Mode",
-            tip ("Extends pitch tracking for very low voices and vocal fry. It may retain more of "
-                 "the original low-period texture depending on the voice.",
-                 "非常に低い声やボーカルフライでもピッチ追跡を継続します。発声によっては、"
-                 "元の低周期の質感が強く残る場合があります。"));
-
-        // Performance Mode (v0.31.0). Replaces the old Low Latency toggle in
-        // this list; that one is now "Legacy Low Latency" in the BETA window.
-        addToggleRow ("perfmode", "Performance Mode",
-            tip ("Helps VoxMorph run steadily at small audio buffers (64 / 128 / 256 samples) "
-                 "WITHOUT changing the sound. Pitch, Formant, Natural Air and the engine "
-                 "lookahead are all exactly the same with this on or off - what it lowers is "
-                 "the refresh rate of the displays, which frees up the machine for the audio. "
-                 "In the standalone app it also unlocks the buffer helper in Audio Settings. "
-                 "It is not a 'make the delay smaller' switch on its own: the delay drops "
-                 "because a smaller device buffer becomes practical.",
-                 "小さいオーディオバッファ(64/128/256サンプル)でも安定して動くように"
-                 "支援するモードです。音は一切変わりません - Pitch・Formant・Natural Air・"
-                 "エンジンの先読みはオン/オフで完全に同じで、下げるのは表示の更新頻度だけ"
-                 "です(その分の余力が音声処理に回ります)。スタンドアロン版では"
-                 "Audio Settings内のバッファ調整も使えるようになります。"
-                 "これ自体が遅延を減らすスイッチではなく、小さいバッファを実用にできる"
-                 "結果として遅延が縮む、という機能です。"));
-        addToggleRow ("stereo", "Stereo Input (Binaural)",
-            tip ("For binaural / ASMR stereo microphones: the left and right inputs run through "
-                 "two independent conversion engines in parallel, keeping the stereo image. "
-                 "Latency is unchanged, CPU roughly doubles. If the sides occasionally drift "
-                 "apart on tricky voices, switch it off. Off = classic mono (inputs summed).",
-                 "バイノーラル/ASMR用ステレオマイク向け。左右の入力を2つの独立した変換エンジンで"
-                 "並列処理し、立体感を保ったまま変換します。遅延は変わりません(CPUは約2倍)。"
-                 "声によってはまれに左右の解釈が割れて広がって聞こえる場合があり、その時はオフに。"
-                 "オフ=従来どおりモノラル(左右を合成)。"));
-        addSliderRow ("gate", "Noise Gate (dB)",
-            tip ("Mutes the input while it stays below this level - removes fan / room noise "
-                 "between phrases. -80 = off. Set it just above your noise floor (try -55 to -45).",
-                 "入力がこのレベルを下回っている間ミュートし、話していない間のファンノイズや"
-                 "環境音を消します。-80=オフ。ノイズの音量より少し上に設定してください"
-                 "(目安 -55〜-45)。"));
-        addSliderRow ("pitchfloor", "Pitch Floor (Hz)",
-            tip ("If the converted pitch falls below this, it is lifted softly toward the floor. "
-                 "Useful when your voice drifts too low while speaking. 0 = off. "
-                 "Try 140-180 with a female target voice.",
-                 "変換後のピッチがこの値を下回ったとき、滑らかに引き上げます。"
-                 "話しているうちに声が低くなりすぎる場合の補正用。0=オフ。"
-                 "女声化なら140〜180が目安です。"));
-        addButtonRow ("Experimental", "BETA...",
-            tip ("Opens the BETA window with the experimental controls (GCI Grain Sync, "
-                 "Breath, Legacy Low Latency). They are kept out of the main list because "
-                 "their quality is still being tuned; every one of them defaults to the "
-                 "classic behaviour.",
-                 "実験中の機能(GCI Grain Sync、Breath、Legacy Low Latency)をまとめた"
-                 "BETAウィンドウを開きます。品質を調整中のため通常の一覧からは外して"
-                 "いますが、既定値はいずれも従来どおりの動作です。"),
-            [this]
-            {
-                if (betaWin == nullptr)
-                    betaWin = std::make_unique<BetaWindow> (proc);
-                else
-                {
-                    betaWin->setVisible (true);
-                    betaWin->toFront (true);
-                }
-            });
-
-        addSection ("OUTPUT");
-        addSliderRow ("mix", "Mix",
-            tip ("Balance between the converted voice (1.0) and the original (0.0). Usually 1.0.",
-                 "変換した声(1.0)と元の声(0.0)の割合。通常は1.0のままにします。"));
-        addSliderRow ("gain", "Output Gain (dB)",
-            tip ("Output level of the plugin, to compensate loudness changes from the conversion.",
-                 "プラグインの出力レベル。変換で音量感が変わったときの補正用。"));
-        content.addAndMakeVisible (outMeter);   // live level of the real output
-        items.push_back ({ &outMeter, 30 });
-
-        footer.setText (
-            juce::String::fromUTF8 (
-                "Hover any control for help. Click a value to type it. \xE2\x86\xBA or double-click = default.\n"
-                "各項目にマウスを乗せると説明が出ます。数値クリックで入力、\xE2\x86\xBA かダブルクリックで初期値に戻ります。"),
+        footer.setFont (ak::font (11.0f));
+        footer.setColour (juce::Label::textColourId, ak::heading.withAlpha (0.85f));
+        footer.setJustificationType (juce::Justification::centredLeft);
+        footer.setText (juce::String::fromUTF8 (
+            "各項目にマウスを乗せると説明が出ます。数値クリックで入力、リセットボタンで初期値。"),
             juce::dontSendNotification);
-        footer.setFont (juce::Font (juce::FontOptions (11.5f)));
-        footer.setColour (juce::Label::textColourId, juce::Colours::grey);
-        footer.setJustificationType (juce::Justification::topLeft);
-        content.addAndMakeVisible (footer);
+        mainPage.addAndMakeVisible (footer);
         defaultFooterText = footer.getText();
 
-        contentHeight = 20;
-        for (auto& it : items) contentHeight += it.h;
-        contentHeight += 52;
-
-        // Undo / Redo (top-right, over the tab strip) + history poller.
-        // The poller turns a settled burst of manual knob edits into one
-        // undo step and keeps the buttons / lock UI in sync.
-        addAndMakeVisible (undoBtn);
-        addAndMakeVisible (redoBtn);
-        undoBtn.setEnabled (false);
-        redoBtn.setEnabled (false);
-        undoBtn.setTooltip (tip (
-            "Undo the last sound-changing operation: knob edits, a preset load, "
-            "'Reset All' or an Analyze Auto-Set / Refine (each counts as one step). "
-            "Shortcut: Cmd+Z (Mac) / Ctrl+Z (Windows).",
-            "直前の「音が変わる操作」を取り消します。つまみ操作・プリセット読込・"
-            "Reset All・AnalyzeのAuto-Set/Refineが対象で、一括変更は1回のUndoで戻ります。"
-            "ショートカット: Cmd+Z (Mac) / Ctrl+Z (Windows)。"));
-        redoBtn.setTooltip (tip (
-            "Redo the operation you just undid. Shortcut: Shift+Cmd+Z (Mac) / "
-            "Shift+Ctrl+Z or Ctrl+Y (Windows).",
-            "取り消した操作をやり直します。ショートカット: Shift+Cmd+Z (Mac) / "
-            "Shift+Ctrl+ZまたはCtrl+Y (Windows)。"));
-        undoBtn.onClick = [this] { proc.history.undo(); };
-        redoBtn.onClick = [this] { proc.history.redo(); };
+        // history poll: coalesces a settled burst of knob edits into one undo
+        // step and keeps every row's lock indicator in sync
         histPoll.fn = [this]
         {
             proc.history.poll();
-            undoBtn.setEnabled (proc.history.canUndo());
-            redoBtn.setEnabled (proc.history.canRedo());
             if (lastLockState != proc.lockedIds.joinIntoString (","))
                 syncLockUI();                    // e.g. host restored state
-            // level metering costs the audio thread a pass per channel, so
-            // only ask for it while a meter is actually on screen (MAIN tab
-            // visible). The ballistics settle in ~20 ms, well inside the
-            // ~330 ms it can take this poller to notice a tab switch.
+            // Level metering costs the audio thread a pass per channel, so
+            // only ask for it while a meter is actually on screen. The
+            // ballistics settle in ~20 ms, well inside the ~330 ms it takes
+            // this poller to notice a page switch.
             proc.uiWantsMeters.store (levels.isShowing() || outMeter.isShowing(),
                                       std::memory_order_relaxed);
         };
         histPoll.startTimerHz (3);
         syncLockUI();
 
+        showPage (0);
         setResizable (true, true);
-        // wider than before (v0.30.2 / v0.30.3): the VISUALIZER row now holds
-        // the linear graph plus three donuts, which needs the extra width to
-        // breathe. Narrower still works — the donuts shrink.
-        setResizeLimits (440, 320, 1300, contentHeight + 50);
-        setSize (800, juce::jmin (contentHeight + 42, kMaxInitialHeight));
-
-        // sliders build their value boxes before this editor's LookAndFeel is
-        // attached to them, so push the theme colours down explicitly
+        setResizeLimits (kMinW, kMinH, 2400, 1800);
+        setSize (1380, 940);
         sendLookAndFeelChange();
     }
 
@@ -4898,11 +4865,9 @@ public:
         tooltipWindow.setLookAndFeel (nullptr);
     }
 
-    // Cmd+S (Ctrl+S on Windows) saves the standalone app's settings so they
-    // survive a crash / force-quit. In a DAW the shortcut is left to the host.
+    // Cmd+Z / Shift+Cmd+Z / Cmd+Y = undo / redo, Cmd+S = save app settings
     bool keyPressed (const juce::KeyPress& key) override
     {
-        // Cmd+Z (Mac) / Ctrl+Z (Windows) = Undo; +Shift or Cmd/Ctrl+Y = Redo
         if (key == juce::KeyPress ('z', juce::ModifierKeys::commandModifier
                                         | juce::ModifierKeys::shiftModifier, 0)
          || key == juce::KeyPress ('y', juce::ModifierKeys::commandModifier, 0))
@@ -4915,7 +4880,6 @@ public:
             proc.history.undo();
             return true;
         }
-
         if (proc.wrapperType == juce::AudioProcessor::wrapperType_Standalone
             && key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier, 0))
         {
@@ -4923,11 +4887,9 @@ public:
             if (auto* holder = juce::StandalonePluginHolder::getInstance())
             {
                 holder->savePluginState();
-                // flush to disk immediately if the settings are file-backed
                 if (auto* pf = dynamic_cast<juce::PropertiesFile*> (holder->settings.get()))
                     pf->saveIfNeeded();
-                flashFooter (juce::String::fromUTF8 (
-                    "\xE2\x9C\x93 Settings saved / \xE8\xA8\xAD\xE5\xAE\x9A\xE3\x82\x92\xE4\xBF\x9D\xE5\xAD\x98\xE3\x81\x97\xE3\x81\xBE\xE3\x81\x97\xE3\x81\x9F"));
+                flashFooter (juce::String::fromUTF8 ("\xE2\x9C\x93 設定を保存しました"));
                 return true;
             }
            #endif
@@ -4935,25 +4897,29 @@ public:
         return false;
     }
 
-    void paint (juce::Graphics& g) override
-    {
-        g.fillAll (juce::Colour (0xfffcf9f9));   // near-white
-    }
+    void paint (juce::Graphics& g) override { ak::paintPage (g, getLocalBounds()); }
 
     void resized() override
     {
         auto r = getLocalBounds();
-        if (fxBar.isVisible())
-            fxBar.setBounds (r.removeFromTop (30));
-        tabs.setBounds (r);
-        auto tb = r.removeFromTop (30);       // over the tab strip's right end
-        redoBtn.setBounds (tb.removeFromRight (58).reduced (3, 4));
-        undoBtn.setBounds (tb.removeFromRight (58).reduced (3, 4));
+        header.setBounds (r.removeFromTop (ak::kHeaderH));
+
+        auto nav = r.removeFromLeft (ak::kSidebarW).reduced (9, 10);
+        const int n  = navButtons.size();
+        const int bh = juce::jlimit (58, 116, (nav.getHeight() - (n - 1) * 8) / juce::jmax (1, n));
+        for (auto* b : navButtons)
+        {
+            b->setBounds (nav.removeFromTop (bh));
+            nav.removeFromTop (8);
+        }
+
+        pageArea = r.reduced (10);
+        for (auto* pg : pages) pg->setBounds (pageArea);
+        layoutMainPage();
     }
 
-    // Standalone: switch the app window to the OS-native title bar (like
-    // most apps) and hide JUCE's in-titlebar "Options" button — its
-    // functions moved into the options bar (Audio Settings...).
+    // Standalone: native title bar, and hide JUCE's in-titlebar Options button
+    // (its functions live in the header's gear).
     void parentHierarchyChanged() override
     {
         if (proc.wrapperType != juce::AudioProcessor::wrapperType_Standalone)
@@ -4969,29 +4935,458 @@ public:
         }
     }
 
-    void layoutMainPage()
+private:
+    static constexpr int kMinW = 1240, kMinH = 860;
+
+    // ---- page switching -------------------------------------------------
+    void showPage (int index)
     {
-        viewport.setBounds (mainPage.getLocalBounds());
-        const int w = juce::jmax (420, viewport.getMaximumVisibleWidth());
-        content.setSize (w, contentHeight);
-        auto r = juce::Rectangle<int> (0, 0, w, contentHeight).reduced (14, 10);
-        for (auto& it : items)
-            it.comp->setBounds (r.removeFromTop (it.h));
-        footer.setBounds (r.removeFromTop (48));
+        currentPage = juce::jlimit (0, (int) pages.size() - 1, index);
+        for (int i = 0; i < (int) pages.size(); ++i)
+            pages[(size_t) i]->setVisible (i == currentPage);
+        for (int i = 0; i < navButtons.size(); ++i)
+            navButtons[i]->setToggleState (i == currentPage, juce::dontSendNotification);
     }
 
-private:
+    // ---- row / card builders --------------------------------------------
+    ParamRow& row (ak::Card& card, const juce::String& id, ParamRow::Kind kind,
+                   const juce::String& label, const juce::String& tipText,
+                   ak::Tone tone, int height)
+    {
+        auto r = std::make_unique<ParamRow> (proc, id, kind, label, tipText, tone);
+        r->setLookAndFeel (lnfFor (tone));
+        r->onLockChanged = [this] { syncLockUI(); };
+        auto* raw = r.get();
+        card.add (*raw, height);
+        rows.push_back (raw);
+        owned.push_back (std::move (r));
+        return *raw;
+    }
+
+    ParamRow& slider (ak::Card& c, const juce::String& id, const juce::String& label,
+                      const juce::String& tipText, ak::Tone tone = ak::Tone::blue)
+    {
+        return row (c, id, ParamRow::Kind::slider, label, tipText, tone, ak::kRowH);
+    }
+    ParamRow& knob (ak::Card& c, const juce::String& id, const juce::String& label,
+                    const juce::String& tipText, ak::Tone tone)
+    {
+        return row (c, id, ParamRow::Kind::knob, label, tipText, tone, ak::kKnobRowH);
+    }
+    ParamRow& toggle (ak::Card& c, const juce::String& id, const juce::String& label,
+                      const juce::String& tipText, ak::Tone tone = ak::Tone::blue)
+    {
+        return row (c, id, ParamRow::Kind::toggle, label, tipText, tone, ak::kToggleH);
+    }
+    ParamRow& combo (ak::Card& c, const juce::String& id, const juce::String& label,
+                     const juce::String& tipText, ak::Tone tone = ak::Tone::blue)
+    {
+        return row (c, id, ParamRow::Kind::combo, label, tipText, tone, 34);
+    }
+    void button (ak::Card& c, const juce::String& label, const juce::String& btnText,
+                 const juce::String& tipText, std::function<void()> onClick,
+                 ak::Tone tone = ak::Tone::blue)
+    {
+        auto r = std::make_unique<ParamRow> (label, btnText, tipText, std::move (onClick));
+        r->setLookAndFeel (lnfFor (tone));
+        card_add (c, *r, 34);
+        owned.push_back (std::move (r));
+    }
+
+    void card_add (ak::Card& c, juce::Component& comp, int h) { c.add (comp, h); }
+
+    juce::LookAndFeel* lnfFor (ak::Tone t)
+    {
+        return t == ak::Tone::pink ? (juce::LookAndFeel*) &lnfPink
+             : t == ak::Tone::yellow ? (juce::LookAndFeel*) &lnfYellow
+                                     : (juce::LookAndFeel*) &lnfBlue;
+    }
+
+    ak::Card& newCard (const char* title, const char* icon)
+    {
+        auto c = std::make_unique<ak::Card>();
+        if (title != nullptr) c->setTitle (title, icon);
+        auto* raw = c.get();
+        mainPage.addAndMakeVisible (*raw);
+        cards.push_back (std::move (c));
+        return *raw;
+    }
+
+    // ---- MAIN page -------------------------------------------------------
+    void buildMainPage()
+    {
+        using K = ParamRow::Kind;
+        juce::ignoreUnused ((int) K::slider);
+
+        // -- column 1 --------------------------------------------------
+        cardPitch = &newCard ("PITCH", "ui_mark_M_Pitch_png");
+        knob (*cardPitch, "pitch", "Pitch",
+            tip ("Shifts the pitch in semitones. The timbre (formants) stays unchanged. "
+                 "Male-to-female: +5 to +7. Female-to-male: around -5.",
+                 "声の高さを半音単位で変えます。声色(フォルマント)は変わりません。"
+                 "女声化は+5〜+7、男声化は-5前後が目安。"), ak::Tone::blue);
+        toggle (*cardPitch, "robot", "Robotize",
+            tip ("Locks the pitch to one fixed note for a monotone robot voice. "
+                 "Choose the note with 'Robot Pitch' below.",
+                 "ピッチを一定の高さに固定し、抑揚のないロボット声にします。"
+                 "高さは下のRobot Pitchで指定します。"));
+        slider (*cardPitch, "robotHz", "Robot Pitch (Hz)",
+            tip ("The fixed pitch (Hz) used while Robotize is on.",
+                 "Robotizeがオンのとき固定されるピッチ(Hz)。"));
+
+        cardInton = &newCard ("INTONATION", "ui_mark_M_Intonation_png");
+        slider (*cardInton, "range", "Intonation Amount (%)",
+            tip ("Exaggerates or flattens the pitch movement (intonation). 100% = unchanged. "
+                 "Unlike 'Pitch', which moves the whole voice up or down, this scales only the movement. "
+                 "110-140% recommended for male-to-female.",
+                 "声の抑揚(音程の上がり下がり)を強調/抑制します。100%=変化なし。"
+                 "Pitchが声全体を平行移動するのに対し、こちらは動きの幅だけを変えます。"
+                 "女声化では110〜140%が目安です。"));
+        slider (*cardInton, "center", "Intonation Pivot (Hz)",
+            tip ("The pitch that intonation scaling expands around. Set it near the average pitch "
+                 "of the converted voice (200-250 Hz for a female voice). No effect at 100% Amount.",
+                 "抑揚を拡大/縮小するときの中心になる音程。変換後の声の平均的な高さに"
+                 "合わせてください(女声なら200〜250Hz)。Amountが100%のときは無効。"));
+
+        cardAdvanced = &newCard ("ADVANCED", "ui_mark_M_Advanced_png");
+        toggle (*cardAdvanced, "lowvoice", "Low Voice Mode",
+            tip ("Extends pitch tracking for very low voices and vocal fry. It may retain more of "
+                 "the original low-period texture depending on the voice.",
+                 "非常に低い声やボーカルフライでもピッチ追跡を継続します。発声によっては、"
+                 "元の低周期の質感が強く残る場合があります。"));
+        // Performance Mode (their v0.31.0): replaces the old Low Latency toggle
+        // here; that one is now "Legacy Low Latency" in the BETA window.
+        toggle (*cardAdvanced, "perfmode", "Performance Mode",
+            tip ("Helps VoxMorph run steadily at small audio buffers (64 / 128 / 256 samples) "
+                 "WITHOUT changing the sound. Pitch, Formant, Natural Air and the engine "
+                 "lookahead are all exactly the same with this on or off - what it lowers is "
+                 "the refresh rate of the displays, which frees up the machine for the audio. "
+                 "In the standalone app it also unlocks the buffer helper in Audio Settings. "
+                 "It is not a 'make the delay smaller' switch on its own: the delay drops "
+                 "because a smaller device buffer becomes practical.",
+                 "小さいオーディオバッファ(64/128/256サンプル)でも安定して動くように"
+                 "支援するモードです。音は一切変わりません - Pitch・Formant・Natural Air・"
+                 "エンジンの先読みはオン/オフで完全に同じで、下げるのは表示の更新頻度だけ"
+                 "です(その分の余力が音声処理に回ります)。スタンドアロン版では"
+                 "Audio Settings内のバッファ調整も使えるようになります。"
+                 "これ自体が遅延を減らすスイッチではなく、小さいバッファを実用にできる"
+                 "結果として遅延が縮む、という機能です。"));
+        toggle (*cardAdvanced, "stereo", "Stereo Input",
+            tip ("For binaural / ASMR stereo microphones: the left and right inputs run through "
+                 "two independent conversion engines in parallel, keeping the stereo image. "
+                 "Latency is unchanged, CPU roughly doubles. Off = classic mono (inputs summed).",
+                 "バイノーラル/ASMR用ステレオマイク向け。左右の入力を2つの独立した変換エンジンで"
+                 "並列処理し、立体感を保ったまま変換します。遅延は変わりません(CPUは約2倍)。"
+                 "オフ=従来どおりモノラル(左右を合成)。"));
+        button (*cardAdvanced, "Experimental", "BETA",
+            tip ("Opens the BETA window with the experimental controls (GCI Grain Sync, "
+                 "Breath, Legacy Low Latency). They are kept out of the main list because "
+                 "their quality is still being tuned; every one defaults to the classic behaviour.",
+                 "実験中の機能(GCI Grain Sync、Breath、Legacy Low Latency)をまとめた"
+                 "BETAウィンドウを開きます。"
+                 "品質を調整中のため通常の一覧からは外していますが、既定値はいずれも"
+                 "従来どおりの動作です。"),
+            [this]
+            {
+                if (betaWin == nullptr) betaWin = std::make_unique<BetaWindow> (proc);
+                else { betaWin->setVisible (true); betaWin->toFront (true); }
+            });
+
+        // -- column 2: FORMANT ----------------------------------------
+        cardFormant = &newCard ("FORMANT", "ui_mark_M_Formant_png");
+        knob (*cardFormant, "formant", "Formant",
+            tip ("Changes the vocal-tract size = the timbre, without changing pitch. "
+                 "+ sounds younger/feminine, - sounds deeper/masculine. +3 to +4 for male-to-female.",
+                 "声道の長さ=声の響き・声色を変えます。ピッチは変わりません。"
+                 "+で若く/女性的に、-で太く/男性的に。女声化は+3〜+4が目安。"), ak::Tone::pink);
+        slider (*cardFormant, "consonant", "Const (st)",
+            tip ("Extra shift applied only to unvoiced consonants (s, sh...), added on top of Formant. "
+                 "Female consonants are brighter: try +2 to +3. Too much sounds like a lisp.",
+                 "無声子音(サ行・シャ行など)だけを追加でシフトします(Formantに加算)。"
+                 "女声の子音は明るいので+2〜+3が目安。上げすぎると舌足らずに聞こえます。"), ak::Tone::pink);
+        slider (*cardFormant, "f1shift", "F1 Shift (st)",
+            tip ("Moves only the first formant (jaw openness / throat size), on top of the global "
+                 "Formant. Male-to-female sounds most natural with F1 raised LESS than F2: "
+                 "try F1 +1 to +2 when F2 is +2 to +4.",
+                 "第1フォルマント(顎の開き・喉の広さ)だけを動かします(全体Formantに加算)。"
+                 "女声化はF1をF2より控えめに上げると自然です(F2が+2〜+4のときF1は+1〜+2)。"), ak::Tone::pink);
+        slider (*cardFormant, "f1gain", "F1 Gain (dB)",
+            tip ("Boost or cut around the first formant. Cutting a few dB thins out a 'boomy' "
+                 "chest resonance.",
+                 "第1フォルマント付近の強さ。数dB下げると胸に響く「太さ」が抜けます。"), ak::Tone::pink);
+        slider (*cardFormant, "f2shift", "F2 Shift (st)",
+            tip ("Moves only the second formant (tongue position). The strongest single cue for "
+                 "perceived gender/age of the vowels: +2 to +4 sounds younger and more feminine.",
+                 "第2フォルマント(舌の位置)だけを動かします。母音の性別・年齢感に最も効く帯域で、"
+                 "+2〜+4で若く女性的に聞こえます。"), ak::Tone::pink);
+        slider (*cardFormant, "f2gain", "F2 Gain (dB)",
+            tip ("Boost or cut around the second formant. A few dB of boost adds clarity and "
+                 "'presence' to the vowels.",
+                 "第2フォルマント付近の強さ。数dB上げると母音の明瞭さ・華やかさが出ます。"), ak::Tone::pink);
+        slider (*cardFormant, "f3shift", "F3 Shift (st)",
+            tip ("Moves only the third formant (front cavity / lip area). Small shifts (+1 to +2) "
+                 "refine the impression of a shorter vocal tract.",
+                 "第3フォルマント(声道前部・唇まわり)だけを動かします。+1〜+2の小さめの操作で"
+                 "「声道が短い」印象を仕上げます。"), ak::Tone::pink);
+        slider (*cardFormant, "f3gain", "F3 Gain (dB)",
+            tip ("Boost or cut around the third formant. Boosting adds sheen and 'sparkle' - "
+                 "this region carries much of a voice's charm.",
+                 "第3フォルマント付近の強さ。上げると艶・張りが出ます。声の「華」が乗る帯域です。"), ak::Tone::pink);
+        cardFormant->addGap (6);
+        toggle (*cardFormant, "vadapt", "AEIOU Character",
+            tip ("Shapes the voice character by applying different F1-F3 adjustments to the "
+                 "estimated A/E/I/O/U vowel regions. Your manual F1-F3 settings remain the "
+                 "base values; the per-vowel offsets are added on top. Off = previous behaviour.",
+                 "発音中の「あ・い・う・え・お」を推定し、母音ごとにF1〜F3の響きを調整して"
+                 "声のキャラクターを作ります。手動のF1〜F3設定は基本値としてそのまま維持され、"
+                 "その上に母音別の補正が乗ります。オフ=従来どおり。"), ak::Tone::pink);
+        addAeiouRow();
+        slider (*cardFormant, "vamount", "AEIOU Amount (%)",
+            tip ("Strength of the selected character's per-vowel offsets. 0 % = identical "
+                 "to the feature being off, 100 % = the character map as designed, up to "
+                 "200 % emphasizes it further (larger internal limits apply above 100 %).",
+                 "選択したキャラクター補正の強さ。0%=機能オフと完全に同じ音、"
+                 "100%=設計どおりのキャラクター、200%まで上げるとさらに強調されます"
+                 "(100%超は内部上限を広げて適用)。"), ak::Tone::pink);
+
+        // -- column 3 --------------------------------------------------
+        presetBar = std::make_unique<PresetBar> (proc,
+                        [this] (const juce::String& s) { flashFooter (s); });
+        mainPage.addAndMakeVisible (*presetBar);
+
+        cardAir = &newCard ("AIR", "ui_mark_M_Air_png");
+        knob (*cardAir, "air", "Air",
+            tip ("Preserves the natural breath and aperiodic detail of the voice while suppressing "
+                 "old-pitch harmonic leakage. Up to 1.0 the preserved amount increases at natural "
+                 "loudness; from 1.0 to 1.5 the preserved air is also emphasized. 0 = off.",
+                 "声に含まれる自然な息や非周期成分を保ちながら、元のピッチ成分が重なって聞こえる"
+                 "ゴーストを抑えます。1.0までは自然な音量のまま保持量が増え、1.0〜1.5では"
+                 "息成分を強調します。0=オフ。"), ak::Tone::yellow);
+        slider (*cardAir, "airshine", "Air Shine (dB)",
+            tip ("Adds high-frequency openness and air above the preserved natural breath. Only "
+                 "the highest air band (above ~6 kHz) comes back louder; the mids and the "
+                 "harmonic body are untouched. Try 2-4 dB.",
+                 "Natural Airの高域に抜け感と明るさを加えます。約6kHz以上の空気感だけが"
+                 "持ち上がり、中音域や声の芯には触れません。まずは2〜4dBがおすすめ。"), ak::Tone::yellow);
+
+        cardQuality = &newCard ("VOICE QUALITY", "ui_mark_M_VoiceQuality_png");
+        slider (*cardQuality, "tilt", "Softness / Tilt (dB)",
+            tip ("Spectral tilt of the voice. + is softer and warmer, - is brighter and more present. "
+                 "Start around +/-2 dB.",
+                 "音色の傾き。+で柔らかく暖かい声、-で明るく張りのある声。±2dB程度から。"), ak::Tone::yellow);
+        slider (*cardQuality, "jitter", "Natural Jitter",
+            tip ("Adds tiny natural pitch fluctuations to reduce the 'machine' feel. Try around 0.1.",
+                 "ごく小さな音程の揺らぎを加え、変換の機械っぽさを和らげます。0.1前後から。"), ak::Tone::yellow);
+        slider (*cardQuality, "gate", "Noise Gate (dB)",
+            tip ("Mutes the input while it stays below this level - removes fan / room noise "
+                 "between phrases. -80 = off. Set it just above your noise floor (try -55 to -45).",
+                 "入力がこのレベルを下回っている間ミュートし、話していない間のファンノイズや"
+                 "環境音を消します。-80=オフ。ノイズの音量より少し上に設定してください"
+                 "(目安 -55〜-45)。"), ak::Tone::yellow);
+
+        // -- bottom row ------------------------------------------------
+        cardHigh = &newCard ("HIGH RANGE / LOW LIMIT", "ui_mark_M_HighRange_png");
+        slider (*cardHigh, "hifreq", "High Range Start (Hz)",
+            tip ("When your INPUT pitch (before conversion) rises above this - laughing, squealing, "
+                 "exclamations - the Pitch/Formant shifts blend smoothly toward the High amounts "
+                 "below, reaching them fully one octave up. Stops laughs from being shifted into "
+                 "unnaturally high tones. 0 = off. Try 250-350 Hz.",
+                 "入力(変換前)のピッチがこの値を超えると(笑い声・叫び・感嘆など)、ピッチ/"
+                 "フォルマントの変化量が下のHigh設定へ滑らかに移行し、1オクターブ上で完全に"
+                 "切り替わります。笑い声が不自然な高音まで上がるのを防ぎます。0=オフ。"
+                 "250〜350Hzが目安。"));
+        slider (*cardHigh, "hipitch", "High Pitch Amount (%)",
+            tip ("How much of the Pitch shift remains in the high range. 100% = same as normal, "
+                 "0% = no shift there (laughs keep their natural pitch). Try 30-60%.",
+                 "高音域で残すPitchシフトの割合。100%=通常と同じ、0%=シフトなし(笑い声は"
+                 "地声の高さのまま)。30〜60%が目安。"));
+        slider (*cardHigh, "hiformant", "High Fmt Amount (%)",
+            tip ("How much of the Formant shift remains in the high range. Usually leave at 100% "
+                 "so the voice keeps its character while only the pitch settles down.",
+                 "高音域で残すFormantシフトの割合。通常は100%のまま(声色は保ちつつピッチだけ"
+                 "落ち着かせる)が自然です。"));
+        slider (*cardHigh, "pitchfloor", "Low Pitch Floor (Hz)",
+            tip ("If the converted pitch falls below this, it is lifted softly toward the floor. "
+                 "Useful when your voice drifts too low while speaking. 0 = off. "
+                 "Try 140-180 with a female target voice.",
+                 "変換後のピッチがこの値を下回ったとき、滑らかに引き上げます。"
+                 "話しているうちに声が低くなりすぎる場合の補正用。0=オフ。"
+                 "女声化なら140〜180が目安です。"));
+
+        mainPage.addAndMakeVisible (status);
+
+        cardOutput = &newCard ("OUTPUT", "ui_mark_M_Output_png");
+        slider (*cardOutput, "gain", "Gain (dB)",
+            tip ("Output level of the plugin, to compensate loudness changes from the conversion.",
+                 "プラグインの出力レベル。変換で音量感が変わったときの補正用。"));
+        slider (*cardOutput, "mix", "Mix",
+            tip ("Balance between the converted voice (1.0) and the original (0.0). Usually 1.0.",
+                 "変換した声(1.0)と元の声(0.0)の割合。通常は1.0のままにします。"));
+        cardOutput->add (outMeter, 26);
+    }
+
+    // AEIOU character dropdown + DETAIL button share one row
+    void addAeiouRow()
+    {
+        aeiouCombo = std::make_unique<ParamRow> (proc, "vcharacter", ParamRow::Kind::combo,
+            "Character",
+            tip ("Choose the voice character:\n"
+                 "Natural - natural feminine balance / Soft - soft and rounded / "
+                 "Active - bright and energetic / Loli - small and youthful / "
+                 "Anime - exaggerated vowel contrast / Lily - clear, sweet feminine / "
+                 "Elegant - calm and refined / Uni - neutral and androgynous / "
+                 "Custom - your own A-I-U-E-O map (DETAIL...).",
+                 "声のキャラクターを選びます:\n"
+                 "Natural=自然な女性声 / Soft=柔らかい声 / Active=元気な声 / "
+                 "Loli=幼な声 / Anime=アニメ声 / Lily=百合声 / Elegant=お姉さん声 / "
+                 "Uni=中性声 / Custom=詳細モード(DETAIL...の母音別設定を使用)。"),
+            ak::Tone::pink);
+        aeiouCombo->setLookAndFeel (&lnfPink);
+        aeiouCombo->onLockChanged = [this] { syncLockUI(); };
+        rows.push_back (aeiouCombo.get());
+
+        detailBtn.setButtonText ("DETAIL...");
+        detailBtn.setTooltip (tip (
+            "Opens a window to view and edit the per-vowel F1-F3 settings. Built-in "
+            "Characters are shown read-only; \"Copy to Custom\" makes them editable.",
+            "母音別のF1〜F3設定を確認・編集するウィンドウを開きます。内蔵Characterは"
+            "読み取り専用で、「Copy to Custom」でCustomへコピーすると編集できます。"));
+        detailBtn.setLookAndFeel (&lnfPink);
+        detailBtn.onClick = [this]
+        {
+            if (aeiouWin == nullptr) aeiouWin = std::make_unique<AEIOUCharacterWindow> (proc);
+            else { aeiouWin->setVisible (true); aeiouWin->toFront (true); }
+        };
+
+        aeiouRow.onLayout = [this]
+        {
+            auto r = aeiouRow.getLocalBounds();
+            detailBtn.setBounds (r.removeFromRight (96).reduced (2, 4));
+            r.removeFromRight (6);
+            aeiouCombo->setBounds (r);
+        };
+        aeiouRow.addAndMakeVisible (*aeiouCombo);
+        aeiouRow.addAndMakeVisible (detailBtn);
+        cardFormant->add (aeiouRow, 36);
+    }
+
+    // ---- VISUALIZER page -------------------------------------------------
+    void buildVisualizerPage()
+    {
+        specData.addView (&spectrum);        // one FFT pair feeds both views
+        specData.addView (&radial);
+        vizPage.addAndMakeVisible (spectrum);
+        vizPage.addAndMakeVisible (radial);
+        vizPage.addAndMakeVisible (vowel);
+        vizPage.addAndMakeVisible (levels);
+        vizNote.setFont (ak::font (11.5f));
+        vizNote.setColour (juce::Label::textColourId, ak::heading.withAlpha (0.9f));
+        vizNote.setJustificationType (juce::Justification::centredLeft);
+        vizNote.setText (juce::String::fromUTF8 (
+            "上: 入力(ミント)と変換後(ピンク)のスペクトラム。 "
+            "下: 同じスペクトラムの円形表示 / AEIOU母音率 / 入出力レベル(L・R)。"),
+            juce::dontSendNotification);
+        vizPage.addAndMakeVisible (vizNote);
+
+        vizPage.fn = [this]
+        {
+            auto r = vizPage.getLocalBounds();
+            vizNote.setBounds (r.removeFromTop (22));
+            r.removeFromTop (4);
+            spectrum.setBounds (r.removeFromTop (juce::jmax (180, r.getHeight() * 45 / 100)));
+            r.removeFromTop (ak::kGap);
+            const int side = juce::jmin (r.getHeight(), r.getWidth() / 3 - ak::kGap);
+            auto strip = r.withHeight (juce::jmax (140, side));
+            const int w = (strip.getWidth() - 2 * ak::kGap) / 3;
+            radial.setBounds (strip.removeFromLeft (w));
+            strip.removeFromLeft (ak::kGap);
+            vowel .setBounds (strip.removeFromLeft (w));
+            strip.removeFromLeft (ak::kGap);
+            levels.setBounds (strip);
+        };
+    }
+
+    // ---- MAIN page grid --------------------------------------------------
+    void layoutMainPage()
+    {
+        mainScroll.setBounds (pageArea);
+        const int vw = juce::jmax (kMinW - ak::kSidebarW - 40, mainScroll.getMaximumVisibleWidth());
+
+        // measure first: the grid height is whatever the tallest column needs
+        const int col1 = cardPitch->preferredHeight() + ak::kGap
+                       + cardInton->preferredHeight() + ak::kGap
+                       + cardAdvanced->preferredHeight();
+        const int col2 = cardFormant->preferredHeight();
+        const int col3 = kPresetH + ak::kGap + cardAir->preferredHeight() + ak::kGap
+                       + cardQuality->preferredHeight();
+        const int topH   = juce::jmax (col1, juce::jmax (col2, col3));
+        const int botH   = juce::jmax (cardHigh->preferredHeight(),
+                                       juce::jmax (cardOutput->preferredHeight(), 190));
+        const int footerH = 22;
+        const int total  = topH + ak::kGap + botH + footerH + 8;
+
+        mainPage.setSize (vw, juce::jmax (total, pageArea.getHeight()));
+
+        auto r = mainPage.getLocalBounds();
+        auto bottom = r.removeFromBottom (footerH + 4);
+        footer.setBounds (bottom.withTrimmedTop (4));
+
+        auto grid = r;
+        auto botRow = grid.removeFromBottom (botH);
+        grid.removeFromBottom (ak::kGap);
+
+        // three columns: 0.92fr / 1.32fr / 0.92fr (styles.css .workspace)
+        const int usable = grid.getWidth() - 2 * ak::kGap;
+        const int w1 = juce::jmax (250, (int) ((float) usable * 0.92f / 3.16f));
+        const int w3 = w1;
+        const int w2 = usable - w1 - w3;
+
+        auto c1 = grid.removeFromLeft (w1);   grid.removeFromLeft (ak::kGap);
+        auto c2 = grid.removeFromLeft (w2);   grid.removeFromLeft (ak::kGap);
+        auto c3 = grid;
+
+        cardPitch->setBounds (c1.removeFromTop (cardPitch->preferredHeight()));
+        c1.removeFromTop (ak::kGap);
+        cardInton->setBounds (c1.removeFromTop (cardInton->preferredHeight()));
+        c1.removeFromTop (ak::kGap);
+        cardAdvanced->setBounds (c1);                       // stretches to fill
+
+        cardFormant->setBounds (c2);
+
+        presetBar->setBounds (c3.removeFromTop (kPresetH));
+        c3.removeFromTop (ak::kGap);
+        cardAir->setBounds (c3.removeFromTop (cardAir->preferredHeight()));
+        c3.removeFromTop (ak::kGap);
+        cardQuality->setBounds (c3);
+
+        // bottom row: [high range] [latency donut] [output]
+        const int donutW = juce::jlimit (150, 200, botRow.getWidth() / 6);
+        const int sideW  = (botRow.getWidth() - donutW - 2 * ak::kGap) / 2;
+        cardHigh->setBounds (botRow.removeFromLeft (sideW));
+        botRow.removeFromLeft (ak::kGap);
+        status.setBounds (botRow.removeFromLeft (donutW));
+        botRow.removeFromLeft (ak::kGap);
+        cardOutput->setBounds (botRow);
+    }
+
+    // ---- misc ------------------------------------------------------------
+    void syncLockUI()
+    {
+        for (auto* r : rows) r->refreshLock();
+        lastLockState = proc.lockedIds.joinIntoString (",");
+    }
+
     void flashFooter (const juce::String& msg)
     {
         footer.setText (msg, juce::dontSendNotification);
-        footer.setColour (juce::Label::textColourId, juce::Colour (0xff9fd68a));
-        startTimer (1600);
+        footer.setColour (juce::Label::textColourId, juce::Colour (0xff5a9c7f));
+        startTimer (2600);
     }
 
     void timerCallback() override
     {
         footer.setText (defaultFooterText, juce::dontSendNotification);
-        footer.setColour (juce::Label::textColourId, juce::Colours::grey);
+        footer.setColour (juce::Label::textColourId, ak::heading.withAlpha (0.85f));
         stopTimer();
     }
 
@@ -5040,289 +5435,66 @@ private:
         }
     };
 
-    // ---- row components ---------------------------------------------------
-    // every parameter row ends with the same right-aligned set:
-    // [value box] [↺ reset] [🔒 lock]
-    struct SliderRow : public juce::Component
+    // a component that forwards resized() to a lambda
+    struct LayoutBox : public juce::Component
     {
-        juce::Label      name;
-        juce::Slider     slider;
-        juce::TextButton reset, lock;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> att;
-
-        SliderRow()
-        {
-            addAndMakeVisible (name);
-            addAndMakeVisible (slider);
-            addAndMakeVisible (reset);
-            addAndMakeVisible (lock);
-        }
-        void resized() override
-        {
-            auto r = getLocalBounds();
-            name.setBounds (r.removeFromLeft (168));
-            lock.setBounds  (r.removeFromRight (30).reduced (3));
-            reset.setBounds (r.removeFromRight (30).reduced (3));
-            slider.setBounds (r);
-        }
+        std::function<void()> onLayout;
+        void resized() override { if (onLayout) onLayout(); }
     };
 
-    struct ToggleRow : public juce::Component
-    {
-        juce::ToggleButton toggle;
-        juce::TextButton   reset, lock;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> att;
-        ToggleRow()
-        {
-            addAndMakeVisible (toggle);
-            addAndMakeVisible (reset);
-            addAndMakeVisible (lock);
-        }
-        void resized() override
-        {
-            auto r = getLocalBounds();
-            lock.setBounds  (r.removeFromRight (30).reduced (2));
-            reset.setBounds (r.removeFromRight (30).reduced (2));
-            toggle.setBounds (r.withTrimmedLeft (4));
-        }
-    };
+    static constexpr int kPresetH = 62;
 
-    struct ComboRow : public juce::Component
-    {
-        juce::Label      name;
-        juce::ComboBox   combo;
-        juce::TextButton reset, lock;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> att;
-        ComboRow()
-        {
-            addAndMakeVisible (name);
-            addAndMakeVisible (combo);
-            addAndMakeVisible (reset);
-            addAndMakeVisible (lock);
-        }
-        void resized() override
-        {
-            auto r = getLocalBounds();
-            name.setBounds (r.removeFromLeft (168));
-            lock.setBounds  (r.removeFromRight (30).reduced (3));
-            reset.setBounds (r.removeFromRight (30).reduced (3));
-            combo.setBounds (r.reduced (0, 3));
-        }
-    };
-
-    struct ButtonRow : public juce::Component
-    {
-        juce::Label      name;
-        juce::TextButton btn;
-        ButtonRow()
-        {
-            addAndMakeVisible (name);
-            addAndMakeVisible (btn);
-        }
-        void resized() override
-        {
-            auto r = getLocalBounds();
-            name.setBounds (r.removeFromLeft (168));
-            btn.setBounds (r.removeFromLeft (150).reduced (0, 3));
-        }
-    };
-
-    // ---- builders -----------------------------------------------------------
-    void addSection (const char* text)
-    {
-        auto lbl = std::make_unique<juce::Label>();
-        lbl->setText (text, juce::dontSendNotification);
-        lbl->setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-        lbl->setColour (juce::Label::textColourId, juce::Colour (0xff45bda5));   // section mint
-        content.addAndMakeVisible (*lbl);
-        items.push_back ({ lbl.get(), 26 });
-        owned.push_back (std::move (lbl));
-    }
-
-    // wires one row's 🔒 button to the per-parameter lock and registers a
-    // refresher that mirrors the lock state into the row (button glyph,
-    // tooltip, greyed controls). `controls` = what to disable while locked.
-    void wireLock (juce::TextButton& lockBtn, const juce::String& id,
-                   std::vector<juce::Component*> controls)
-    {
-        lockBtn.onClick = [this, id]
-        {
-            proc.setParamLocked (id, ! proc.isParamLocked (id));
-            syncLockUI();
-        };
-        lockRefreshers.push_back ([this, &lockBtn, id, controls]
-        {
-            const bool locked = proc.isParamLocked (id);
-            lockBtn.setButtonText (juce::String::fromUTF8 (locked ? "\xF0\x9F\x94\x92"      // 🔒
-                                                                  : "\xF0\x9F\x94\x93"));   // 🔓
-            lockBtn.setColour (juce::TextButton::buttonColourId,
-                               locked ? juce::Colour (0xffffe9ef) : juce::Colours::white);
-            lockBtn.setTooltip (locked
-                ? tip ("Locked: this value cannot be changed - not by knobs, the reset arrow, "
-                       "presets, Reset All or Analyze Auto-Set. Click to unlock.",
-                       "ロック中のため変更できません(手動操作・↺・プリセット・Reset All・"
-                       "Auto-Setのすべてから保護)。クリックで解除します。")
-                : tip ("Lock this parameter: protects the value from manual edits, the reset "
-                       "arrow, preset loading, Reset All and Analyze Auto-Set / Refine.",
-                       "この項目をロックします。手動操作・↺・プリセット読込・Reset All・"
-                       "AnalyzeのAuto-Set/Refineから値を保護します。"));
-            for (auto* c : controls)
-                c->setEnabled (! locked);
-        });
-    }
-
-    // re-apply every row's lock state (also called when a host restores it)
-    void syncLockUI()
-    {
-        for (auto& f : lockRefreshers) f();
-        lastLockState = proc.lockedIds.joinIntoString (",");
-    }
-
-    void addSliderRow (const juce::String& id, const juce::String& displayName, const juce::String& tipText)
-    {
-        auto row = std::make_unique<SliderRow>();
-        row->name.setText (displayName, juce::dontSendNotification);
-        row->name.setTooltip (tipText);
-        row->name.setFont (juce::Font (juce::FontOptions (13.0f)));
-
-        row->slider.setSliderStyle (juce::Slider::LinearHorizontal);
-        row->slider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 74, 22);
-        row->slider.setTextBoxIsEditable (true);
-        row->slider.setTooltip (tipText);
-        row->att = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
-                        proc.apvts, id, row->slider);
-
-        auto* rp = proc.apvts.getParameter (id);
-        row->slider.setDoubleClickReturnValue (true, (double) rp->convertFrom0to1 (rp->getDefaultValue()));
-
-        row->reset.setButtonText (juce::String::fromUTF8 ("\xE2\x86\xBA"));
-        row->reset.setTooltip (tip ("Reset to default.", "初期値に戻します。"));
-        row->reset.onClick = [rp]
-        {
-            rp->beginChangeGesture();
-            rp->setValueNotifyingHost (rp->getDefaultValue());
-            rp->endChangeGesture();
-        };
-        wireLock (row->lock, id, { &row->slider, &row->reset, &row->name });
-
-        content.addAndMakeVisible (*row);
-        items.push_back ({ row.get(), 30 });
-        owned.push_back (std::move (row));
-    }
-
-    void addComboRow (const juce::String& id, const juce::String& displayName, const juce::String& tipText)
-    {
-        auto row = std::make_unique<ComboRow>();
-        row->name.setText (displayName, juce::dontSendNotification);
-        row->name.setTooltip (tipText);
-        row->name.setFont (juce::Font (juce::FontOptions (13.0f)));
-
-        auto* rp = proc.apvts.getParameter (id);
-        if (auto* cp = dynamic_cast<juce::AudioParameterChoice*> (rp))
-            for (int i = 0; i < cp->choices.size(); ++i)
-                row->combo.addItem (cp->choices[i], i + 1);
-        row->combo.setTooltip (tipText);
-        row->att = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
-                        proc.apvts, id, row->combo);
-
-        row->reset.setButtonText (juce::String::fromUTF8 ("\xE2\x86\xBA"));
-        row->reset.setTooltip (tip ("Reset to default.", "初期値に戻します。"));
-        row->reset.onClick = [rp]
-        {
-            rp->beginChangeGesture();
-            rp->setValueNotifyingHost (rp->getDefaultValue());
-            rp->endChangeGesture();
-        };
-        wireLock (row->lock, id, { &row->combo, &row->reset, &row->name });
-
-        content.addAndMakeVisible (*row);
-        items.push_back ({ row.get(), 30 });
-        owned.push_back (std::move (row));
-    }
-
-    void addButtonRow (const juce::String& displayName, const juce::String& btnText,
-                       const juce::String& tipText, std::function<void()> onClick)
-    {
-        auto row = std::make_unique<ButtonRow>();
-        row->name.setText (displayName, juce::dontSendNotification);
-        row->name.setTooltip (tipText);
-        row->name.setFont (juce::Font (juce::FontOptions (13.0f)));
-        row->btn.setButtonText (btnText);
-        row->btn.setTooltip (tipText);
-        row->btn.onClick = std::move (onClick);
-        content.addAndMakeVisible (*row);
-        items.push_back ({ row.get(), 30 });
-        owned.push_back (std::move (row));
-    }
-
-    void addToggleRow (const juce::String& id, const juce::String& displayName, const juce::String& tipText)
-    {
-        auto row = std::make_unique<ToggleRow>();
-        row->toggle.setButtonText (displayName);
-        row->toggle.setTooltip (tipText);
-        row->att = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
-                        proc.apvts, id, row->toggle);
-
-        auto* rp = proc.apvts.getParameter (id);
-        row->reset.setButtonText (juce::String::fromUTF8 ("\xE2\x86\xBA"));
-        row->reset.setTooltip (tip ("Reset to default.", "初期値に戻します。"));
-        row->reset.onClick = [rp]
-        {
-            rp->beginChangeGesture();
-            rp->setValueNotifyingHost (rp->getDefaultValue());
-            rp->endChangeGesture();
-        };
-        wireLock (row->lock, id, { &row->toggle, &row->reset });
-
-        content.addAndMakeVisible (*row);
-        items.push_back ({ row.get(), 28 });
-        owned.push_back (std::move (row));
-    }
-
-    // ---- members --------------------------------------------------------------
-    static constexpr int kMaxInitialHeight = 720;   // window opens no taller
-
+    // ---- members ---------------------------------------------------------
     VoxMorphProcessor& proc;
-    TipLookAndFeel tipLnf;
-    juce::LookAndFeel_V4 mainLnf { juce::LookAndFeel_V4::getLightColourScheme() };
-    juce::TooltipWindow tooltipWindow { this, 350 };
-    juce::Viewport  viewport;    // scroll container
-    juce::Component content;     // holds every row; taller than the window
-    // VISUALIZER: one shared spectrum analysis feeding the linear graph and
-    // the radial donut, plus the vowel-mix donut (its own data source)
+    TipLookAndFeel  tipLnf;
+    ak::ToneLookAndFeel lnfBlue   { ak::Tone::blue };
+    ak::ToneLookAndFeel lnfPink   { ak::Tone::pink };
+    ak::ToneLookAndFeel lnfYellow { ak::Tone::yellow };
+    juce::TooltipWindow tooltipWindow { this, 380 };
+
+    HeaderBar header { proc };
+    juce::OwnedArray<ak::SidebarButton> navButtons;
+    juce::Rectangle<int> pageArea;
+    std::vector<juce::Component*> pages;
+    int currentPage = 0;
+
+    // MAIN page
+    juce::Viewport  mainScroll;
+    juce::Component mainPage;
+    std::vector<std::unique_ptr<ak::Card>> cards;
+    std::vector<std::unique_ptr<juce::Component>> owned;
+    std::vector<ParamRow*> rows;
+    ak::Card* cardPitch = nullptr; ak::Card* cardInton = nullptr; ak::Card* cardAdvanced = nullptr;
+    ak::Card* cardFormant = nullptr; ak::Card* cardAir = nullptr; ak::Card* cardQuality = nullptr;
+    ak::Card* cardHigh = nullptr;  ak::Card* cardOutput = nullptr;
+    LayoutBox aeiouRow;
+    std::unique_ptr<ParamRow> aeiouCombo;
+    juce::TextButton detailBtn;
+    std::unique_ptr<PresetBar> presetBar;
+    StatusView  status   { proc };
+    OutputMeter outMeter { proc };
+    juce::Label footer;
+    juce::String defaultFooterText;
+
+    // VISUALIZER page
+    FnComponent        vizPage;
+    juce::Label        vizNote;
     SpectrumData       specData { proc };
     SpectrumView       spectrum { specData };
     RadialSpectrumView radial   { specData };
     VowelDonut         vowel    { proc };
     LevelRingsDonut    levels   { proc };
-    VisualizerRow      vizRow   { spectrum, { &radial, &vowel, &levels } };
-    StatusView      status { proc };
-    OutputMeter     outMeter { proc };
-    MatchingPanel   matchingPanel { proc };
-    PresetPanel     presetPanel { proc };
-    AsmrPanel       asmrPanel { proc };
-    FxBar           fxBar { proc };
-    FnComponent     mainPage;    // MAIN tab page (declared before tabs!)
-    juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
-    int contentHeight = 0;
 
-    struct Item { juce::Component* comp; int h; };
-    std::vector<Item> items;
-    std::vector<std::unique_ptr<juce::Component>> owned;
-    // MAIN tab preset bar (built in the constructor so its status callback
-    // can reach flashFooter)
-    std::unique_ptr<PresetBar> presetBar;
-    // AEIOU Character DETAIL / BETA windows (children of this editor:
-    // destroyed with it, re-fronted instead of duplicated on repeated clicks)
+    // other pages
+    MatchingPanel matchingPanel { proc };
+    AsmrPanel     asmrPanel     { proc };
+    PresetPanel   presetPanel   { proc };
+
+    // child windows
     std::unique_ptr<AEIOUCharacterWindow> aeiouWin;
-    std::unique_ptr<BetaWindow> betaWin;
-    juce::Label footer;
-    juce::String defaultFooterText;
+    std::unique_ptr<BetaWindow>           betaWin;
 
-    // undo/redo + per-parameter locks
-    juce::TextButton undoBtn { "Undo" }, redoBtn { "Redo" };
     FnTimer histPoll;
-    std::vector<std::function<void()>> lockRefreshers;   // one per 🔒 row
     juce::String lastLockState;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoxMorphEditor)
