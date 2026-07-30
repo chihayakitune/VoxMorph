@@ -433,6 +433,48 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Page tab (v0.32.0): sits along the bottom edge of the dark hero band with
+// rounded top corners, so the selected one reads as the sheet of content
+// below coming forward. Replaces the v0.31 sidebar.
+class TabButton : public juce::Button
+{
+public:
+    TabButton (const juce::String& text, const char* iconBinaryName)
+        : juce::Button (text), label (text), icon (image (iconBinaryName))
+    {
+        setClickingTogglesState (false);
+    }
+
+    void paintButton (juce::Graphics& g, bool highlighted, bool /*down*/) override
+    {
+        auto r = getLocalBounds().toFloat();
+        const bool on = getToggleState();
+
+        juce::Path tab;                       // rounded top, square bottom
+        tab.addRoundedRectangle (r.getX(), r.getY(), r.getWidth(), r.getHeight() + 14.0f,
+                                 14.0f, 14.0f, true, true, false, false);
+        g.setColour (on ? juce::Colours::white
+                        : juce::Colours::white.withAlpha (highlighted ? 0.22f : 0.10f));
+        g.fillPath (tab);
+
+        auto inner = r.reduced (8.0f, 6.0f);
+        const float iconSide = juce::jmin (26.0f, inner.getHeight() - 16.0f);
+        drawFitted (g, icon, juce::Rectangle<float> (iconSide, iconSide)
+                                 .withCentre ({ inner.getCentreX(),
+                                                inner.getY() + iconSide * 0.5f + 1.0f }),
+                    on ? 1.0f : 0.85f);
+        g.setColour (on ? sidebarSel : bandInk.withAlpha (0.92f));
+        g.setFont (font (11.5f, on));
+        g.drawText (label, inner.removeFromBottom (15.0f).toNearestInt(),
+                    juce::Justification::centred, false);
+    }
+
+private:
+    juce::String label;
+    juce::Image  icon;
+};
+
+// ---------------------------------------------------------------------------
 // Header status button (Monitor / Mute): icon + text, lit when on.
 class StatusButton : public juce::Button
 {

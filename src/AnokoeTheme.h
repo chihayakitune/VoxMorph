@@ -40,6 +40,15 @@ namespace anokoe
     const juce::Colour badgeHigh { 0xffeeadc2 };
     const juce::Colour advInk    { 0xff6c82b6 };
 
+    // ---- hero band (v0.32.0): the dark strip under the header that the
+    // character circle sits in
+    const juce::Colour bandTop  { 0xff262b45 };
+    const juce::Colour bandBot  { 0xff141726 };
+    const juce::Colour bandGrid { 0x14ffffff };   // faint diamond lattice
+    const juce::Colour bandStar { 0x59ffffff };
+    const juce::Colour bandInk  { 0xffe6ebff };
+    const juce::Colour bandDim  { 0xff8f9bc4 };
+
     // graph series colours (kept from the old skin so the DSP-facing meaning
     // of mint = input / pink = output does not change)
     const juce::Colour seriesIn  { 0xff54bda1 };
@@ -59,7 +68,11 @@ namespace anokoe
     constexpr int   kLabelW      = 150;
     constexpr int   kGap         = 10;
     constexpr int   kSidebarW    = 132;
-    constexpr int   kHeaderH     = 86;
+    constexpr int   kHeaderH     = 62;    // v0.32.0: slimmer, the band carries the art
+    constexpr int   kBandH       = 150;   // dark hero band
+    constexpr int   kTabH        = 60;    // page tabs along the band's bottom edge
+    constexpr int   kHeroR       = 104;   // character circle radius (overlaps
+                                          // both the header and the content edge)
 
     // knob sweep: 7:30 clockwise through 270 deg to 4:30 (script.js uses a
     // 135 deg canvas start and a 2.7 deg/% pointer rotation, same thing)
@@ -124,6 +137,37 @@ namespace anokoe
         g.setOpacity (alpha);
         g.drawImage (img, area, juce::RectanglePlacement::centred, false);
         g.setOpacity (1.0f);
+    }
+
+    // The dark hero band: vertical gradient, a faint diamond lattice and a
+    // scattering of stars. Drawn procedurally so it costs no extra art and
+    // scales to any width.
+    inline void paintBand (juce::Graphics& g, juce::Rectangle<int> b)
+    {
+        g.setGradientFill (juce::ColourGradient (bandTop, (float) b.getCentreX(), (float) b.getY(),
+                                                 bandBot, (float) b.getCentreX(), (float) b.getBottom(),
+                                                 false));
+        g.fillRect (b);
+
+        // diamond lattice
+        g.setColour (bandGrid);
+        const float step = 46.0f;
+        for (float x = (float) b.getX() - (float) b.getHeight(); x < (float) b.getRight(); x += step)
+        {
+            g.drawLine (x, (float) b.getBottom(), x + (float) b.getHeight(), (float) b.getY(), 1.0f);
+            g.drawLine (x, (float) b.getY(), x + (float) b.getHeight(), (float) b.getBottom(), 1.0f);
+        }
+
+        // stars: deterministic, so they never shimmer between repaints
+        juce::Random rng (0x5eed);
+        for (int i = 0; i < 90; ++i)
+        {
+            const float x = (float) b.getX() + rng.nextFloat() * (float) b.getWidth();
+            const float y = (float) b.getY() + rng.nextFloat() * (float) b.getHeight();
+            const float r = 0.6f + rng.nextFloat() * 1.5f;
+            g.setColour (bandStar.withMultipliedAlpha (0.35f + rng.nextFloat() * 0.65f));
+            g.fillEllipse (x - r, y - r, r * 2.0f, r * 2.0f);
+        }
     }
 
     // The page background gradient used behind everything.

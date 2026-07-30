@@ -4753,6 +4753,182 @@ public:
     void closeButtonPressed() override { setVisible (false); }
 };
 
+// ---------------------------------------------------------------------------
+// Hero circle (v0.32.0): the character portrait that sits in the dark band,
+// wearing the live AEIOU balance as a ring. The ring is the same measurement
+// the VISUALIZER page's vowel donut shows — the engine's own vowel coordinate
+// through VowelAdaptiveWarp::anchorWeights — so it needs AEIOU Character on;
+// with it off the ring rests as a quiet idle band and the caption says so.
+//
+// A second, outer halo follows the OUTPUT level, so the circle still breathes
+// with your voice even when the vowel tracker is not running.
+class HeroCircle : public juce::Component, public juce::SettableTooltipClient,
+                   private juce::Timer
+{
+public:
+    explicit HeroCircle (VoxMorphProcessor& p) : proc (p)
+    {
+        setTooltip (vmTip (
+            "The AEIOU balance of your voice right now, as a ring around the character: "
+            "how much /a/ /i/ /u/ /e/ /o/ the engine hears. It needs AEIOU Character "
+            "switched on (FORMANT) with Amount above 0, because the vowel tracking is "
+            "part of that feature. The soft outer halo follows the output level and works "
+            "at all times.",
+            "いま話している声の母音バランス(あいうえおの割合)を、キャラクターの周りの"
+            "リングで表示します。FORMANTのAEIOU CharacterがオンでAmountが0より大きい"
+            "ときに動きます(母音の推定がこの機能の一部のため)。外側のふんわりした光は"
+            "出力レベルに追従し、こちらは常に動作します。"));
+        startTimerHz (24);
+    }
+
+private:
+    static constexpr int kV = 5;
+    static constexpr const char* kLbl[kV] = { "A", "I", "U", "E", "O" };
+
+    static juce::Colour vowelColour (int i)
+    {
+        static const juce::Colour c[kV] = {
+            juce::Colour (0xfff08ba5), juce::Colour (0xff54c0aa), juce::Colour (0xffa79ee0),
+            juce::Colour (0xffe3a63c), juce::Colour (0xff6fb2dc)
+        };
+        return c[juce::jlimit (0, kV - 1, i)];
+    }
+
+    void timerCallback() override
+    {
+        if (! isShowing()) return;
+        const bool  live = proc.uiVowelActive.load (std::memory_order_relaxed);
+        const float conf = proc.uiVowelConf  .load (std::memory_order_relaxed);
+        const bool  good = live && conf > 0.02f;
+        if (good)
+        {
+            float w[kV];
+            VowelAdaptiveWarp::anchorWeights (proc.uiVowelH.load (std::memory_order_relaxed),
+                                              proc.uiVowelF.load (std::memory_order_relaxed), w);
+            for (int i = 0; i < kV; ++i) sm[i] += 0.22f * (w[i] - sm[i]);
+        }
+        fade   += 0.14f * ((good ? 1.0f : 0.15f) - fade);
+        active  = live;
+
+        const float pk = juce::jmax (proc.uiOutL.peak.load (std::memory_order_relaxed),
+                                     proc.uiOutR.peak.load (std::memory_order_relaxed));
+        const float db = juce::Decibels::gainToDecibels (pk, -60.0f);
+        halo += 0.25f * (juce::jlimit (0.0f, 1.0f, (db + 54.0f) / 54.0f) - halo);
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        const float side = juce::jmin (b.getWidth(), b.getHeight());
+        const auto  c    = b.getCentre();
+        const float rOut = side * 0.5f - 2.0f;
+
+        // outer halo: breathes with the output level
+        if (halo > 0.01f)
+        {
+            for (int i = 3; i >= 1; --i)
+            {
+                const float rr = rOut + (float) i * 3.0f + halo * 9.0f;
+                g.setColour (juce::Colour (0xff8fb6ff).withAlpha (0.05f + 0.10f * halo / (float) i));
+                g.drawEllipse (juce::Rectangle<float> (rr * 2.0f, rr * 2.0f).withCentre (c), 2.4f);
+            }
+        }
+
+        // ring track
+        const float ringR = rOut - 7.0f;
+        g.setColour (juce::Colour (0x33ffffff));
+        g.drawEllipse (juce::Rectangle<float> (ringR * 2.0f, ringR * 2.0f).withCentre (c), 7.0f);
+
+        // AEIOU balance arcs
+        float sum = 0.0f;
+        for (int i = 0; i < kV; ++i) sum += juce::jmax (0.0f, sm[i]);
+        if (active && sum > 1.0e-6f)
+        {
+            const float twoPi = juce::MathConstants<float>::twoPi;
+            const float gap   = 0.035f;
+            float a0 = 0.0f;
+            for (int i = 0; i < kV; ++i)
+            {
+                const float share = juce::jmax (0.0f, sm[i]) / sum;
+                const float a1 = a0 + share * twoPi;
+                if (a1 - a0 > gap * 2.0f)
+                {
+                    juce::Path arc;
+                    arc.addCentredArc (c.x, c.y, ringR, ringR, 0.0f, a0 + gap, a1 - gap, true);
+                    g.setColour (vowelColour (i).withMultipliedAlpha (0.35f + 0.65f * fade));
+                    g.strokePath (arc, juce::PathStrokeType (7.0f, juce::PathStrokeType::curved,
+                                                                   juce::PathStrokeType::rounded));
+                }
+                a0 = a1;
+            }
+        }
+
+        // the portrait, clipped to the inner circle
+        const float portR = ringR - 7.0f;
+        const auto  port  = juce::Rectangle<float> (portR * 2.0f, portR * 2.0f).withCentre (c);
+        {
+            juce::Graphics::ScopedSaveState ss (g);
+            juce::Path clip;
+            clip.addEllipse (port);
+            g.reduceClipRegion (clip);
+            g.setColour (juce::Colour (0xfff2f6ff));
+            g.fillEllipse (port);
+            // the art is a rounded-square app icon, so oversize it: the
+            // square edges land outside the circular clip
+            if (auto ic = ak::image ("icon_png"); ic.isValid())
+                g.drawImage (ic, port.expanded (portR * 0.16f).translated (0.0f, -portR * 0.10f),
+                             juce::RectanglePlacement::fillDestination, false);
+
+            // caption plate: a chord across the WIDE part of the circle (not
+            // the very bottom, where it would be too narrow for five
+            // readings), faded in from the top so it does not cut a hard
+            // line across her face
+            auto plate = juce::Rectangle<float> (port.getX(), c.y + portR * 0.14f,
+                                                 port.getWidth(), portR * 0.66f);
+            g.setGradientFill (juce::ColourGradient (
+                juce::Colour (0x00161a2c), plate.getCentreX(), plate.getY(),
+                juce::Colour (0xe6161a2c), plate.getCentreX(), plate.getY() + plate.getHeight() * 0.45f,
+                false));
+            g.fillRect (plate);
+
+            auto line1 = plate.removeFromTop (plate.getHeight() * 0.52f)
+                              .withTrimmedTop (portR * 0.14f);
+            g.setColour (ak::bandDim);
+            g.setFont (ak::font (juce::jmax (8.0f, portR * 0.125f), true));
+            g.drawText (active ? "AEIOU BALANCE" : "AEIOU CHARACTER OFF",
+                        line1.toNearestInt(), juce::Justification::centred, false);
+
+            if (active && sum > 1.0e-6f)
+            {
+                // the circle narrows toward the bottom, so keep the row well
+                // inside the chord width or the outer cells get clipped
+                auto rowArea = plate.reduced (portR * 0.30f, 0.0f);
+                const float cw = rowArea.getWidth() / (float) kV;
+                g.setFont (ak::font (juce::jmax (7.5f, portR * 0.115f)));
+                for (int i = 0; i < kV; ++i)
+                {
+                    auto cell = rowArea.withWidth (cw).translated (cw * (float) i, 0.0f);
+                    g.setColour (vowelColour (i).withMultipliedAlpha (0.45f + 0.55f * fade));
+                    g.drawText (juce::String (kLbl[i]) + " "
+                                  + juce::String (juce::roundToInt (
+                                        juce::jmax (0.0f, sm[i]) / sum * 100.0f)) + "%",
+                                cell.toNearestInt(), juce::Justification::centred, false);
+                }
+            }
+        }
+
+        // crisp rim
+        g.setColour (juce::Colour (0x66ffffff));
+        g.drawEllipse (port, 1.5f);
+    }
+
+    VoxMorphProcessor& proc;
+    float sm[kV] = { 0.2f, 0.2f, 0.2f, 0.2f, 0.2f };
+    float fade = 0.15f, halo = 0.0f;
+    bool  active = false;
+};
+
 // ===========================================================================
 // ANOKOE editor (v0.31.0)
 //
@@ -4793,6 +4969,7 @@ public:
         setLookAndFeel (&lnfBlue);
 
         addAndMakeVisible (header);
+        addAndMakeVisible (hero);
 
         // ---- sidebar ----------------------------------------------------
         static const struct { const char* label; const char* icon; } kPages[] = {
@@ -4804,7 +4981,7 @@ public:
         };
         for (int i = 0; i < (int) std::size (kPages); ++i)
         {
-            auto* b = navButtons.add (new ak::SidebarButton (kPages[i].label, kPages[i].icon));
+            auto* b = navButtons.add (new ak::TabButton (kPages[i].label, kPages[i].icon));
             b->onClick = [this, i] { showPage (i); };
             addAndMakeVisible (b);
         }
@@ -4852,7 +5029,17 @@ public:
         showPage (0);
         setResizable (true, true);
         setResizeLimits (kMinW, kMinH, 2400, 1800);
-        setSize (1380, 940);
+        // The card grid plus the hero band needs room, so the minimum is
+        // deliberately large. Open at the design size but never bigger than
+        // the screen allows (a 1440x900 laptop would otherwise get a window
+        // it cannot see).
+        int w = 1400, h = 1030;
+        if (auto* d = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+        {
+            w = juce::jlimit (kMinW, w, d->userArea.getWidth()  - 40);
+            h = juce::jlimit (kMinH, h, d->userArea.getHeight() - 80);
+        }
+        setSize (w, h);
         sendLookAndFeelChange();
     }
 
@@ -4897,23 +5084,48 @@ public:
         return false;
     }
 
-    void paint (juce::Graphics& g) override { ak::paintPage (g, getLocalBounds()); }
+    void paint (juce::Graphics& g) override
+    {
+        ak::paintPage (g, getLocalBounds());
+        ak::paintBand (g, bandArea);
+    }
 
     void resized() override
     {
         auto r = getLocalBounds();
         header.setBounds (r.removeFromTop (ak::kHeaderH));
 
-        auto nav = r.removeFromLeft (ak::kSidebarW).reduced (9, 10);
-        const int n  = navButtons.size();
-        const int bh = juce::jlimit (58, 116, (nav.getHeight() - (n - 1) * 8) / juce::jmax (1, n));
-        for (auto* b : navButtons)
+        bandArea = r.removeFromTop (ak::kBandH);
+
+        // page tabs hang off the band's bottom edge, on the left
         {
-            b->setBounds (nav.removeFromTop (bh));
-            nav.removeFromTop (8);
+            auto strip = bandArea.withTop (bandArea.getBottom() - ak::kTabH);
+            strip.removeFromLeft (18);
+            const int n  = juce::jmax (1, navButtons.size());
+            const int tw = juce::jlimit (72, 116, (strip.getWidth() / 2 - 6 * n) / n);
+            for (auto* b : navButtons)
+            {
+                b->setBounds (strip.removeFromLeft (tw));
+                strip.removeFromLeft (6);
+            }
         }
 
-        pageArea = r.reduced (10);
+        // preset bar on the right of the band, lined up with the tabs
+        if (presetBar != nullptr)
+        {
+            auto slot = bandArea.withTop (bandArea.getBottom() - ak::kTabH)
+                                .withTrimmedRight (18);
+            const int pw = juce::jlimit (220, 330, slot.getWidth() / 3);
+            presetBar->setBounds (slot.removeFromRight (pw).withSizeKeepingCentre (pw, 46));
+        }
+
+        // the character circle straddles the band's lower edge
+        const int hd = ak::kHeroR * 2;
+        hero.setBounds (juce::Rectangle<int> (hd, hd)
+                            .withCentre ({ bandArea.getCentreX(),
+                                           bandArea.getBottom() - ak::kHeroR + 16 }));
+
+        pageArea = r.reduced (12, 8).withTrimmedTop (10);
         for (auto* pg : pages) pg->setBounds (pageArea);
         layoutMainPage();
     }
@@ -4936,7 +5148,7 @@ public:
     }
 
 private:
-    static constexpr int kMinW = 1240, kMinH = 860;
+    static constexpr int kMinW = 1180, kMinH = 900;
 
     // ---- page switching -------------------------------------------------
     void showPage (int index)
@@ -5152,7 +5364,7 @@ private:
         // -- column 3 --------------------------------------------------
         presetBar = std::make_unique<PresetBar> (proc,
                         [this] (const juce::String& s) { flashFooter (s); });
-        mainPage.addAndMakeVisible (*presetBar);
+        addAndMakeVisible (*presetBar);      // lives in the band, not the grid
 
         cardAir = &newCard ("AIR", "ui_mark_M_Air_png");
         knob (*cardAir, "air", "Air",
@@ -5317,7 +5529,7 @@ private:
                        + cardInton->preferredHeight() + ak::kGap
                        + cardAdvanced->preferredHeight();
         const int col2 = cardFormant->preferredHeight();
-        const int col3 = kPresetH + ak::kGap + cardAir->preferredHeight() + ak::kGap
+        const int col3 = cardAir->preferredHeight() + ak::kGap
                        + cardQuality->preferredHeight();
         const int topH   = juce::jmax (col1, juce::jmax (col2, col3));
         const int botH   = juce::jmax (cardHigh->preferredHeight(),
@@ -5353,8 +5565,6 @@ private:
 
         cardFormant->setBounds (c2);
 
-        presetBar->setBounds (c3.removeFromTop (kPresetH));
-        c3.removeFromTop (ak::kGap);
         cardAir->setBounds (c3.removeFromTop (cardAir->preferredHeight()));
         c3.removeFromTop (ak::kGap);
         cardQuality->setBounds (c3);
@@ -5453,8 +5663,9 @@ private:
     juce::TooltipWindow tooltipWindow { this, 380 };
 
     HeaderBar header { proc };
-    juce::OwnedArray<ak::SidebarButton> navButtons;
-    juce::Rectangle<int> pageArea;
+    juce::OwnedArray<ak::TabButton> navButtons;
+    HeroCircle hero { proc };
+    juce::Rectangle<int> pageArea, bandArea;
     std::vector<juce::Component*> pages;
     int currentPage = 0;
 
