@@ -129,7 +129,7 @@ public:
         const auto heart = image ("ui_slider_knob_heart_png");
         if (heart.isValid())
         {
-            const float hs = (float) juce::jmin (kTrackH, h)
+            const float hs = (float) juce::jmin (kHeartH, h)
                                 * (s.isEnabled() ? 1.0f : 0.86f);
             drawFitted (g, heart,
                         juce::Rectangle<float> (hs, hs)

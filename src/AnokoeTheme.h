@@ -83,9 +83,15 @@ namespace anokoe
                                           // drop shares this column, so both
                                           // kinds of connector line up.
     constexpr int   kTitleIconW  = 32;    // the mark's slot in a heading
-    constexpr int   kTrackH      = 22;    // slider row art height (heart thumb)
+    constexpr int   kTrackH      = 22;    // slider row art height / thumb hit
     constexpr int   kTrackBarH   = 19;    // the bar itself — v0.36.1 draws it
                                           // a touch thinner than the thumb
+    constexpr int   kHeartH      = 25;    // draw box for the heart thumb art.
+                                          // Bigger than kTrackH because the
+                                          // v0.36.3 art carries more padding
+                                          // (its shadow is centred out); the
+                                          // heart itself lands the same size
+                                          // on screen as the old outline one.
     constexpr int   kValueW      = 54;
     constexpr int   kActionsW    = 40;
     constexpr int   kLabelW      = 150;
