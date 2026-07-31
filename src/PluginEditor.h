@@ -4985,7 +4985,7 @@ public:
         // deliberately large. Open at the design size but never bigger than
         // the screen allows (a 1440x900 laptop would otherwise get a window
         // it cannot see).
-        int w = 1400, h = 1050;
+        int w = 1400, h = 1080;
         if (auto* d = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
         {
             w = juce::jlimit (kMinW, w, d->userArea.getWidth()  - 40);
@@ -5120,7 +5120,7 @@ public:
     }
 
 private:
-    static constexpr int kMinW = 1180, kMinH = 900;
+    static constexpr int kMinW = 1180, kMinH = 920;
 
     // ---- page switching -------------------------------------------------
     void showPage (int index)

@@ -71,13 +71,15 @@ namespace anokoe
     constexpr int   kHeaderH     = 62;    // v0.32.0: slimmer, the band carries the art
     constexpr int   kBandH       = 158;   // dark hero band
     constexpr int   kTabH        = 58;    // page tabs along the band's bottom edge
-    constexpr int   kHeroR       = 100;   // character portrait radius
-    constexpr int   kHeroRim     = 24;    // how far the band bulges past the
+    constexpr int   kHeroR       = 112;   // character portrait radius
+    constexpr int   kHeroRim     = 34;    // how far the band bulges past the
                                           // portrait, i.e. the dark collar.
                                           // Must stay wider than the inner
                                           // shadow below, or the collar gets
                                           // shadowed from both sides and goes
                                           // black.
+    constexpr float kHeroFillet  = 34.0f; // radius of the sweep where the
+                                          // circle meets the strip's edges
 
     // knob sweep: 7:30 clockwise through 270 deg to 4:30 (script.js uses a
     // 135 deg canvas start and a 2.7 deg/% pointer rotation, same thing)
@@ -181,13 +183,99 @@ namespace anokoe
     // the character so the dark area bulges up into the header and down into
     // the content exactly along the portrait's edge. Both sub-paths wind the
     // same way, so the default non-zero fill rule unions them.
-    inline juce::Path bandPath (juce::Rectangle<int> band, juce::Point<float> heroCentre,
-                                float heroOuterR)
+    // The dark area's outline: the strip, with a circle around the character
+    // bulging out of its top and bottom edges, and a proper tangent FILLET at
+    // each of the four crossings.
+    //
+    // The fillet cannot be done by unioning extra circles: a disc tangent to
+    // both the edge and the hero circle touches each at a single point, so it
+    // reads as four detached blobs. The sweep has to be an ARC of that disc,
+    // walked as part of one outline — which is what this builds.
+    //
+    // Fillet geometry at an edge y = e: the disc sits r beyond the edge (so it
+    // is tangent to it) and R + r from the hero centre (so it is externally
+    // tangent to the circle), which fixes its horizontal offset:
+    //     dx = sqrt((R + r)^2 - (d + r)^2),  d = |heroCentre.y - e|
+    inline juce::Path bandPath (juce::Rectangle<int> band, juce::Point<float> c, float R)
     {
+        const auto  b = band.toFloat();
+        const float r = kHeroFillet;
+        const float pi = juce::MathConstants<float>::pi;
+        const float twoPi = juce::MathConstants<float>::twoPi;
+
+        // JUCE arc angles: 0 = 12 o'clock, increasing clockwise
+        auto ang = [] (juce::Point<float> o, juce::Point<float> pt)
+        { return std::atan2 (pt.x - o.x, o.y - pt.y); };
+        auto shortWay = [twoPi, pi] (float from, float to)
+        {
+            while (to - from >  pi) to -= twoPi;
+            while (to - from < -pi) to += twoPi;
+            return to;
+        };
+        auto clockwise = [twoPi] (float from, float to)
+        {
+            while (to < from) to += twoPi;
+            return to;
+        };
+
+        struct Edge
+        {
+            bool crosses = false;
+            float y = 0.0f, dx = 0.0f, fy = 0.0f;
+            juce::Point<float> tan[2];              // tangency on the hero circle
+        };
+        auto solve = [&] (float edgeY, float outward)
+        {
+            Edge e;  e.y = edgeY;
+            const float d = std::abs (c.y - edgeY);
+            const float A = R + r, O = d + r;
+            if (d >= R || A <= O) return e;          // circle misses this edge
+            e.crosses = true;
+            e.dx = std::sqrt (A * A - O * O);
+            e.fy = edgeY + outward * r;
+            for (int i = 0; i < 2; ++i)
+            {
+                const juce::Point<float> f (c.x + (i == 0 ? -e.dx : e.dx), e.fy);
+                e.tan[i] = c + (f - c) * (R / A);
+            }
+            return e;
+        };
+        const Edge top = solve (b.getY(),      -1.0f);
+        const Edge bot = solve (b.getBottom(), +1.0f);
+
         juce::Path p;
-        p.addRectangle (band.toFloat());
-        p.addEllipse (juce::Rectangle<float> (heroOuterR * 2.0f, heroOuterR * 2.0f)
-                          .withCentre (heroCentre));
+        if (! top.crosses || ! bot.crosses)          // degenerate: plain union
+        {
+            p.addRectangle (b);
+            p.addEllipse (juce::Rectangle<float> (R * 2.0f, R * 2.0f).withCentre (c));
+            return p;
+        }
+
+        // one closed outline, walked clockwise
+        auto sweep = [&] (const Edge& e, int side, bool intoCircle)
+        {
+            const juce::Point<float> f (c.x + (side == 0 ? -e.dx : e.dx), e.fy);
+            const juce::Point<float> onEdge (f.x, e.y);
+            const float aEdge = ang (f, onEdge), aArc = ang (f, e.tan[side]);
+            if (intoCircle) p.addCentredArc (f.x, f.y, r, r, 0.0f, aEdge, shortWay (aEdge, aArc), false);
+            else            p.addCentredArc (f.x, f.y, r, r, 0.0f, aArc, shortWay (aArc, aEdge), false);
+        };
+
+        p.startNewSubPath (b.getX(), b.getY());
+        p.lineTo (c.x - top.dx, b.getY());
+        sweep (top, 0, true);
+        p.addCentredArc (c.x, c.y, R, R, 0.0f, ang (c, top.tan[0]),
+                         clockwise (ang (c, top.tan[0]), ang (c, top.tan[1])), false);
+        sweep (top, 1, false);
+        p.lineTo (b.getRight(), b.getY());
+        p.lineTo (b.getRight(), b.getBottom());
+        p.lineTo (c.x + bot.dx, b.getBottom());
+        sweep (bot, 1, true);
+        p.addCentredArc (c.x, c.y, R, R, 0.0f, ang (c, bot.tan[1]),
+                         clockwise (ang (c, bot.tan[1]), ang (c, bot.tan[0])), false);
+        sweep (bot, 0, false);
+        p.lineTo (b.getX(), b.getBottom());
+        p.closeSubPath();
         return p;
     }
 
@@ -247,9 +335,10 @@ namespace anokoe
             }
         }
 
-        // a hairline lip so the recess has a crisp top edge
-        g.setColour (juce::Colour (0x33ffffff));
-        g.strokePath (shape, juce::PathStrokeType (1.0f));
+        // NOTE: no outline stroke here. A hairline along `shape` reads as the
+        // header's and the content's borders running straight through the
+        // dark area, plus a ring around the character — the inner shadow
+        // above is what defines the edge.
     }
 
     // The page background gradient used behind everything.
