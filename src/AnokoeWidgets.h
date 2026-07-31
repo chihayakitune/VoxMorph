@@ -323,11 +323,23 @@ class Card : public juce::Component
 public:
     Card() = default;
 
-    void setTitle (const juce::String& text, const char* iconBinaryName)
+    void setTitle (const juce::String& text, const char* iconBinaryName,
+                   juce::Colour titleColour = heading)
     {
         title = text;
+        tint  = titleColour;
         icon  = iconBinaryName != nullptr ? image (iconBinaryName) : juce::Image();
         repaint();
+    }
+
+    // where the heading text starts / ends, for the flow lines to hook onto
+    juce::Rectangle<int> titleTextBounds() const
+    {
+        auto t = getLocalBounds().withHeight (kTitleH).reduced (kCardPadX, 0).withTrimmedTop (4);
+        if (icon.isValid()) t.removeFromLeft (32);
+        const int w = 10 + (int) std::ceil (juce::GlyphArrangement::getStringWidth (
+                                                font (15.0f, true), title));
+        return t.withWidth (juce::jmin (w, t.getWidth()));
     }
 
     // h < 0 means "share the leftover height with the other flexible rows"
@@ -358,7 +370,7 @@ public:
                                      .withCentre ({ (float) t.getX() + 13.0f, (float) t.getCentreY() }));
             t.removeFromLeft (32);
         }
-        g.setColour (heading);
+        g.setColour (tint);
         g.setFont (font (15.0f, true));
         g.drawText (title, t, juce::Justification::centredLeft, false);
     }
@@ -385,6 +397,7 @@ public:
 private:
     struct Row { juce::Component* comp; int h; };
     juce::String title;
+    juce::Colour tint { heading };
     juce::Image  icon;
     std::vector<Row> rows;
 };

@@ -861,48 +861,27 @@ private:
         repaint();
     }
 
-    // v0.31.0: drawn as the ANOKOE latency donut. The numbers, the thresholds
-    // and the breakdown text are unchanged from v0.17.0 — only the skin moved.
+    // v0.35.0: a compact read-out that lives inside the OUTPUT section.
+    // The numbers, thresholds and breakdown are unchanged since v0.17.0.
     void paint (juce::Graphics& g) override
     {
-        // v0.34.0: no panel — the MAIN page is one flat tone now
         const float ms = engMs + fxMs + bufMs;
-        auto r = getLocalBounds().reduced (8);
-        auto textArea = r.removeFromBottom (46);
-        const float side = (float) juce::jmin (r.getWidth(), r.getHeight());
-        const auto art = juce::Rectangle<float> (side, side)
-                             .withCentre ({ (float) r.getCentreX(), (float) r.getCentreY() });
+        auto r = getLocalBounds();
+        auto l1 = r.removeFromTop (16);
 
-        ak::drawFitted (g, ak::image ("ui_donuts_base_png"), art);
-        if (known && side > 30.0f)
-        {
-            // ring fills over 0..120 ms, coloured by the same LOW/MID/HIGH bands
-            const float frac = juce::jlimit (0.02f, 1.0f, ms / 120.0f);
-            juce::Path arc;
-            const float rad = side * 0.363f;
-            arc.addCentredArc (art.getCentreX(), art.getCentreY(), rad, rad, 0.0f,
-                               0.0f, frac * juce::MathConstants<float>::twoPi, true);
-            g.setColour (chipColour().withAlpha (0.9f));
-            g.strokePath (arc, juce::PathStrokeType (side * 0.072f,
-                              juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-        }
-        ak::drawFitted (g, ak::image ("ui_donuts_center_png"), art);
-
-        auto l1 = textArea.removeFromTop (20);
-        const auto text = "Latency: " + (known ? juce::String (ms, 1) + " ms"
-                                               : juce::String ("--"));
-        auto tb = l1.withSizeKeepingCentre (juce::jmin (l1.getWidth(), 158), 20);
         g.setColour (ak::ink);
         g.setFont (ak::font (12.0f));
-        g.drawText (text, tb.removeFromLeft (juce::jmax (56, tb.getWidth() - 46)),
-                    juce::Justification::centredRight, false);
+        const auto text = "Latency: " + (known ? juce::String (ms, 1) + " ms"
+                                               : juce::String ("--"));
+        const int tw = 96;
+        g.drawText (text, l1.removeFromLeft (tw), juce::Justification::centredLeft, false);
         if (known)
         {
-            auto chip = tb.reduced (3, 2);
+            auto chip = l1.removeFromLeft (40).reduced (4, 1);
             g.setColour (chipColour());
-            g.fillRoundedRectangle (chip.toFloat(), 9.0f);
+            g.fillRoundedRectangle (chip.toFloat(), 8.0f);
             g.setColour (juce::Colours::white);
-            g.setFont (ak::font (10.0f, true));
+            g.setFont (ak::font (9.5f, true));
             g.drawText (chipText(), chip, juce::Justification::centred, false);
 
             juce::String d = "engine " + juce::String (engMs, 1)
@@ -910,7 +889,7 @@ private:
             if (bufMs > 0.0f) d += " + buf " + juce::String (bufMs, 1);
             g.setColour (ak::heading.withAlpha (0.8f));
             g.setFont (ak::font (10.0f));
-            g.drawText (d + " ms", textArea, juce::Justification::centredTop, false);
+            g.drawText (d + " ms", r, juce::Justification::topLeft, false);
         }
     }
 
@@ -1249,8 +1228,9 @@ public:
 
         if (kind == Kind::button)
         {
-            action.setBounds (r.withSizeKeepingCentre (juce::jmin (150, r.getWidth()),
-                                                       juce::jmin (28, r.getHeight())));
+            action.setBounds (r.removeFromLeft (juce::jmin (128, r.getWidth()))
+                                .withSizeKeepingCentre (juce::jmin (128, r.getWidth()),
+                                                        juce::jmin (26, r.getHeight())));
             return;
         }
 
@@ -1310,6 +1290,10 @@ public:
     // with an L instead of running it through.
     enum class Tree { none, mid, last };
     void setTree (Tree t) { tree = t; resized(); repaint(); }
+
+    // for the flow lines: where the knob and the row label sit
+    juce::Rectangle<int> knobBounds()  const { return slider.getBounds(); }
+    juce::Rectangle<int> labelBounds() const { return name.getBounds(); }
 
     juce::ToggleButton& getToggle() { return toggle; }
     juce::ComboBox&     getCombo()  { return combo; }
@@ -5059,6 +5043,93 @@ public:
         g.setColour (juce::Colours::white);
         g.fillRect (getLocalBounds().withHeight (ak::kHeaderH));
         ak::paintBand (g, bandShape, bandArea);
+        paintFlowLines (g);
+    }
+
+    // ---- signal-chain flow lines (v0.35.0) --------------------------------
+    // Three curves leave the character's collar and run to the three knobs
+    // that make up the conversion chain, in processing order:
+    //   notch -> marker -> section heading -> row label -> knob
+    // Purely decorative; nothing here reads or writes a parameter.
+    void paintFlowLines (juce::Graphics& g)
+    {
+        if (currentPage != 0 || cardPitch == nullptr || heroOuter <= 0.0f) return;
+
+        // the notches are where the collar meets the strip's bottom edge
+        const float dEdge = (float) bandArea.getBottom() - heroC.y;
+        if (dEdge >= heroOuter) return;
+        const float notchDx = std::sqrt (heroOuter * heroOuter - dEdge * dEdge);
+
+        juce::Graphics::ScopedSaveState ss (g);
+        g.reduceClipRegion (juce::Rectangle<int> (0, bandArea.getBottom(),
+                                                  getWidth(), getHeight()));
+
+        struct Line { juce::Point<float> from; ak::Card* card; ParamRow* row; bool fromLeft; };
+        const Line lines[3] = {
+            { { heroC.x - notchDx, (float) bandArea.getBottom() }, cardPitch,   rowPitch,   false },
+            { { heroC.x,           heroC.y + heroOuter          }, cardFormant, rowFormant, false },
+            { { heroC.x + notchDx, (float) bandArea.getBottom() }, cardAir,     rowAir,     true  },
+        };
+
+        for (const auto& ln : lines)
+        {
+            if (ln.card == nullptr || ln.row == nullptr) continue;
+
+            const auto title = ln.card->titleTextBounds();
+            const auto head  = getLocalPoint (ln.card,
+                                   juce::Point<int> (ln.fromLeft ? title.getX() - 10
+                                                                 : title.getRight() + 8,
+                                                     title.getCentreY())).toFloat();
+            const auto lbl   = getLocalPoint (ln.row,
+                                   juce::Point<int> (ln.row->labelBounds().getX() - 8,
+                                                     ln.row->labelBounds().getCentreY())).toFloat();
+            const auto kb    = ln.row->knobBounds();
+            const auto knobP = getLocalPoint (ln.row,
+                                   juce::Point<int> (kb.getCentreX() - (int) (kb.getWidth() * 0.40f),
+                                                     kb.getCentreY() + (int) (kb.getHeight() * 0.22f)))
+                                   .toFloat();
+            // swings out past the card's left edge between heading and label,
+            // clamped so the curve never leaves the window
+            auto edge = getLocalPoint (ln.card, juce::Point<int> (-16, 0)).toFloat()
+                            .withY ((head.y + lbl.y) * 0.5f);
+            edge.x = juce::jmax (edge.x, 22.0f);
+            // the marker sits past the halfway point and a touch below the
+            // strip, so the glyph is not clipped by the dark area
+            const juce::Point<float> mark = ln.from + (head - ln.from) * 0.52f
+                                          + juce::Point<float> (0.0f, 14.0f);
+
+            const juce::Point<float> pts[6] = { ln.from, mark, head, edge, lbl, knobP };
+            g.setColour (ak::treeLine);
+            g.strokePath (catmullRom (pts, 6),
+                          juce::PathStrokeType (1.4f, juce::PathStrokeType::curved,
+                                                      juce::PathStrokeType::rounded));
+
+            // the ADVANCED glyph marks the step, breaking the line
+            const auto sym = ak::tintedImage ("ui_mark_M_Advanced_png", ak::treeLine);
+            const juce::Rectangle<float> box (22.0f, 22.0f);
+            g.setColour (ak::bodyFill);
+            g.fillEllipse (box.expanded (3.0f).withCentre (mark));
+            ak::drawFitted (g, sym, box.withCentre (mark));
+        }
+    }
+
+    // smooth curve through the given points (Catmull-Rom -> cubic Bezier)
+    static juce::Path catmullRom (const juce::Point<float>* p, int n)
+    {
+        juce::Path path;
+        if (n < 2) return path;
+        path.startNewSubPath (p[0]);
+        for (int i = 0; i < n - 1; ++i)
+        {
+            const auto p0 = p[juce::jmax (0, i - 1)];
+            const auto p1 = p[i], p2 = p[i + 1];
+            const auto p3 = p[juce::jmin (n - 1, i + 2)];
+            // 1/8 rather than the textbook 1/6: gentler control arms, so the
+            // curve does not overshoot past the cards it runs alongside
+            path.cubicTo (p1 + (p2 - p0) * 0.125f,
+                          p2 - (p3 - p1) * 0.125f, p2);
+        }
+        return path;
     }
 
     void resized() override
@@ -5070,9 +5141,8 @@ public:
 
         // the character straddles the band's lower edge; the band bulges past
         // the portrait by kHeroRim, which is the dark collar around her
-        const juce::Point<float> heroC ((float) bandArea.getCentreX(),
-                                        (float) bandArea.getBottom() - 74.0f);
-        const float heroOuter = (float) (ak::kHeroR + ak::kHeroRim);
+        heroC = { (float) bandArea.getCentreX(), (float) bandArea.getBottom() - 74.0f };
+        heroOuter = (float) (ak::kHeroR + ak::kHeroRim);
         bandShape = ak::bandPath (bandArea, heroC, heroOuter);
         hero.setBounds (juce::Rectangle<int> (ak::kHeroR * 2, ak::kHeroR * 2)
                             .withCentre (heroC.roundToInt()));
@@ -5182,14 +5252,16 @@ private:
     {
         return row (c, id, ParamRow::Kind::combo, label, tipText, tone, 34);
     }
-    void button (ak::Card& c, const juce::String& label, const juce::String& btnText,
-                 const juce::String& tipText, std::function<void()> onClick,
-                 ak::Tone tone = ak::Tone::blue)
+    ParamRow& button (ak::Card& c, const juce::String& label, const juce::String& btnText,
+                      const juce::String& tipText, std::function<void()> onClick,
+                      ak::Tone tone = ak::Tone::blue)
     {
         auto r = std::make_unique<ParamRow> (label, btnText, tipText, std::move (onClick));
         r->setLookAndFeel (lnfFor (tone));
-        card_add (c, *r, 34);
+        auto* raw = r.get();
+        card_add (c, *raw, 30);
         owned.push_back (std::move (r));
+        return *raw;
     }
 
     void card_add (ak::Card& c, juce::Component& comp, int h) { c.add (comp, h); }
@@ -5201,10 +5273,11 @@ private:
                                      : (juce::LookAndFeel*) &lnfBlue;
     }
 
-    ak::Card& newCard (const char* title, const char* icon)
+    ak::Card& newCard (const char* title, const char* icon,
+                       juce::Colour tint = ak::heading)
     {
         auto c = std::make_unique<ak::Card>();
-        if (title != nullptr) c->setTitle (title, icon);
+        if (title != nullptr) c->setTitle (title, icon, tint);
         auto* raw = c.get();
         mainPage.addAndMakeVisible (*raw);
         cards.push_back (std::move (c));
@@ -5218,22 +5291,17 @@ private:
         juce::ignoreUnused ((int) K::slider);
 
         // -- column 1 --------------------------------------------------
-        cardPitch = &newCard ("PITCH", "ui_mark_M_Pitch_png");
-        knob (*cardPitch, "pitch", "Pitch",
+        cardPitch = &newCard ("PITCH", "ui_mark_M_Pitch_png", ak::headBlue);
+        rowPitch = &knob (*cardPitch, "pitch", "Pitch",
             tip ("Shifts the pitch in semitones. The timbre (formants) stays unchanged. "
                  "Male-to-female: +5 to +7. Female-to-male: around -5.",
                  "声の高さを半音単位で変えます。声色(フォルマント)は変わりません。"
                  "女声化は+5〜+7、男声化は-5前後が目安。"), ak::Tone::blue);
-        toggle (*cardPitch, "robot", "Robotize",
-            tip ("Locks the pitch to one fixed note for a monotone robot voice. "
-                 "Choose the note with 'Robot Pitch' below.",
-                 "ピッチを一定の高さに固定し、抑揚のないロボット声にします。"
-                 "高さは下のRobot Pitchで指定します。"));
-        slider (*cardPitch, "robotHz", "Robot Pitch (Hz)",
-            tip ("The fixed pitch (Hz) used while Robotize is on.",
-                 "Robotizeがオンのとき固定されるピッチ(Hz)。"));
+        // Robotize / Robot Pitch were dropped from the UI in v0.35.0 (unused).
+        // The parameters stay registered, so saved sessions and presets that
+        // carry them still load and behave exactly as before.
 
-        cardInton = &newCard ("INTONATION", "ui_mark_M_Intonation_png");
+        cardInton = &newCard ("INTONATION", "ui_mark_M_Intonation_png", ak::headBlue);
         slider (*cardInton, "range", "Intonation Amount (%)",
             tip ("Exaggerates or flattens the pitch movement (intonation). 100% = unchanged. "
                  "Unlike 'Pitch', which moves the whole voice up or down, this scales only the movement. "
@@ -5247,7 +5315,7 @@ private:
                  "抑揚を拡大/縮小するときの中心になる音程。変換後の声の平均的な高さに"
                  "合わせてください(女声なら200〜250Hz)。Amountが100%のときは無効。"));
 
-        cardAdvanced = &newCard ("ADVANCED", "ui_mark_M_Advanced_png");
+        cardAdvanced = &newCard ("ADVANCED", "ui_mark_M_Advanced_png", ak::headBlue);
         toggle (*cardAdvanced, "lowvoice", "Low Voice Mode",
             tip ("Extends pitch tracking for very low voices and vocal fry. It may retain more of "
                  "the original low-period texture depending on the voice.",
@@ -5277,6 +5345,12 @@ private:
                  "バイノーラル/ASMR用ステレオマイク向け。左右の入力を2つの独立した変換エンジンで"
                  "並列処理し、立体感を保ったまま変換します。遅延は変わりません(CPUは約2倍)。"
                  "オフ=従来どおりモノラル(左右を合成)。"));
+        slider (*cardAdvanced, "gate", "Noise Gate (dB)",
+            tip ("Mutes the input while it stays below this level - removes fan / room noise "
+                 "between phrases. -80 = off. Set it just above your noise floor (try -55 to -45).",
+                 "入力がこのレベルを下回っている間ミュートし、話していない間のファンノイズや"
+                 "環境音を消します。-80=オフ。ノイズの音量より少し上に設定してください"
+                 "(目安 -55〜-45)。"));
         button (*cardAdvanced, "Experimental", "BETA",
             tip ("Opens the BETA window with the experimental controls (GCI Grain Sync, "
                  "Breath, Legacy Low Latency). They are kept out of the main list because "
@@ -5292,8 +5366,8 @@ private:
             });
 
         // -- column 2: FORMANT ----------------------------------------
-        cardFormant = &newCard ("FORMANT", "ui_mark_M_Formant_png");
-        knob (*cardFormant, "formant", "Formant",
+        cardFormant = &newCard ("FORMANT", "ui_mark_M_Formant_png", ak::headPink);
+        rowFormant = &knob (*cardFormant, "formant", "Formant",
             tip ("Changes the vocal-tract size = the timbre, without changing pitch. "
                  "+ sounds younger/feminine, - sounds deeper/masculine. +3 to +4 for male-to-female.",
                  "声道の長さ=声の響き・声色を変えます。ピッチは変わりません。"
@@ -5349,7 +5423,6 @@ private:
                  "選択したキャラクター補正の強さ。0%=機能オフと完全に同じ音、"
                  "100%=設計どおりのキャラクター、200%まで上げるとさらに強調されます"
                  "(100%超は内部上限を広げて適用)。"), ak::Tone::pink);
-        aeiouCombo->setTree (ParamRow::Tree::mid);
         rAmount.setTree (ParamRow::Tree::last);
 
         // -- column 3 --------------------------------------------------
@@ -5358,8 +5431,8 @@ private:
         addAndMakeVisible (*presetBar);      // lives in the band, not the grid
         presetBar->setDarkStyle();
 
-        cardAir = &newCard ("AIR", "ui_mark_M_Air_png");
-        knob (*cardAir, "air", "Air",
+        cardAir = &newCard ("AIR", "ui_mark_M_Air_png", ak::headGold);
+        rowAir = &knob (*cardAir, "air", "Air",
             tip ("Preserves the natural breath and aperiodic detail of the voice while suppressing "
                  "old-pitch harmonic leakage. Up to 1.0 the preserved amount increases at natural "
                  "loudness; from 1.0 to 1.5 the preserved air is also emphasized. 0 = off.",
@@ -5373,23 +5446,17 @@ private:
                  "Natural Airの高域に抜け感と明るさを加えます。約6kHz以上の空気感だけが"
                  "持ち上がり、中音域や声の芯には触れません。まずは2〜4dBがおすすめ。"), ak::Tone::yellow);
 
-        cardQuality = &newCard ("VOICE QUALITY", "ui_mark_M_VoiceQuality_png");
+        cardQuality = &newCard ("VOICE QUALITY", "ui_mark_M_VoiceQuality_png", ak::headBlue);
         slider (*cardQuality, "tilt", "Softness / Tilt (dB)",
             tip ("Spectral tilt of the voice. + is softer and warmer, - is brighter and more present. "
                  "Start around +/-2 dB.",
-                 "音色の傾き。+で柔らかく暖かい声、-で明るく張りのある声。±2dB程度から。"), ak::Tone::yellow);
+                 "音色の傾き。+で柔らかく暖かい声、-で明るく張りのある声。±2dB程度から。"));
         slider (*cardQuality, "jitter", "Natural Jitter",
             tip ("Adds tiny natural pitch fluctuations to reduce the 'machine' feel. Try around 0.1.",
-                 "ごく小さな音程の揺らぎを加え、変換の機械っぽさを和らげます。0.1前後から。"), ak::Tone::yellow);
-        slider (*cardQuality, "gate", "Noise Gate (dB)",
-            tip ("Mutes the input while it stays below this level - removes fan / room noise "
-                 "between phrases. -80 = off. Set it just above your noise floor (try -55 to -45).",
-                 "入力がこのレベルを下回っている間ミュートし、話していない間のファンノイズや"
-                 "環境音を消します。-80=オフ。ノイズの音量より少し上に設定してください"
-                 "(目安 -55〜-45)。"), ak::Tone::yellow);
+                 "ごく小さな音程の揺らぎを加え、変換の機械っぽさを和らげます。0.1前後から。"));
 
         // -- bottom row ------------------------------------------------
-        cardHigh = &newCard ("HIGH RANGE / LOW LIMIT", "ui_mark_M_HighRange_png");
+        cardHigh = &newCard ("HIGH RANGE / LOW LIMIT", "ui_mark_M_HighRange_png", ak::headBlue);
         slider (*cardHigh, "hifreq", "High Range Start (Hz)",
             tip ("When your INPUT pitch (before conversion) rises above this - laughing, squealing, "
                  "exclamations - the Pitch/Formant shifts blend smoothly toward the High amounts "
@@ -5417,19 +5484,17 @@ private:
                  "話しているうちに声が低くなりすぎる場合の補正用。0=オフ。"
                  "女声化なら140〜180が目安です。"));
 
-        mainPage.addAndMakeVisible (status);
-
-        cardOutput = &newCard ("OUTPUT", "ui_mark_M_Output_png");
+        cardOutput = &newCard ("OUTPUT", "ui_mark_M_Output_png", ak::headBlue);
         slider (*cardOutput, "gain", "Gain (dB)",
             tip ("Output level of the plugin, to compensate loudness changes from the conversion.",
                  "プラグインの出力レベル。変換で音量感が変わったときの補正用。"));
         slider (*cardOutput, "mix", "Mix",
             tip ("Balance between the converted voice (1.0) and the original (0.0). Usually 1.0.",
                  "変換した声(1.0)と元の声(0.0)の割合。通常は1.0のままにします。"));
-        cardOutput->add (outMeter, 26);
+        cardOutput->add (outMeter, 24);
+        cardOutput->add (status, 30);   // latency read-out (v0.35.0: no donut)
     }
 
-    // AEIOU character dropdown + DETAIL button share one row
     // marks a run of consecutive rows as one bracketed group
     void bracket (std::initializer_list<ParamRow*> group)
     {
@@ -5439,6 +5504,7 @@ private:
             r->setTree (++i == n ? ParamRow::Tree::last : ParamRow::Tree::mid);
     }
 
+    // AEIOU character dropdown, then DETAIL... on its own line beneath it
     void addAeiouRow()
     {
         aeiouCombo = std::make_unique<ParamRow> (proc, "vcharacter", ParamRow::Kind::combo,
@@ -5456,31 +5522,20 @@ private:
             ak::Tone::pink);
         aeiouCombo->setLookAndFeel (&lnfPink);
         aeiouCombo->onLockChanged = [this] { syncLockUI(); };
+        aeiouCombo->setTree (ParamRow::Tree::mid);
         rows.push_back (aeiouCombo.get());
+        cardFormant->add (*aeiouCombo, 32);
 
-        detailBtn.setButtonText ("DETAIL...");
-        detailBtn.setTooltip (tip (
-            "Opens a window to view and edit the per-vowel F1-F3 settings. Built-in "
-            "Characters are shown read-only; \"Copy to Custom\" makes them editable.",
-            "母音別のF1〜F3設定を確認・編集するウィンドウを開きます。内蔵Characterは"
-            "読み取り専用で、「Copy to Custom」でCustomへコピーすると編集できます。"));
-        detailBtn.setLookAndFeel (&lnfPink);
-        detailBtn.onClick = [this]
-        {
-            if (aeiouWin == nullptr) aeiouWin = std::make_unique<AEIOUCharacterWindow> (proc);
-            else { aeiouWin->setVisible (true); aeiouWin->toFront (true); }
-        };
-
-        aeiouRow.onLayout = [this]
-        {
-            auto r = aeiouRow.getLocalBounds();
-            detailBtn.setBounds (r.removeFromRight (96).reduced (2, 2));
-            r.removeFromRight (6);
-            aeiouCombo->setBounds (r);
-        };
-        aeiouRow.addAndMakeVisible (*aeiouCombo);
-        aeiouRow.addAndMakeVisible (detailBtn);
-        cardFormant->add (aeiouRow, 36);
+        button (*cardFormant, "Vowel Detail", "DETAIL...",
+            tip ("Opens a window to view and edit the per-vowel F1-F3 settings. Built-in "
+                 "Characters are shown read-only; \"Copy to Custom\" makes them editable.",
+                 "母音別のF1〜F3設定を確認・編集するウィンドウを開きます。内蔵Characterは"
+                 "読み取り専用で、「Copy to Custom」でCustomへコピーすると編集できます。"),
+            [this]
+            {
+                if (aeiouWin == nullptr) aeiouWin = std::make_unique<AEIOUCharacterWindow> (proc);
+                else { aeiouWin->setVisible (true); aeiouWin->toFront (true); }
+            }, ak::Tone::pink).setTree (ParamRow::Tree::mid);
     }
 
     // ---- VISUALIZER page -------------------------------------------------
@@ -5520,66 +5575,53 @@ private:
     }
 
     // ---- MAIN page grid --------------------------------------------------
+    // Three columns, no bottom row (v0.35.0):
+    //   1  PITCH / INTONATION / HIGH RANGE / VOICE QUALITY
+    //   2  FORMANT              (pushed down past the character's bulge)
+    //   3  AIR / ADVANCED / OUTPUT
     void layoutMainPage()
     {
         mainScroll.setBounds (pageArea);
-        const int vw = juce::jmax (kMinW - ak::kSidebarW - 40, mainScroll.getMaximumVisibleWidth());
+        const int vw = juce::jmax (kMinW - 40, mainScroll.getMaximumVisibleWidth());
 
-        // measure first: the grid height is whatever the tallest column needs
-        const int col1 = cardPitch->preferredHeight() + ak::kGap
-                       + cardInton->preferredHeight() + ak::kGap
-                       + cardAdvanced->preferredHeight();
         const int c2Top = juce::jmax (0, bulgeBottom + 10 - pageArea.getY());
+        auto stack = [] (std::initializer_list<ak::Card*> cs)
+        {
+            int h = 0;
+            for (auto* c : cs) h += c->preferredHeight() + ak::kGap;
+            return juce::jmax (0, h - ak::kGap);
+        };
+        const int col1 = stack ({ cardPitch, cardInton, cardHigh, cardQuality });
         const int col2 = c2Top + cardFormant->preferredHeight();
-        const int col3 = cardAir->preferredHeight() + ak::kGap
-                       + cardQuality->preferredHeight();
-        const int topH   = juce::jmax (col1, juce::jmax (col2, col3));
-        const int botH   = juce::jmax (cardHigh->preferredHeight(),
-                                       juce::jmax (cardOutput->preferredHeight(), 190));
-        const int footerH = 22;
-        const int total  = topH + ak::kGap + botH + footerH + 8;
+        const int col3 = stack ({ cardAir, cardAdvanced, cardOutput });
 
-        mainPage.setSize (vw, juce::jmax (total, pageArea.getHeight()));
+        const int footerH = 22;
+        mainPage.setSize (vw, juce::jmax (juce::jmax (col1, juce::jmax (col2, col3)) + footerH + 10,
+                                          pageArea.getHeight()));
 
         auto r = mainPage.getLocalBounds();
-        auto bottom = r.removeFromBottom (footerH + 4);
-        footer.setBounds (bottom.withTrimmedTop (4));
+        footer.setBounds (r.removeFromBottom (footerH + 4).withTrimmedTop (4));
 
-        auto grid = r;
-        auto botRow = grid.removeFromBottom (botH);
-        grid.removeFromBottom (ak::kGap);
-
-        // three columns: 0.92fr / 1.32fr / 0.92fr (styles.css .workspace)
-        const int usable = grid.getWidth() - 2 * ak::kGap;
+        const int usable = r.getWidth() - 2 * ak::kGap;
         const int w1 = juce::jmax (250, (int) ((float) usable * 0.92f / 3.16f));
-        const int w3 = w1;
-        const int w2 = usable - w1 - w3;
+        const int w2 = usable - w1 * 2;
 
-        auto c1 = grid.removeFromLeft (w1);   grid.removeFromLeft (ak::kGap);
-        auto c2 = grid.removeFromLeft (w2);   grid.removeFromLeft (ak::kGap);
-        auto c3 = grid;
+        auto c1 = r.removeFromLeft (w1);   r.removeFromLeft (ak::kGap);
+        auto c2 = r.removeFromLeft (w2);   r.removeFromLeft (ak::kGap);
+        auto c3 = r;
 
-        cardPitch->setBounds (c1.removeFromTop (cardPitch->preferredHeight()));
-        c1.removeFromTop (ak::kGap);
-        cardInton->setBounds (c1.removeFromTop (cardInton->preferredHeight()));
-        c1.removeFromTop (ak::kGap);
-        cardAdvanced->setBounds (c1);                       // stretches to fill
+        auto place = [] (juce::Rectangle<int>& col, ak::Card* card)
+        {
+            card->setBounds (col.removeFromTop (card->preferredHeight()));
+            col.removeFromTop (ak::kGap);
+        };
+        place (c1, cardPitch);  place (c1, cardInton);
+        place (c1, cardHigh);   place (c1, cardQuality);
 
         c2.removeFromTop (c2Top);            // clear the character's bulge
-        cardFormant->setBounds (c2);
+        cardFormant->setBounds (c2.removeFromTop (cardFormant->preferredHeight()));
 
-        cardAir->setBounds (c3.removeFromTop (cardAir->preferredHeight()));
-        c3.removeFromTop (ak::kGap);
-        cardQuality->setBounds (c3);
-
-        // bottom row: [high range] [latency donut] [output]
-        const int donutW = juce::jlimit (150, 200, botRow.getWidth() / 6);
-        const int sideW  = (botRow.getWidth() - donutW - 2 * ak::kGap) / 2;
-        cardHigh->setBounds (botRow.removeFromLeft (sideW));
-        botRow.removeFromLeft (ak::kGap);
-        status.setBounds (botRow.removeFromLeft (donutW));
-        botRow.removeFromLeft (ak::kGap);
-        cardOutput->setBounds (botRow);
+        place (c3, cardAir);  place (c3, cardAdvanced);  place (c3, cardOutput);
     }
 
     // ---- misc ------------------------------------------------------------
@@ -5671,6 +5713,8 @@ private:
     juce::Rectangle<int> pageArea, bandArea;
     juce::Path bandShape;
     int bulgeBottom = 0;
+    juce::Point<float> heroC;
+    float heroOuter = 0.0f;
     static constexpr int kLeftTabs = 3;
     std::vector<juce::Component*> pages;
     int currentPage = 0;
@@ -5684,6 +5728,7 @@ private:
     ak::Card* cardPitch = nullptr; ak::Card* cardInton = nullptr; ak::Card* cardAdvanced = nullptr;
     ak::Card* cardFormant = nullptr; ak::Card* cardAir = nullptr; ak::Card* cardQuality = nullptr;
     ak::Card* cardHigh = nullptr;  ak::Card* cardOutput = nullptr;
+    ParamRow* rowPitch = nullptr; ParamRow* rowFormant = nullptr; ParamRow* rowAir = nullptr;
     LayoutBox aeiouRow;
     std::unique_ptr<ParamRow> aeiouCombo;
     juce::TextButton detailBtn;

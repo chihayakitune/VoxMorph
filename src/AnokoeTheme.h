@@ -42,7 +42,12 @@ namespace anokoe
     // v0.34.0: the body is one flat light grey — sections no longer draw
     // their own panel, so this is what you see behind every card
     const juce::Colour bodyFill  { 0xfff3f5fb };
-    const juce::Colour treeLine  { 0xffc9d3e8 };   // FORMANT group brackets
+    const juce::Colour treeLine  { 0xffc9d3e8 };   // group brackets + flow lines
+    // v0.35.0: section headings are tinted by their tone so the three signal
+    // chains (pitch / formant / air) read apart at a glance
+    const juce::Colour headBlue  { 0xff6f86bd };
+    const juce::Colour headPink  { 0xffdd7f9d };
+    const juce::Colour headGold  { 0xffcf9a3f };
 
     // ---- hero band (v0.32.0): the dark strip under the header that the
     // character circle sits in
