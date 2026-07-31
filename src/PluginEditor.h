@@ -5064,21 +5064,22 @@ public:
     {
         if (currentPage != 0 || cardPitch == nullptr || heroOuter <= 0.0f) return;
 
-        const float dEdge = (float) bandArea.getBottom() - heroC.y;
-        if (dEdge >= heroOuter) return;
-        const float notchDx = std::sqrt (heroOuter * heroOuter - dEdge * dEdge);
-
         // a point on the collar; JUCE angles, 0 = 12 o'clock, clockwise
-        auto onCollar = [this] (float a)
+        auto onCollar = [this] (float deg)
         {
+            const float a = juce::degreesToRadians (deg);
             return heroC + juce::Point<float> (std::sin (a), -std::cos (a)) * heroOuter;
         };
 
+        // Measured off the annotated reference: the routes leave the collar
+        // WELL BELOW the strip's edge — around 7:30 for the two left-hand
+        // chains and its mirror for AIR — not at the fillet notch on the edge
+        // itself, which is where v0.35.2 attached them (about 50 px too high).
         struct Route { juce::Point<float> from; ak::Card* card; ParamRow* row; };
         const Route routes[3] = {
-            { { heroC.x - notchDx, (float) bandArea.getBottom() }, cardPitch,   rowPitch   },
-            { onCollar (3.49f),                                    cardFormant, rowFormant },
-            { { heroC.x + notchDx, (float) bandArea.getBottom() }, cardAir,     rowAir     },
+            { onCollar (218.0f), cardPitch,   rowPitch   },
+            { onCollar (208.0f), cardFormant, rowFormant },
+            { onCollar (142.0f), cardAir,     rowAir     },
         };
 
         juce::Graphics::ScopedSaveState ss (g);
