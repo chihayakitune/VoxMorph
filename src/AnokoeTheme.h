@@ -78,6 +78,11 @@ namespace anokoe
     constexpr int   kKnobH       = 106;   // knob art box
     constexpr int   kKnobRowH    = 116;
     constexpr int   kTreeIndent  = 14;    // FORMANT child rows
+    constexpr int   kTreeRail    = 4;     // x of a row bracket's vertical,
+                                          // inside the row. The flow lines'
+                                          // drop shares this column, so both
+                                          // kinds of connector line up.
+    constexpr int   kTitleIconW  = 32;    // the mark's slot in a heading
     constexpr int   kTrackH      = 22;    // slider row art height (heart thumb)
     constexpr int   kTrackBarH   = 19;    // the bar itself — v0.36.1 draws it
                                           // a touch thinner than the thumb

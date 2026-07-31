@@ -1214,7 +1214,7 @@ public:
         }
 
         if (tree == Tree::none) return;
-        const float x  = 4.0f;
+        const float x  = (float) ak::kTreeRail;
         const float cy = (float) getHeight() * 0.5f;
         g.setColour (ak::treeLine);
         g.fillRect (x, 0.0f, 1.0f, tree == Tree::last ? cy : (float) getHeight());
@@ -5112,14 +5112,20 @@ public:
             const auto knobC   = getLocalPoint (rt.row, kb.getCentre()).toFloat();
             const float knobR  = (float) juce::jmin (kb.getWidth(), kb.getHeight()) * 0.5f;
 
-            // the run reaches the heading on whichever side it comes from;
-            // the drop always hangs off the heading's left edge, which is the
-            // same column the label starts in
-            const bool  fromRight = collar.x > headBox.getCentreX();
+            // The heading node is the mark AND its text. Coming from the
+            // right the run meets the text's end, but coming from the LEFT it
+            // has to stop at the MARK — aiming at the first letter would run
+            // the line straight through the glyph. Only the AIR route
+            // approaches from that side, which is why this shows up there.
+            const auto headNode = getLocalArea (rt.card, rt.card->titleNodeBounds()).toFloat();
+            const bool  fromRight = collar.x > headNode.getCentreX();
             const juce::Point<float> headIn (fromRight ? headBox.getRight() + kGapN
-                                                       : headBox.getX() - kGapN,
+                                                       : headNode.getX() - kGapN,
                                              headBox.getCentreY());
-            const float colX = juce::jmin (headBox.getX(), lblBox.getX());
+            // The drop runs down the SAME column as the row brackets, so the
+            // decorative connector and the tree lines read as one rail.
+            const float colX = (float) getLocalPoint (
+                                   rt.card, juce::Point<int> (rt.card->treeRailX(), 0)).x;
 
             // v0.36.1: the marker sits ON the heading's line, so the run
             // between the two is a true horizontal straight (step 2 below

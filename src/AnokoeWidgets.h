@@ -123,7 +123,10 @@ public:
                          mid.withWidth (span * ratio),
                          juce::RectanglePlacement::stretchToFit, false);
 
-        const auto heart = toned ("ui_slider_knob_heart", tone);
+        // One heart for every slider (v0.36.2). The tone still shows in the
+        // rail's fill; the thumb is a single shared colour, so the pink and
+        // yellow variants of this art are no longer drawn.
+        const auto heart = image ("ui_slider_knob_heart_png");
         if (heart.isValid())
         {
             const float hs = (float) juce::jmin (kTrackH, h)
@@ -341,15 +344,33 @@ public:
         repaint();
     }
 
+    // the heading row's content strip: the mark's slot, then the text
+    juce::Rectangle<int> titleRowBounds() const
+    {
+        return getLocalBounds().withHeight (kTitleH).reduced (kCardPadX, 0).withTrimmedTop (4);
+    }
+
     // where the heading text starts / ends, for the flow lines to hook onto
     juce::Rectangle<int> titleTextBounds() const
     {
-        auto t = getLocalBounds().withHeight (kTitleH).reduced (kCardPadX, 0).withTrimmedTop (4);
-        if (icon.isValid()) t.removeFromLeft (32);
+        auto t = titleRowBounds();
+        if (icon.isValid()) t.removeFromLeft (kTitleIconW);
         const int w = 10 + (int) std::ceil (juce::GlyphArrangement::getStringWidth (
                                                 font (15.0f, true), title));
         return t.withWidth (juce::jmin (w, t.getWidth()));
     }
+
+    // the whole heading node — mark AND text. A flow line arriving from the
+    // LEFT has to stop at the mark's edge; aiming at the text box instead
+    // would run the line straight through the glyph.
+    juce::Rectangle<int> titleNodeBounds() const
+    {
+        auto b = titleTextBounds();
+        return icon.isValid() ? b.withLeft (titleRowBounds().getX()) : b;
+    }
+
+    // x of the row brackets' vertical rail, in card coordinates
+    int treeRailX() const { return kCardPadX + kTreeRail; }
 
     // h < 0 means "share the leftover height with the other flexible rows"
     void add (juce::Component& c, int h)
@@ -377,7 +398,7 @@ public:
         {
             drawFitted (g, icon, juce::Rectangle<float> (26.0f, 26.0f)
                                      .withCentre ({ (float) t.getX() + 13.0f, (float) t.getCentreY() }));
-            t.removeFromLeft (32);
+            t.removeFromLeft (kTitleIconW);
         }
         g.setColour (tint);
         g.setFont (font (15.0f, true));
