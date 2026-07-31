@@ -5046,90 +5046,106 @@ public:
         paintFlowLines (g);
     }
 
-    // ---- signal-chain flow lines (v0.35.0) --------------------------------
-    // Three curves leave the character's collar and run to the three knobs
-    // that make up the conversion chain, in processing order:
-    //   notch -> marker -> section heading -> row label -> knob
+    // ---- signal-chain flow lines (v0.36.0) --------------------------------
+    // Three routes leave the character's collar and run to the three knobs of
+    // the conversion chain, in processing order:
+    //
+    //     notch --1--> marker --2--> heading --3--> label --4--> knob
+    //
+    // Each leg is its OWN cubic Bezier with hand-placed control points and a
+    // small trim at both ends, so the route reads as a series of connected
+    // hops rather than one snaking line. (v0.35.0 ran a single Catmull-Rom
+    // through all five anchors and it wandered badly: with the anchors that
+    // far apart the spline has to bulge to stay smooth, which threw the curve
+    // out past the cards and against the window edge.)
+    //
     // Purely decorative; nothing here reads or writes a parameter.
     void paintFlowLines (juce::Graphics& g)
     {
         if (currentPage != 0 || cardPitch == nullptr || heroOuter <= 0.0f) return;
 
-        // the notches are where the collar meets the strip's bottom edge
         const float dEdge = (float) bandArea.getBottom() - heroC.y;
         if (dEdge >= heroOuter) return;
         const float notchDx = std::sqrt (heroOuter * heroOuter - dEdge * dEdge);
+
+        // a point on the collar; JUCE angles, 0 = 12 o'clock, clockwise
+        auto onCollar = [this] (float a)
+        {
+            return heroC + juce::Point<float> (std::sin (a), -std::cos (a)) * heroOuter;
+        };
+
+        struct Route { juce::Point<float> from; ak::Card* card; ParamRow* row; };
+        const Route routes[3] = {
+            { { heroC.x - notchDx, (float) bandArea.getBottom() }, cardPitch,   rowPitch   },
+            { onCollar (3.49f),                                    cardFormant, rowFormant },
+            { { heroC.x + notchDx, (float) bandArea.getBottom() }, cardAir,     rowAir     },
+        };
 
         juce::Graphics::ScopedSaveState ss (g);
         g.reduceClipRegion (juce::Rectangle<int> (0, bandArea.getBottom(),
                                                   getWidth(), getHeight()));
 
-        struct Line { juce::Point<float> from; ak::Card* card; ParamRow* row; bool fromLeft; };
-        const Line lines[3] = {
-            { { heroC.x - notchDx, (float) bandArea.getBottom() }, cardPitch,   rowPitch,   false },
-            { { heroC.x,           heroC.y + heroOuter          }, cardFormant, rowFormant, false },
-            { { heroC.x + notchDx, (float) bandArea.getBottom() }, cardAir,     rowAir,     true  },
-        };
-
-        for (const auto& ln : lines)
+        for (const auto& rt : routes)
         {
-            if (ln.card == nullptr || ln.row == nullptr) continue;
+            if (rt.card == nullptr || rt.row == nullptr) continue;
 
-            const auto title = ln.card->titleTextBounds();
-            const auto head  = getLocalPoint (ln.card,
-                                   juce::Point<int> (ln.fromLeft ? title.getX() - 10
-                                                                 : title.getRight() + 8,
-                                                     title.getCentreY())).toFloat();
-            const auto lbl   = getLocalPoint (ln.row,
-                                   juce::Point<int> (ln.row->labelBounds().getX() - 8,
-                                                     ln.row->labelBounds().getCentreY())).toFloat();
-            const auto kb    = ln.row->knobBounds();
-            const auto knobP = getLocalPoint (ln.row,
-                                   juce::Point<int> (kb.getCentreX() - (int) (kb.getWidth() * 0.40f),
-                                                     kb.getCentreY() + (int) (kb.getHeight() * 0.22f)))
-                                   .toFloat();
-            // swings out past the card's left edge between heading and label,
-            // clamped so the curve never leaves the window
-            auto edge = getLocalPoint (ln.card, juce::Point<int> (-16, 0)).toFloat()
-                            .withY ((head.y + lbl.y) * 0.5f);
-            edge.x = juce::jmax (edge.x, 22.0f);
-            // the marker sits past the halfway point and a touch below the
-            // strip, so the glyph is not clipped by the dark area
-            const juce::Point<float> mark = ln.from + (head - ln.from) * 0.52f
-                                          + juce::Point<float> (0.0f, 14.0f);
+            const auto title  = rt.card->titleTextBounds();
+            const auto corner = getLocalPoint (rt.card,
+                                    juce::Point<int> (-10, title.getCentreY())).toFloat();
+            const auto lblB   = rt.row->labelBounds();
+            const auto turn   = getLocalPoint (rt.row,
+                                    juce::Point<int> (0, lblB.getCentreY())).toFloat()
+                                        .withX (corner.x);
+            const auto kb     = rt.row->knobBounds();
+            const auto kc     = getLocalPoint (rt.row, kb.getCentre()).toFloat();
+            const float kr    = (float) juce::jmin (kb.getWidth(), kb.getHeight()) * 0.5f;
+            const auto knobP  = kc + juce::Point<float> (-0.68f, 0.68f) * kr;   // 7:30 on the rim
 
-            const juce::Point<float> pts[6] = { ln.from, mark, head, edge, lbl, knobP };
+            // the marker sits on the horizontal run, at heading height
+            const juce::Point<float> mark (corner.x + (rt.from.x - corner.x) * 0.42f, corner.y);
+            const float side = rt.from.x > corner.x ? 1.0f : -1.0f;   // travel direction
+
             g.setColour (ak::treeLine);
-            g.strokePath (catmullRom (pts, 6),
-                          juce::PathStrokeType (1.4f, juce::PathStrokeType::curved,
-                                                      juce::PathStrokeType::rounded));
+            // 1  collar -> marker: leaves the circle diagonally, flattens out
+            bezierLeg (g, rt.from, rt.from + juce::Point<float> (-side * 54.0f, 26.0f),
+                          mark + juce::Point<float> (side * 74.0f, 0.0f), mark, 7.0f, 16.0f);
+            // 2  marker -> heading corner: the straight horizontal run
+            bezierLeg (g, mark, mark - juce::Point<float> (side * 40.0f, 0.0f),
+                          corner + juce::Point<float> (side * 40.0f, 0.0f), corner, 16.0f, 5.0f);
+            // 3  heading -> label: straight down the card's outer margin
+            bezierLeg (g, corner, corner + juce::Point<float> (0.0f, 22.0f),
+                          turn - juce::Point<float> (0.0f, 22.0f), turn, 6.0f, 6.0f);
+            // 4  label -> knob: away horizontally, then up onto the rim
+            bezierLeg (g, turn,
+                          turn + juce::Point<float> (juce::jmax (60.0f, (knobP.x - turn.x) * 0.55f), 0.0f),
+                          knobP + juce::Point<float> (-46.0f, 40.0f), knobP, 6.0f, 4.0f);
 
-            // the ADVANCED glyph marks the step, breaking the line
+            // the ADVANCED glyph marks the step and breaks the run
             const auto sym = ak::tintedImage ("ui_mark_M_Advanced_png", ak::treeLine);
             const juce::Rectangle<float> box (22.0f, 22.0f);
             g.setColour (ak::bodyFill);
-            g.fillEllipse (box.expanded (3.0f).withCentre (mark));
+            g.fillEllipse (box.expanded (4.0f).withCentre (mark));
             ak::drawFitted (g, sym, box.withCentre (mark));
         }
     }
 
-    // smooth curve through the given points (Catmull-Rom -> cubic Bezier)
-    static juce::Path catmullRom (const juce::Point<float>* p, int n)
+    // one leg: a cubic Bezier, pulled back from both ends so the route breaks
+    // cleanly at each anchor instead of touching the text it points at
+    static void bezierLeg (juce::Graphics& g, juce::Point<float> p0, juce::Point<float> c1,
+                           juce::Point<float> c2, juce::Point<float> p1,
+                           float trimStart, float trimEnd)
     {
-        juce::Path path;
-        if (n < 2) return path;
-        path.startNewSubPath (p[0]);
-        for (int i = 0; i < n - 1; ++i)
+        auto pull = [] (juce::Point<float> from, juce::Point<float> toward, float d)
         {
-            const auto p0 = p[juce::jmax (0, i - 1)];
-            const auto p1 = p[i], p2 = p[i + 1];
-            const auto p3 = p[juce::jmin (n - 1, i + 2)];
-            // 1/8 rather than the textbook 1/6: gentler control arms, so the
-            // curve does not overshoot past the cards it runs alongside
-            path.cubicTo (p1 + (p2 - p0) * 0.125f,
-                          p2 - (p3 - p1) * 0.125f, p2);
-        }
-        return path;
+            const auto v = toward - from;
+            const float len = v.getDistanceFromOrigin();
+            return len > d ? from + v * (d / len) : from;
+        };
+        juce::Path path;
+        path.startNewSubPath (pull (p0, c1, trimStart));
+        path.cubicTo (c1, c2, pull (p1, c2, trimEnd));
+        g.strokePath (path, juce::PathStrokeType (1.4f, juce::PathStrokeType::curved,
+                                                        juce::PathStrokeType::rounded));
     }
 
     void resized() override
