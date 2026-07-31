@@ -3216,13 +3216,41 @@ public:
         if (isVisible()) refreshList (currentName());
     }
 
+    // v0.33.0: dark styling for the hero band, and symbol buttons sized like
+    // the body's own dropdowns instead of wide "Save" / "Delete" text.
+    void setDarkStyle()
+    {
+        box.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff2f3550));
+        box.setColour (juce::ComboBox::textColourId,       ak::bandInk);
+        box.setColour (juce::ComboBox::outlineColourId,    juce::Colour (0x40ffffff));
+        box.setColour (juce::ComboBox::arrowColourId,      ak::bandInk);
+        box.setTextWhenNothingSelected (juce::String::fromUTF8 ("Preset"));
+        saveBtn  .setFramed (false);
+        deleteBtn.setFramed (false);
+        saveBtn  .setTint (ak::bandInk);
+        deleteBtn.setTint (ak::bandInk);
+        dark = true;
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        if (! dark) return;
+        auto r = getLocalBounds().toFloat();
+        auto btns = r.removeFromRight (66.0f).reduced (0.0f, 3.0f);
+        g.setColour (juce::Colour (0x26ffffff));
+        g.fillRoundedRectangle (btns, 8.0f);
+        g.setColour (juce::Colour (0x33ffffff));
+        g.drawRoundedRectangle (btns, 8.0f, 1.0f);
+    }
+
     void resized() override
     {
-        auto r = getLocalBounds().reduced (0, 3);
-        deleteBtn.setBounds (r.removeFromRight (74).reduced (2, 0));
-        saveBtn  .setBounds (r.removeFromRight (74).reduced (2, 0));
-        r.removeFromRight (4);
-        box.setBounds (r);
+        auto r = getLocalBounds().reduced (0, dark ? 0 : 3);
+        deleteBtn.setBounds (r.removeFromRight (32).reduced (2, 4));
+        saveBtn  .setBounds (r.removeFromRight (32).reduced (2, 4));
+        r.removeFromRight (dark ? 6 : 4);
+        box.setBounds (r.reduced (0, dark ? 3 : 0));
     }
 
 private:
@@ -3373,10 +3401,11 @@ private:
     std::function<void (const juce::String&)> status;
     juce::Array<juce::File> files;
     RescanComboBox   box;
-    juce::TextButton saveBtn { "Save" }, deleteBtn { "Delete" };
+    ak::IconButton saveBtn   { "save",   "ui_mark_S_Save_png",   17 };
+    ak::IconButton deleteBtn { "delete", "ui_mark_S_Delete_png", 17 };
     std::unique_ptr<juce::AlertWindow> nameWin;
     juce::LookAndFeel_V4 alertLnf { juce::LookAndFeel_V4::getLightColourScheme() };
-    bool updating = false;
+    bool updating = false, dark = false;
 };
 
 // ASMR tab: pseudo-3D positioning. A sonar-style circular pad with a
@@ -4208,25 +4237,6 @@ public:
         msg.setJustificationType (juce::Justification::centredRight);
         addAndMakeVisible (msg);
 
-        undoBtn.setTooltip (vmTip (
-            "Undo the last sound-changing operation: knob edits, a preset load, "
-            "'Reset All' or a Matching apply (each counts as one step). "
-            "Shortcut: Cmd+Z (Mac) / Ctrl+Z (Windows).",
-            "直前の「音が変わる操作」を取り消します。つまみ操作・プリセット読込・"
-            "Reset All・MatchingのMATCHが対象で、一括変更は1回のUndoで戻ります。"
-            "ショートカット: Cmd+Z (Mac) / Ctrl+Z (Windows)。"));
-        redoBtn.setTooltip (vmTip (
-            "Redo the operation you just undid. Shortcut: Shift+Cmd+Z (Mac) / "
-            "Shift+Ctrl+Z or Ctrl+Y (Windows).",
-            "取り消した操作をやり直します。ショートカット: Shift+Cmd+Z (Mac) / "
-            "Shift+Ctrl+ZまたはCtrl+Y (Windows)。"));
-        undoBtn.onClick = [this] { proc.history.undo(); };
-        redoBtn.onClick = [this] { proc.history.redo(); };
-        undoBtn.setEnabled (false);
-        redoBtn.setEnabled (false);
-        addAndMakeVisible (undoBtn);
-        addAndMakeVisible (redoBtn);
-
         if (standalone)
         {
             monBtn.setTooltip (vmTip (
@@ -4279,58 +4289,37 @@ public:
 
     void resized() override
     {
-        auto r = getLocalBounds().reduced (18, 10);
-        auto right = r.removeFromRight (juce::jmin (r.getWidth() - 200,
-                                                    standalone ? 520 : 190));
-
-        auto row = right.withSizeKeepingCentre (right.getWidth(), 36);
+        auto r = getLocalBounds().reduced (20, 8);
+        auto right = r.removeFromRight (juce::jlimit (60, standalone ? 400 : 60,
+                                                      r.getWidth() - 220));
+        auto row = right.withSizeKeepingCentre (right.getWidth(), 34);
         if (standalone)
         {
-            gearBtn.setBounds (row.removeFromRight (36));
+            gearBtn.setBounds (row.removeFromRight (34));
             row.removeFromRight (9);
-            plugBtn.setBounds (row.removeFromRight (juce::jmin (125, row.getWidth() / 3)));
-            row.removeFromRight (9);
-            muteBtn.setBounds (row.removeFromRight (juce::jmin (96, row.getWidth() / 3)));
-            row.removeFromRight (5);
-            monBtn.setBounds (row.removeFromRight (juce::jmin (112, row.getWidth() / 2)));
-            row.removeFromRight (12);
+            plugBtn.setBounds (row.removeFromRight (juce::jmin (118, row.getWidth() / 3)));
+            row.removeFromRight (10);
+            muteBtn.setBounds (row.removeFromRight (juce::jmin (92, row.getWidth() / 2)));
+            row.removeFromRight (4);
+            monBtn.setBounds (row.removeFromRight (juce::jmin (108, row.getWidth())));
         }
-        redoBtn.setBounds (row.removeFromRight (juce::jmin (58, row.getWidth() / 2)).reduced (0, 3));
-        row.removeFromRight (5);
-        undoBtn.setBounds (row.removeFromRight (juce::jmin (58, row.getWidth())).reduced (0, 3));
 
-        // branding: app icon, wordmark, subtitle (drawn in paint(); the label
-        // only needs its slot)
-        const int iconW = 58, logoW = juce::jlimit (110, 190, r.getWidth() / 3);
+        // branding: wordmark then subtitle (the app icon was removed in
+        // v0.33.0 — the character already owns the centre of the screen)
+        const int logoW = juce::jlimit (110, 178, r.getWidth() / 4);
         auto brand = r;
-        brand.removeFromLeft (iconW + 15 + logoW + 15);
+        brand.removeFromLeft (logoW + 22);
         subtitle.setBounds (brand.removeFromLeft (juce::jmax (0, brand.getWidth() - 4)));
         msg.setBounds (subtitle.getBounds());
         subtitle.setVisible (msg.getText().isEmpty());
     }
 
+    // The white bar itself is painted by the editor, BEFORE the band, so the
+    // band's circular bulge can cut into it. This only draws the branding.
     void paint (juce::Graphics& g) override
     {
-        g.setColour (ak::headerFill);
-        g.fillRect (getLocalBounds());
-        g.setColour (juce::Colour (0xffe8ebf5));
-        g.drawLine (0.0f, (float) getHeight() - 0.5f, (float) getWidth(),
-                    (float) getHeight() - 0.5f, 1.0f);
-
-        auto r = getLocalBounds().reduced (18, 10);
-        const int iconW = 58;
-        auto iconArea = r.removeFromLeft (iconW).withSizeKeepingCentre (iconW, iconW);
-        if (auto ic = ak::image ("icon_png"); ic.isValid())
-        {
-            juce::Graphics::ScopedSaveState ss (g);
-            juce::Path clip;
-            clip.addRoundedRectangle (iconArea.toFloat(), 11.0f);
-            g.reduceClipRegion (clip);
-            g.drawImage (ic, iconArea.toFloat(), juce::RectanglePlacement::fillDestination, false);
-        }
-        r.removeFromLeft (15);
-
-        const int logoW = juce::jlimit (110, 190, r.getWidth() / 3);
+        auto r = getLocalBounds().reduced (20, 8);
+        const int logoW = juce::jlimit (110, 178, r.getWidth() / 4);
         auto logoArea = r.removeFromLeft (logoW);
         if (auto lg = ak::image ("ui_logo_ANOKOE_rendered_png"); lg.isValid())
         {
@@ -4401,9 +4390,6 @@ private:
 
     void timerCallback() override
     {
-        undoBtn.setEnabled (proc.history.canUndo());
-        redoBtn.setEnabled (proc.history.canRedo());
-
         if (standalone)
         {
             // if the output device changed behind our back, monitoring is no
@@ -4429,7 +4415,7 @@ private:
     juce::Label subtitle, msg;
     ak::StatusButton monBtn  { "Monitor", "ui_mark_M_Monitor_png", false };
     ak::StatusButton muteBtn { "Mute",    "ui_mark_M_Mute_png",    true  };
-    juce::TextButton plugBtn { "Plugin" }, undoBtn { "Undo" }, redoBtn { "Redo" };
+    juce::TextButton plugBtn { "Plugin" };
     ak::IconButton   gearBtn { "options", "ui_mark_S_Option_png", 20 };
     float msgSec = 0.0f;
     std::unique_ptr<FxChainWindow>       fxWin;
@@ -4822,51 +4808,15 @@ private:
         auto b = getLocalBounds().toFloat();
         const float side = juce::jmin (b.getWidth(), b.getHeight());
         const auto  c    = b.getCentre();
-        const float rOut = side * 0.5f - 2.0f;
+        const float portR = side * 0.5f - 2.0f;
+        const auto  port  = juce::Rectangle<float> (portR * 2.0f, portR * 2.0f).withCentre (c);
 
-        // outer halo: breathes with the output level
-        if (halo > 0.01f)
-        {
-            for (int i = 3; i >= 1; --i)
-            {
-                const float rr = rOut + (float) i * 3.0f + halo * 9.0f;
-                g.setColour (juce::Colour (0xff8fb6ff).withAlpha (0.05f + 0.10f * halo / (float) i));
-                g.drawEllipse (juce::Rectangle<float> (rr * 2.0f, rr * 2.0f).withCentre (c), 2.4f);
-            }
-        }
-
-        // ring track
-        const float ringR = rOut - 7.0f;
-        g.setColour (juce::Colour (0x33ffffff));
-        g.drawEllipse (juce::Rectangle<float> (ringR * 2.0f, ringR * 2.0f).withCentre (c), 7.0f);
-
-        // AEIOU balance arcs
+        // v0.33.0: the coloured AEIOU ring is gone — the dark collar around
+        // the portrait is drawn by the band itself, and the only live
+        // decoration left is the rim, which brightens with the output level.
         float sum = 0.0f;
         for (int i = 0; i < kV; ++i) sum += juce::jmax (0.0f, sm[i]);
-        if (active && sum > 1.0e-6f)
-        {
-            const float twoPi = juce::MathConstants<float>::twoPi;
-            const float gap   = 0.035f;
-            float a0 = 0.0f;
-            for (int i = 0; i < kV; ++i)
-            {
-                const float share = juce::jmax (0.0f, sm[i]) / sum;
-                const float a1 = a0 + share * twoPi;
-                if (a1 - a0 > gap * 2.0f)
-                {
-                    juce::Path arc;
-                    arc.addCentredArc (c.x, c.y, ringR, ringR, 0.0f, a0 + gap, a1 - gap, true);
-                    g.setColour (vowelColour (i).withMultipliedAlpha (0.35f + 0.65f * fade));
-                    g.strokePath (arc, juce::PathStrokeType (7.0f, juce::PathStrokeType::curved,
-                                                                   juce::PathStrokeType::rounded));
-                }
-                a0 = a1;
-            }
-        }
 
-        // the portrait, clipped to the inner circle
-        const float portR = ringR - 7.0f;
-        const auto  port  = juce::Rectangle<float> (portR * 2.0f, portR * 2.0f).withCentre (c);
         {
             juce::Graphics::ScopedSaveState ss (g);
             juce::Path clip;
@@ -4874,6 +4824,7 @@ private:
             g.reduceClipRegion (clip);
             g.setColour (juce::Colour (0xfff2f6ff));
             g.fillEllipse (port);
+
             // the art is a rounded-square app icon, so oversize it: the
             // square edges land outside the circular clip
             if (auto ic = ak::image ("icon_png"); ic.isValid())
@@ -4918,9 +4869,10 @@ private:
             }
         }
 
-        // crisp rim
-        g.setColour (juce::Colour (0x66ffffff));
-        g.drawEllipse (port, 1.5f);
+        // rim: a quiet ring that brightens with the output level, so the
+        // circle still reacts to your voice without the busy coloured donut
+        g.setColour (juce::Colours::white.withAlpha (0.30f + 0.45f * halo));
+        g.drawEllipse (port.reduced (0.75f), 1.5f);
     }
 
     VoxMorphProcessor& proc;
@@ -5033,7 +4985,7 @@ public:
         // deliberately large. Open at the design size but never bigger than
         // the screen allows (a 1440x900 laptop would otherwise get a window
         // it cannot see).
-        int w = 1400, h = 1030;
+        int w = 1400, h = 1050;
         if (auto* d = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
         {
             w = juce::jlimit (kMinW, w, d->userArea.getWidth()  - 40);
@@ -5084,10 +5036,15 @@ public:
         return false;
     }
 
+    // Order matters: the white header bar is painted HERE, before the band,
+    // so the band's circular bulge cuts a notch into it. HeaderBar itself is
+    // transparent and only draws its wordmark.
     void paint (juce::Graphics& g) override
     {
         ak::paintPage (g, getLocalBounds());
-        ak::paintBand (g, bandArea);
+        g.setColour (juce::Colours::white);
+        g.fillRect (getLocalBounds().withHeight (ak::kHeaderH));
+        ak::paintBand (g, bandShape, bandArea);
     }
 
     void resized() override
@@ -5097,35 +5054,50 @@ public:
 
         bandArea = r.removeFromTop (ak::kBandH);
 
-        // page tabs hang off the band's bottom edge, on the left
+        // the character straddles the band's lower edge; the band bulges past
+        // the portrait by kHeroRim, which is the dark collar around her
+        const juce::Point<float> heroC ((float) bandArea.getCentreX(),
+                                        (float) bandArea.getBottom() - 74.0f);
+        const float heroOuter = (float) (ak::kHeroR + ak::kHeroRim);
+        bandShape = ak::bandPath (bandArea, heroC, heroOuter);
+        hero.setBounds (juce::Rectangle<int> (ak::kHeroR * 2, ak::kHeroR * 2)
+                            .withCentre (heroC.roundToInt()));
+
+        // page tabs hang off the band's bottom edge: Main / Matching / ASMR on
+        // the left, Visualizer / Presets on the right, clear of the character
         {
             auto strip = bandArea.withTop (bandArea.getBottom() - ak::kTabH);
-            strip.removeFromLeft (18);
-            const int n  = juce::jmax (1, navButtons.size());
-            const int tw = juce::jlimit (72, 116, (strip.getWidth() / 2 - 6 * n) / n);
-            for (auto* b : navButtons)
+            const int tw = juce::jlimit (74, 112, strip.getWidth() / 12);
+            auto left  = strip.withTrimmedLeft (18);
+            auto right = strip.withTrimmedRight (18);
+            for (int i = 0; i < navButtons.size(); ++i)
             {
-                b->setBounds (strip.removeFromLeft (tw));
-                strip.removeFromLeft (6);
+                if (i < kLeftTabs)
+                {
+                    navButtons[i]->setBounds (left.removeFromLeft (tw));
+                    left.removeFromLeft (6);
+                }
+                else
+                {
+                    navButtons[navButtons.size() - 1 - (i - kLeftTabs)]
+                        ->setBounds (right.removeFromRight (tw));
+                    right.removeFromRight (6);
+                }
             }
         }
 
-        // preset bar on the right of the band, lined up with the tabs
+        // preset row: top-right of the band, sized like a body dropdown
         if (presetBar != nullptr)
         {
-            auto slot = bandArea.withTop (bandArea.getBottom() - ak::kTabH)
-                                .withTrimmedRight (18);
-            const int pw = juce::jlimit (220, 330, slot.getWidth() / 3);
-            presetBar->setBounds (slot.removeFromRight (pw).withSizeKeepingCentre (pw, 46));
+            auto slot = bandArea.withTrimmedRight (20).withTrimmedTop (16).withHeight (30);
+            const int pw = juce::jlimit (200, 268, slot.getWidth() / 4);
+            presetBar->setBounds (slot.removeFromRight (pw));
         }
 
-        // the character circle straddles the band's lower edge
-        const int hd = ak::kHeroR * 2;
-        hero.setBounds (juce::Rectangle<int> (hd, hd)
-                            .withCentre ({ bandArea.getCentreX(),
-                                           bandArea.getBottom() - ak::kHeroR + 16 }));
-
-        pageArea = r.reduced (12, 8).withTrimmedTop (10);
+        // the band's bulge reaches below the strip, so the content starts
+        // clear of it
+        const int bulgeBottom = bandArea.getBottom() - 74 + ak::kHeroR + ak::kHeroRim;
+        pageArea = r.reduced (12, 8).withTop (bulgeBottom + 8);
         for (auto* pg : pages) pg->setBounds (pageArea);
         layoutMainPage();
     }
@@ -5365,6 +5337,7 @@ private:
         presetBar = std::make_unique<PresetBar> (proc,
                         [this] (const juce::String& s) { flashFooter (s); });
         addAndMakeVisible (*presetBar);      // lives in the band, not the grid
+        presetBar->setDarkStyle();
 
         cardAir = &newCard ("AIR", "ui_mark_M_Air_png");
         knob (*cardAir, "air", "Air",
@@ -5666,6 +5639,8 @@ private:
     juce::OwnedArray<ak::TabButton> navButtons;
     HeroCircle hero { proc };
     juce::Rectangle<int> pageArea, bandArea;
+    juce::Path bandShape;
+    static constexpr int kLeftTabs = 3;
     std::vector<juce::Component*> pages;
     int currentPage = 0;
 

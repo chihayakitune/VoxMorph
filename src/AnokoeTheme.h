@@ -69,10 +69,15 @@ namespace anokoe
     constexpr int   kGap         = 10;
     constexpr int   kSidebarW    = 132;
     constexpr int   kHeaderH     = 62;    // v0.32.0: slimmer, the band carries the art
-    constexpr int   kBandH       = 150;   // dark hero band
-    constexpr int   kTabH        = 60;    // page tabs along the band's bottom edge
-    constexpr int   kHeroR       = 104;   // character circle radius (overlaps
-                                          // both the header and the content edge)
+    constexpr int   kBandH       = 158;   // dark hero band
+    constexpr int   kTabH        = 58;    // page tabs along the band's bottom edge
+    constexpr int   kHeroR       = 100;   // character portrait radius
+    constexpr int   kHeroRim     = 24;    // how far the band bulges past the
+                                          // portrait, i.e. the dark collar.
+                                          // Must stay wider than the inner
+                                          // shadow below, or the collar gets
+                                          // shadowed from both sides and goes
+                                          // black.
 
     // knob sweep: 7:30 clockwise through 270 deg to 4:30 (script.js uses a
     // 135 deg canvas start and a 2.7 deg/% pointer rotation, same thing)
@@ -101,6 +106,39 @@ namespace anokoe
             img = juce::ImageFileFormat::loadFrom (data, (size_t) size);
         cache.map.set (key, img);
         return img;
+    }
+
+    // A recoloured copy of an icon, keeping its alpha. The mark art is dark
+    // navy, which vanishes on the dark band — this makes a light version.
+    // Cached per (name, colour) because it allocates an image.
+    inline juce::Image tintedImage (const char* binaryName, juce::Colour c)
+    {
+        struct Cache
+        {
+            juce::HashMap<juce::String, juce::Image> map;
+            juce::CriticalSection lock;
+        };
+        static Cache cache;
+        const juce::String key = juce::String (binaryName) + "#" + c.toString();
+        const juce::ScopedLock sl (cache.lock);
+        if (cache.map.contains (key))
+            return cache.map[key];
+
+        auto src = image (binaryName);
+        juce::Image out;
+        if (src.isValid())
+        {
+            out = src.convertedToFormat (juce::Image::ARGB);
+            juce::Image::BitmapData bd (out, juce::Image::BitmapData::readWrite);
+            for (int y = 0; y < out.getHeight(); ++y)
+                for (int x = 0; x < out.getWidth(); ++x)
+                {
+                    const auto px = bd.getPixelColour (x, y);
+                    bd.setPixelColour (x, y, c.withAlpha (px.getFloatAlpha()));
+                }
+        }
+        cache.map.set (key, out);
+        return out;
     }
 
     // Tones select which coloured variant of the knob / slider art is used.
@@ -139,35 +177,79 @@ namespace anokoe
         g.setOpacity (1.0f);
     }
 
-    // The dark hero band: vertical gradient, a faint diamond lattice and a
-    // scattering of stars. Drawn procedurally so it costs no extra art and
-    // scales to any width.
-    inline void paintBand (juce::Graphics& g, juce::Rectangle<int> b)
+    // The dark hero band's outline: the strip, unioned with a circle around
+    // the character so the dark area bulges up into the header and down into
+    // the content exactly along the portrait's edge. Both sub-paths wind the
+    // same way, so the default non-zero fill rule unions them.
+    inline juce::Path bandPath (juce::Rectangle<int> band, juce::Point<float> heroCentre,
+                                float heroOuterR)
     {
-        g.setGradientFill (juce::ColourGradient (bandTop, (float) b.getCentreX(), (float) b.getY(),
-                                                 bandBot, (float) b.getCentreX(), (float) b.getBottom(),
-                                                 false));
-        g.fillRect (b);
+        juce::Path p;
+        p.addRectangle (band.toFloat());
+        p.addEllipse (juce::Rectangle<float> (heroOuterR * 2.0f, heroOuterR * 2.0f)
+                          .withCentre (heroCentre));
+        return p;
+    }
 
-        // diamond lattice
-        g.setColour (bandGrid);
-        const float step = 46.0f;
-        for (float x = (float) b.getX() - (float) b.getHeight(); x < (float) b.getRight(); x += step)
+    // Fills that outline with the tiled background art, adds a little depth
+    // and then an INNER shadow along the whole edge, so the dark area reads
+    // as recessed into the light page.
+    inline void paintBand (juce::Graphics& g, const juce::Path& shape,
+                           juce::Rectangle<int> b)
+    {
         {
-            g.drawLine (x, (float) b.getBottom(), x + (float) b.getHeight(), (float) b.getY(), 1.0f);
-            g.drawLine (x, (float) b.getY(), x + (float) b.getHeight(), (float) b.getBottom(), 1.0f);
+            juce::Graphics::ScopedSaveState ss (g);
+            g.reduceClipRegion (shape);
+
+            const auto tile = image ("ui_bg_tile_png");
+            if (tile.isValid())
+            {
+                // the art is a 256 px diamond cell; ~118 px on screen keeps
+                // the lattice fine without turning into noise
+                const float scale = 118.0f / (float) tile.getWidth();
+                g.setFillType (juce::FillType (tile, juce::AffineTransform::scale (scale)));
+                g.fillAll();
+            }
+            else
+            {
+                g.setColour (bandBot);
+                g.fillAll();
+            }
+
+            // depth: darker toward the bottom of the strip. Filled over the
+            // STRIP only — across the whole clip the bulge that hangs below
+            // would take the gradient's end colour and read as a black collar.
+            g.setGradientFill (juce::ColourGradient (
+                juce::Colours::transparentBlack, (float) b.getCentreX(), (float) b.getY(),
+                juce::Colour (0x33000000),       (float) b.getCentreX(), (float) b.getBottom(),
+                false));
+            g.fillRect (b);
+
+            // stars: deterministic, so they never shimmer between repaints
+            juce::Random rng (0x5eed);
+            for (int i = 0; i < 70; ++i)
+            {
+                const float x = (float) b.getX() + rng.nextFloat() * (float) b.getWidth();
+                const float y = (float) b.getY() - 30.0f
+                              + rng.nextFloat() * ((float) b.getHeight() + 90.0f);
+                const float r = 0.6f + rng.nextFloat() * 1.4f;
+                g.setColour (bandStar.withMultipliedAlpha (0.30f + rng.nextFloat() * 0.60f));
+                g.fillEllipse (x - r, y - r, r * 2.0f, r * 2.0f);
+            }
+
+            // INNER shadow: stroking the outline while clipped to its inside
+            // leaves only the inner half of each stroke, which is exactly a
+            // soft shadow hugging the edge.
+            for (int i = 0; i < 8; ++i)
+            {
+                g.setColour (juce::Colours::black.withAlpha (0.055f - (float) i * 0.0058f));
+                g.strokePath (shape, juce::PathStrokeType (3.0f + (float) i * 2.2f));
+            }
         }
 
-        // stars: deterministic, so they never shimmer between repaints
-        juce::Random rng (0x5eed);
-        for (int i = 0; i < 90; ++i)
-        {
-            const float x = (float) b.getX() + rng.nextFloat() * (float) b.getWidth();
-            const float y = (float) b.getY() + rng.nextFloat() * (float) b.getHeight();
-            const float r = 0.6f + rng.nextFloat() * 1.5f;
-            g.setColour (bandStar.withMultipliedAlpha (0.35f + rng.nextFloat() * 0.65f));
-            g.fillEllipse (x - r, y - r, r * 2.0f, r * 2.0f);
-        }
+        // a hairline lip so the recess has a crisp top edge
+        g.setColour (juce::Colour (0x33ffffff));
+        g.strokePath (shape, juce::PathStrokeType (1.0f));
     }
 
     // The page background gradient used behind everything.

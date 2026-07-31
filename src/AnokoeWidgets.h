@@ -266,12 +266,20 @@ public:
 
     void setImage (const char* binaryName)
     {
-        img = image (binaryName);
+        name = binaryName;
+        img  = tint.isTransparent() ? image (binaryName) : tintedImage (binaryName, tint);
         repaint();
     }
 
     void setFramed (bool shouldBeFramed) { framed = shouldBeFramed; repaint(); }
-    void setTint (juce::Colour c)        { tint = c; repaint(); }
+
+    // Recolours the glyph — the mark art is dark navy and disappears on the
+    // dark band, so anything placed there asks for a light tint.
+    void setTint (juce::Colour c)
+    {
+        tint = c;
+        if (name != nullptr) setImage (name);
+    }
 
     void paintButton (juce::Graphics& g, bool highlighted, bool down) override
     {
@@ -294,20 +302,14 @@ public:
         if (! img.isValid()) return;
         const float s = (float) px * (down ? 0.92f : 1.0f);
         g.setOpacity (isEnabled() ? 1.0f : 0.4f);
-        if (! tint.isTransparent())
-        {
-            // draw the glyph as a tinted silhouette (used for the lit lock)
-            g.drawImage (img, juce::Rectangle<float> (s, s).withCentre (r.getCentre()),
-                         juce::RectanglePlacement::centred, false);
-        }
-        else
-            g.drawImage (img, juce::Rectangle<float> (s, s).withCentre (r.getCentre()),
-                         juce::RectanglePlacement::centred, false);
+        g.drawImage (img, juce::Rectangle<float> (s, s).withCentre (r.getCentre()),
+                     juce::RectanglePlacement::centred, false);
         g.setOpacity (1.0f);
     }
 
 private:
     juce::Image img;
+    const char* name = nullptr;
     int  px;
     bool framed = false;
     juce::Colour tint { juce::Colours::transparentBlack };
@@ -440,7 +442,10 @@ class TabButton : public juce::Button
 {
 public:
     TabButton (const juce::String& text, const char* iconBinaryName)
-        : juce::Button (text), label (text), icon (image (iconBinaryName))
+        : juce::Button (text), label (text), icon (image (iconBinaryName)),
+          // the mark art is dark navy: on the band an unselected tab needs a
+          // light copy of it, the selected one sits on white and does not
+          iconDim (tintedImage (iconBinaryName, bandInk))
     {
         setClickingTogglesState (false);
     }
@@ -454,16 +459,17 @@ public:
         tab.addRoundedRectangle (r.getX(), r.getY(), r.getWidth(), r.getHeight() + 14.0f,
                                  14.0f, 14.0f, true, true, false, false);
         g.setColour (on ? juce::Colours::white
-                        : juce::Colours::white.withAlpha (highlighted ? 0.22f : 0.10f));
+                        : juce::Colours::white.withAlpha (highlighted ? 0.16f : 0.07f));
         g.fillPath (tab);
 
         auto inner = r.reduced (8.0f, 6.0f);
         const float iconSide = juce::jmin (26.0f, inner.getHeight() - 16.0f);
-        drawFitted (g, icon, juce::Rectangle<float> (iconSide, iconSide)
-                                 .withCentre ({ inner.getCentreX(),
-                                                inner.getY() + iconSide * 0.5f + 1.0f }),
-                    on ? 1.0f : 0.85f);
-        g.setColour (on ? sidebarSel : bandInk.withAlpha (0.92f));
+        drawFitted (g, on ? icon : iconDim,
+                    juce::Rectangle<float> (iconSide, iconSide)
+                        .withCentre ({ inner.getCentreX(),
+                                       inner.getY() + iconSide * 0.5f + 1.0f }),
+                    on ? 1.0f : 0.86f);
+        g.setColour (on ? sidebarSel : bandInk.withAlpha (0.88f));
         g.setFont (font (11.5f, on));
         g.drawText (label, inner.removeFromBottom (15.0f).toNearestInt(),
                     juce::Justification::centred, false);
@@ -471,7 +477,7 @@ public:
 
 private:
     juce::String label;
-    juce::Image  icon;
+    juce::Image  icon, iconDim;
 };
 
 // ---------------------------------------------------------------------------
