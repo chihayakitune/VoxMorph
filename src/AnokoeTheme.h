@@ -39,6 +39,10 @@ namespace anokoe
     const juce::Colour badgeMid  { 0xffefcb77 };
     const juce::Colour badgeHigh { 0xffeeadc2 };
     const juce::Colour advInk    { 0xff6c82b6 };
+    // v0.34.0: the body is one flat light grey — sections no longer draw
+    // their own panel, so this is what you see behind every card
+    const juce::Colour bodyFill  { 0xfff3f5fb };
+    const juce::Colour treeLine  { 0xffc9d3e8 };   // FORMANT group brackets
 
     // ---- hero band (v0.32.0): the dark strip under the header that the
     // character circle sits in
@@ -57,18 +61,19 @@ namespace anokoe
     // ---- geometry (styles.css) --------------------------------------------
     constexpr float kCardRadius  = 17.0f;
     constexpr int   kCardPadX    = 13;
-    constexpr int   kTitleH      = 40;
-    constexpr int   kRowH        = 36;    // one slider row
-    constexpr int   kToggleH     = 30;
-    constexpr int   kKnobH       = 110;   // knob art box
-    constexpr int   kKnobRowH    = 124;
+    constexpr int   kTitleH      = 34;
+    constexpr int   kRowH        = 30;    // one slider row (v0.34.0: tighter)
+    constexpr int   kToggleH     = 26;
+    constexpr int   kKnobH       = 106;   // knob art box
+    constexpr int   kKnobRowH    = 116;
+    constexpr int   kTreeIndent  = 14;    // FORMANT child rows
     constexpr int   kTrackH      = 22;    // slider track art height
     constexpr int   kValueW      = 54;
     constexpr int   kActionsW    = 40;
     constexpr int   kLabelW      = 150;
     constexpr int   kGap         = 10;
     constexpr int   kSidebarW    = 132;
-    constexpr int   kHeaderH     = 62;    // v0.32.0: slimmer, the band carries the art
+    constexpr int   kHeaderH     = 94;    // v0.34.0: 1.5x the v0.32 height
     constexpr int   kBandH       = 158;   // dark hero band
     constexpr int   kTabH        = 58;    // page tabs along the band's bottom edge
     constexpr int   kHeroR       = 112;   // character portrait radius
@@ -313,18 +318,6 @@ namespace anokoe
                 false));
             g.fillRect (b);
 
-            // stars: deterministic, so they never shimmer between repaints
-            juce::Random rng (0x5eed);
-            for (int i = 0; i < 70; ++i)
-            {
-                const float x = (float) b.getX() + rng.nextFloat() * (float) b.getWidth();
-                const float y = (float) b.getY() - 30.0f
-                              + rng.nextFloat() * ((float) b.getHeight() + 90.0f);
-                const float r = 0.6f + rng.nextFloat() * 1.4f;
-                g.setColour (bandStar.withMultipliedAlpha (0.30f + rng.nextFloat() * 0.60f));
-                g.fillEllipse (x - r, y - r, r * 2.0f, r * 2.0f);
-            }
-
             // INNER shadow: stroking the outline while clipped to its inside
             // leaves only the inner half of each stroke, which is exactly a
             // soft shadow hugging the edge.
@@ -341,13 +334,12 @@ namespace anokoe
         // above is what defines the edge.
     }
 
-    // The page background gradient used behind everything.
+    // The body background: one flat light grey (v0.34.0). Sections used to
+    // sit on a gradient inside their own translucent panels; now the whole
+    // content area is a single tone and the cards draw no panel at all.
     inline void paintPage (juce::Graphics& g, juce::Rectangle<int> b)
     {
-        juce::ColourGradient grad (pageTop, (float) b.getX(), (float) b.getY(),
-                                   pageBot, (float) b.getRight(), (float) b.getBottom(), false);
-        grad.addColour (0.52, pageMid);
-        g.setGradientFill (grad);
+        g.setColour (bodyFill);
         g.fillRect (b);
     }
 

@@ -343,12 +343,13 @@ public:
     {
         int total = title.isNotEmpty() ? kTitleH : kGap;
         for (auto& r : rows) total += juce::jmax (0, r.h);
-        return total + 12;
+        return total + 8;
     }
 
+    // v0.34.0: sections no longer draw a panel — no fill, no outline. The
+    // body is one flat tone and the headings alone separate the groups.
     void paint (juce::Graphics& g) override
     {
-        paintCard (g, getLocalBounds().toFloat());
         if (title.isEmpty()) return;
         auto t = getLocalBounds().withHeight (kTitleH).reduced (kCardPadX, 0).withTrimmedTop (4);
         if (icon.isValid())
@@ -366,7 +367,7 @@ public:
     {
         auto r = getLocalBounds();
         r.removeFromTop (title.isNotEmpty() ? kTitleH : kGap);
-        r.removeFromBottom (8);
+        r.removeFromBottom (4);
         r = r.reduced (kCardPadX, 0);
 
         int flexCount = 0, fixed = 0;

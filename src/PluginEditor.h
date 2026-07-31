@@ -865,8 +865,7 @@ private:
     // and the breakdown text are unchanged from v0.17.0 — only the skin moved.
     void paint (juce::Graphics& g) override
     {
-        ak::paintCard (g, getLocalBounds().toFloat());
-
+        // v0.34.0: no panel — the MAIN page is one flat tone now
         const float ms = engMs + fxMs + bufMs;
         auto r = getLocalBounds().reduced (8);
         auto textArea = r.removeFromBottom (46);
@@ -1234,11 +1233,19 @@ public:
             g.setColour (ak::muteFill.withAlpha (0.55f));
             g.fillRoundedRectangle (getLocalBounds().toFloat().reduced (1.0f, 1.0f), 8.0f);
         }
+
+        if (tree == Tree::none) return;
+        const float x  = 4.0f;
+        const float cy = (float) getHeight() * 0.5f;
+        g.setColour (ak::treeLine);
+        g.fillRect (x, 0.0f, 1.0f, tree == Tree::last ? cy : (float) getHeight());
+        g.fillRect (x, cy, (float) ak::kTreeIndent - 6.0f, 1.0f);
     }
 
     void resized() override
     {
         auto r = getLocalBounds();
+        if (tree != Tree::none) r.removeFromLeft (ak::kTreeIndent);
 
         if (kind == Kind::button)
         {
@@ -1298,6 +1305,12 @@ public:
         slider.setBounds (ctrl);
     }
 
+    // A row can be drawn as a child of the heading above it: a bracket down
+    // the left edge with a tick into the label. `last` closes the bracket
+    // with an L instead of running it through.
+    enum class Tree { none, mid, last };
+    void setTree (Tree t) { tree = t; resized(); repaint(); }
+
     juce::ToggleButton& getToggle() { return toggle; }
     juce::ComboBox&     getCombo()  { return combo; }
     juce::TextButton&   getButton() { return action; }
@@ -1313,6 +1326,7 @@ private:
     VoxMorphProcessor* proc = nullptr;
     juce::String id;
     Kind kind;
+    Tree tree { Tree::none };
     ak::Tone tone { ak::Tone::blue };
     juce::RangedAudioParameter* rp = nullptr;
     juce::Label        name, value;
@@ -5094,10 +5108,11 @@ public:
             presetBar->setBounds (slot.removeFromRight (pw));
         }
 
-        // the band's bulge reaches below the strip, so the content starts
-        // clear of it
-        const int bulgeBottom = bandArea.getBottom() - 74 + ak::kHeroR + ak::kHeroRim;
-        pageArea = r.reduced (12, 8).withTop (bulgeBottom + 8);
+        // Only the MIDDLE column sits under the character, so the content as
+        // a whole starts right below the strip and just the FORMANT column is
+        // pushed down past the bulge (see layoutMainPage).
+        bulgeBottom = bandArea.getBottom() - 74 + ak::kHeroR + ak::kHeroRim;
+        pageArea = r.reduced (12, 8).withTop (bandArea.getBottom() + 8);
         for (auto* pg : pages) pg->setBounds (pageArea);
         layoutMainPage();
     }
@@ -5283,40 +5298,42 @@ private:
                  "+ sounds younger/feminine, - sounds deeper/masculine. +3 to +4 for male-to-female.",
                  "声道の長さ=声の響き・声色を変えます。ピッチは変わりません。"
                  "+で若く/女性的に、-で太く/男性的に。女声化は+3〜+4が目安。"), ak::Tone::pink);
-        slider (*cardFormant, "consonant", "Const (st)",
+        auto& rConst = slider (*cardFormant, "consonant", "Const (st)",
             tip ("Extra shift applied only to unvoiced consonants (s, sh...), added on top of Formant. "
                  "Female consonants are brighter: try +2 to +3. Too much sounds like a lisp.",
                  "無声子音(サ行・シャ行など)だけを追加でシフトします(Formantに加算)。"
                  "女声の子音は明るいので+2〜+3が目安。上げすぎると舌足らずに聞こえます。"), ak::Tone::pink);
-        slider (*cardFormant, "f1shift", "F1 Shift (st)",
+        auto& rF1S = slider (*cardFormant, "f1shift", "F1 Shift (st)",
             tip ("Moves only the first formant (jaw openness / throat size), on top of the global "
                  "Formant. Male-to-female sounds most natural with F1 raised LESS than F2: "
                  "try F1 +1 to +2 when F2 is +2 to +4.",
                  "第1フォルマント(顎の開き・喉の広さ)だけを動かします(全体Formantに加算)。"
                  "女声化はF1をF2より控えめに上げると自然です(F2が+2〜+4のときF1は+1〜+2)。"), ak::Tone::pink);
-        slider (*cardFormant, "f1gain", "F1 Gain (dB)",
+        auto& rF1G = slider (*cardFormant, "f1gain", "F1 Gain (dB)",
             tip ("Boost or cut around the first formant. Cutting a few dB thins out a 'boomy' "
                  "chest resonance.",
                  "第1フォルマント付近の強さ。数dB下げると胸に響く「太さ」が抜けます。"), ak::Tone::pink);
-        slider (*cardFormant, "f2shift", "F2 Shift (st)",
+        auto& rF2S = slider (*cardFormant, "f2shift", "F2 Shift (st)",
             tip ("Moves only the second formant (tongue position). The strongest single cue for "
                  "perceived gender/age of the vowels: +2 to +4 sounds younger and more feminine.",
                  "第2フォルマント(舌の位置)だけを動かします。母音の性別・年齢感に最も効く帯域で、"
                  "+2〜+4で若く女性的に聞こえます。"), ak::Tone::pink);
-        slider (*cardFormant, "f2gain", "F2 Gain (dB)",
+        auto& rF2G = slider (*cardFormant, "f2gain", "F2 Gain (dB)",
             tip ("Boost or cut around the second formant. A few dB of boost adds clarity and "
                  "'presence' to the vowels.",
                  "第2フォルマント付近の強さ。数dB上げると母音の明瞭さ・華やかさが出ます。"), ak::Tone::pink);
-        slider (*cardFormant, "f3shift", "F3 Shift (st)",
+        auto& rF3S = slider (*cardFormant, "f3shift", "F3 Shift (st)",
             tip ("Moves only the third formant (front cavity / lip area). Small shifts (+1 to +2) "
                  "refine the impression of a shorter vocal tract.",
                  "第3フォルマント(声道前部・唇まわり)だけを動かします。+1〜+2の小さめの操作で"
                  "「声道が短い」印象を仕上げます。"), ak::Tone::pink);
-        slider (*cardFormant, "f3gain", "F3 Gain (dB)",
+        auto& rF3G = slider (*cardFormant, "f3gain", "F3 Gain (dB)",
             tip ("Boost or cut around the third formant. Boosting adds sheen and 'sparkle' - "
                  "this region carries much of a voice's charm.",
                  "第3フォルマント付近の強さ。上げると艶・張りが出ます。声の「華」が乗る帯域です。"), ak::Tone::pink);
-        cardFormant->addGap (6);
+        bracket ({ &rConst, &rF1S, &rF1G, &rF2S, &rF2G, &rF3S, &rF3G });
+        cardFormant->addGap (14);          // blank line before AEIOU
+
         toggle (*cardFormant, "vadapt", "AEIOU Character",
             tip ("Shapes the voice character by applying different F1-F3 adjustments to the "
                  "estimated A/E/I/O/U vowel regions. Your manual F1-F3 settings remain the "
@@ -5325,13 +5342,15 @@ private:
                  "声のキャラクターを作ります。手動のF1〜F3設定は基本値としてそのまま維持され、"
                  "その上に母音別の補正が乗ります。オフ=従来どおり。"), ak::Tone::pink);
         addAeiouRow();
-        slider (*cardFormant, "vamount", "AEIOU Amount (%)",
+        auto& rAmount = slider (*cardFormant, "vamount", "AEIOU Amount (%)",
             tip ("Strength of the selected character's per-vowel offsets. 0 % = identical "
                  "to the feature being off, 100 % = the character map as designed, up to "
                  "200 % emphasizes it further (larger internal limits apply above 100 %).",
                  "選択したキャラクター補正の強さ。0%=機能オフと完全に同じ音、"
                  "100%=設計どおりのキャラクター、200%まで上げるとさらに強調されます"
                  "(100%超は内部上限を広げて適用)。"), ak::Tone::pink);
+        aeiouCombo->setTree (ParamRow::Tree::mid);
+        rAmount.setTree (ParamRow::Tree::last);
 
         // -- column 3 --------------------------------------------------
         presetBar = std::make_unique<PresetBar> (proc,
@@ -5411,6 +5430,15 @@ private:
     }
 
     // AEIOU character dropdown + DETAIL button share one row
+    // marks a run of consecutive rows as one bracketed group
+    void bracket (std::initializer_list<ParamRow*> group)
+    {
+        int i = 0;
+        const int n = (int) group.size();
+        for (auto* r : group)
+            r->setTree (++i == n ? ParamRow::Tree::last : ParamRow::Tree::mid);
+    }
+
     void addAeiouRow()
     {
         aeiouCombo = std::make_unique<ParamRow> (proc, "vcharacter", ParamRow::Kind::combo,
@@ -5446,7 +5474,7 @@ private:
         aeiouRow.onLayout = [this]
         {
             auto r = aeiouRow.getLocalBounds();
-            detailBtn.setBounds (r.removeFromRight (96).reduced (2, 4));
+            detailBtn.setBounds (r.removeFromRight (96).reduced (2, 2));
             r.removeFromRight (6);
             aeiouCombo->setBounds (r);
         };
@@ -5501,7 +5529,8 @@ private:
         const int col1 = cardPitch->preferredHeight() + ak::kGap
                        + cardInton->preferredHeight() + ak::kGap
                        + cardAdvanced->preferredHeight();
-        const int col2 = cardFormant->preferredHeight();
+        const int c2Top = juce::jmax (0, bulgeBottom + 10 - pageArea.getY());
+        const int col2 = c2Top + cardFormant->preferredHeight();
         const int col3 = cardAir->preferredHeight() + ak::kGap
                        + cardQuality->preferredHeight();
         const int topH   = juce::jmax (col1, juce::jmax (col2, col3));
@@ -5536,6 +5565,7 @@ private:
         c1.removeFromTop (ak::kGap);
         cardAdvanced->setBounds (c1);                       // stretches to fill
 
+        c2.removeFromTop (c2Top);            // clear the character's bulge
         cardFormant->setBounds (c2);
 
         cardAir->setBounds (c3.removeFromTop (cardAir->preferredHeight()));
@@ -5640,6 +5670,7 @@ private:
     HeroCircle hero { proc };
     juce::Rectangle<int> pageArea, bandArea;
     juce::Path bandShape;
+    int bulgeBottom = 0;
     static constexpr int kLeftTabs = 3;
     std::vector<juce::Component*> pages;
     int currentPage = 0;
