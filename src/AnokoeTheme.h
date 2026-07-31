@@ -44,10 +44,16 @@ namespace anokoe
     const juce::Colour bodyFill  { 0xfff3f5fb };
     const juce::Colour treeLine  { 0xffc9d3e8 };   // group brackets + flow lines
     // v0.35.0: section headings are tinted by their tone so the three signal
-    // chains (pitch / formant / air) read apart at a glance
+    // chains (pitch / formant / air) read apart at a glance.
+    // v0.36.1: every heading is back to the one blue — the tone now shows in
+    // the knobs and sliders alone, which is where it means something.
     const juce::Colour headBlue  { 0xff6f86bd };
     const juce::Colour headPink  { 0xffdd7f9d };
     const juce::Colour headGold  { 0xffcf9a3f };
+    // The blue the section mark art is drawn in (its own gradient runs
+    // 0xff546eb9 -> 0xff627dc2). Marks that ship in another colour are
+    // recoloured to this so the whole heading column reads as one family.
+    const juce::Colour markBlue  { 0xff5c76bd };
 
     // ---- hero band (v0.32.0): the dark strip under the header that the
     // character circle sits in
@@ -72,7 +78,9 @@ namespace anokoe
     constexpr int   kKnobH       = 106;   // knob art box
     constexpr int   kKnobRowH    = 116;
     constexpr int   kTreeIndent  = 14;    // FORMANT child rows
-    constexpr int   kTrackH      = 22;    // slider track art height
+    constexpr int   kTrackH      = 22;    // slider row art height (heart thumb)
+    constexpr int   kTrackBarH   = 19;    // the bar itself — v0.36.1 draws it
+                                          // a touch thinner than the thumb
     constexpr int   kValueW      = 54;
     constexpr int   kActionsW    = 40;
     constexpr int   kLabelW      = 150;
@@ -140,7 +148,13 @@ namespace anokoe
         juce::Image out;
         if (src.isValid())
         {
-            out = src.convertedToFormat (juce::Image::ARGB);
+            // createCopy() is what makes this safe. The art loads as ARGB
+            // already, so convertedToFormat(ARGB) hands back the SAME object,
+            // and juce::Image copies share their pixel data — writing through
+            // it recoloured the cached original for everyone else. That is
+            // what bleached the ADVANCED mark (the flow-line markers tint the
+            // same art with treeLine) and the selected page tab's icon.
+            out = src.convertedToFormat (juce::Image::ARGB).createCopy();
             juce::Image::BitmapData bd (out, juce::Image::BitmapData::readWrite);
             for (int y = 0; y < out.getHeight(); ++y)
                 for (int x = 0; x < out.getWidth(); ++x)

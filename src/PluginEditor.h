@@ -5121,7 +5121,12 @@ public:
                                              headBox.getCentreY());
             const float colX = juce::jmin (headBox.getX(), lblBox.getX());
 
-            const auto mark = collar + (headIn - collar) * rt.markT;
+            // v0.36.1: the marker sits ON the heading's line, so the run
+            // between the two is a true horizontal straight (step 2 below
+            // takes its straight branch). Only the x is interpolated; the
+            // whole drop from the collar is absorbed by step 1's easing.
+            const juce::Point<float> mark (collar.x + (headIn.x - collar.x) * rt.markT,
+                                           headIn.y);
 
             g.setColour (ak::treeLine);
 
@@ -5163,18 +5168,40 @@ public:
                 stroke (g, pth);
             }
 
-            // 4  label -> knob: straight out of the label, then one tangent
-            //    arc onto the knob's rim
+            // 4  label -> knob: a horizontal STRAIGHT out of the label, then
+            //    one curve onto the knob's rim along 7:30. The old single
+            //    cubic left the label horizontally but started bending (and
+            //    dipping below the label's line) immediately, so nothing of
+            //    the run actually read as flat.
             {
                 const juce::Point<float> dir (-0.7071f, 0.7071f);          // 7:30
                 const auto rim  = knobC + dir * (knobR + kGapN);
                 const auto from = juce::Point<float> (lblBox.getRight() + kGapN,
                                                       lblBox.getCentreY());
-                const float run = juce::jmax (40.0f, (rim.x - from.x) * 0.55f);
+                const float span = rim.x - from.x;
+
                 juce::Path pth;
                 pth.startNewSubPath (from);
-                pth.cubicTo (from + juce::Point<float> (run, 0.0f),
-                             rim + dir * 46.0f, rim);
+                if (span > 8.0f)
+                {
+                    const float flat  = juce::jmax (16.0f, span * 0.45f);
+                    // the second handle leans back down the 7:30 radius, so
+                    // cap it at the height the knob sits above the label —
+                    // any longer and the handle drops under the straight and
+                    // the curve sags on its way up
+                    const float rise  = juce::jmax (0.0f, from.y - rim.y);
+                    const float ease  = juce::jlimit (10.0f, juce::jmax (10.0f, rise * 1.35f),
+                                                      (span - flat) * 0.55f);
+                    const juce::Point<float> elbow (from.x + flat, from.y);
+                    pth.lineTo (elbow);
+                    pth.cubicTo (elbow + juce::Point<float> (ease, 0.0f),
+                                 rim + dir * ease, rim);
+                }
+                else
+                {
+                    pth.cubicTo (from + juce::Point<float> (40.0f, 0.0f),
+                                 rim + dir * 46.0f, rim);
+                }
                 stroke (g, pth);
             }
 
@@ -5336,10 +5363,11 @@ private:
     }
 
     ak::Card& newCard (const char* title, const char* icon,
-                       juce::Colour tint = ak::heading)
+                       juce::Colour tint = ak::heading,
+                       juce::Colour iconTint = juce::Colours::transparentBlack)
     {
         auto c = std::make_unique<ak::Card>();
-        if (title != nullptr) c->setTitle (title, icon, tint);
+        if (title != nullptr) c->setTitle (title, icon, tint, iconTint);
         auto* raw = c.get();
         mainPage.addAndMakeVisible (*raw);
         cards.push_back (std::move (c));
@@ -5377,7 +5405,11 @@ private:
                  "抑揚を拡大/縮小するときの中心になる音程。変換後の声の平均的な高さに"
                  "合わせてください(女声なら200〜250Hz)。Amountが100%のときは無効。"));
 
-        cardAdvanced = &newCard ("ADVANCED", "ui_mark_M_Advanced_png", ak::headBlue);
+        // The ADVANCED mark shares its art with the flow-line markers, which
+        // draw it in treeLine — tinting it here pins it to the heading blue
+        // no matter what else asks for a recoloured copy.
+        cardAdvanced = &newCard ("ADVANCED", "ui_mark_M_Advanced_png",
+                                 ak::headBlue, ak::markBlue);
         toggle (*cardAdvanced, "lowvoice", "Low Voice Mode",
             tip ("Extends pitch tracking for very low voices and vocal fry. It may retain more of "
                  "the original low-period texture depending on the voice.",
@@ -5428,7 +5460,7 @@ private:
             });
 
         // -- column 2: FORMANT ----------------------------------------
-        cardFormant = &newCard ("FORMANT", "ui_mark_M_Formant_png", ak::headPink);
+        cardFormant = &newCard ("FORMANT", "ui_mark_M_Formant_png", ak::headBlue);
         rowFormant = &knob (*cardFormant, "formant", "Formant",
             tip ("Changes the vocal-tract size = the timbre, without changing pitch. "
                  "+ sounds younger/feminine, - sounds deeper/masculine. +3 to +4 for male-to-female.",
@@ -5493,7 +5525,7 @@ private:
         addAndMakeVisible (*presetBar);      // lives in the band, not the grid
         presetBar->setDarkStyle();
 
-        cardAir = &newCard ("AIR", "ui_mark_M_Air_png", ak::headGold);
+        cardAir = &newCard ("AIR", "ui_mark_M_Air_png", ak::headBlue);
         rowAir = &knob (*cardAir, "air", "Air",
             tip ("Preserves the natural breath and aperiodic detail of the voice while suppressing "
                  "old-pitch harmonic leakage. Up to 1.0 the preserved amount increases at natural "
@@ -5508,7 +5540,10 @@ private:
                  "Natural Airの高域に抜け感と明るさを加えます。約6kHz以上の空気感だけが"
                  "持ち上がり、中音域や声の芯には触れません。まずは2〜4dBがおすすめ。"), ak::Tone::yellow);
 
-        cardQuality = &newCard ("VOICE QUALITY", "ui_mark_M_VoiceQuality_png", ak::headBlue);
+        // The star art ships gold; recoloured so it matches PITCH and the
+        // rest of the blue heading column.
+        cardQuality = &newCard ("VOICE QUALITY", "ui_mark_M_VoiceQuality_png",
+                                ak::headBlue, ak::markBlue);
         slider (*cardQuality, "tilt", "Softness / Tilt (dB)",
             tip ("Spectral tilt of the voice. + is softer and warmer, - is brighter and more present. "
                  "Start around +/-2 dB.",

@@ -97,7 +97,9 @@ public:
             return;
         }
 
-        const float th  = (float) juce::jmin (kTrackH, h);
+        // The bar art is thinner than the row it lives in (v0.36.1); the
+        // heart thumb still sizes off kTrackH, so only the rail slims down.
+        const float th  = (float) juce::jmin (kTrackBarH, h);
         const float cap = th;                                  // caps are square
         auto row = juce::Rectangle<float> ((float) x, (float) y + ((float) h - th) * 0.5f,
                                            (float) w, th);
@@ -124,7 +126,8 @@ public:
         const auto heart = toned ("ui_slider_knob_heart", tone);
         if (heart.isValid())
         {
-            const float hs = th * (s.isEnabled() ? 1.0f : 0.86f);
+            const float hs = (float) juce::jmin (kTrackH, h)
+                                * (s.isEnabled() ? 1.0f : 0.86f);
             drawFitted (g, heart,
                         juce::Rectangle<float> (hs, hs)
                             .withCentre ({ mid.getX() + span * ratio, row.getCentreY() }),
@@ -323,12 +326,18 @@ class Card : public juce::Component
 public:
     Card() = default;
 
+    // A transparent iconColour keeps the mark art exactly as it ships; any
+    // other colour recolours the glyph (keeping its alpha), which is how the
+    // marks that were drawn in another hue join the blue heading family.
     void setTitle (const juce::String& text, const char* iconBinaryName,
-                   juce::Colour titleColour = heading)
+                   juce::Colour titleColour = heading,
+                   juce::Colour iconColour = juce::Colours::transparentBlack)
     {
         title = text;
         tint  = titleColour;
-        icon  = iconBinaryName != nullptr ? image (iconBinaryName) : juce::Image();
+        icon  = iconBinaryName == nullptr  ? juce::Image()
+              : iconColour.isTransparent() ? image (iconBinaryName)
+                                           : tintedImage (iconBinaryName, iconColour);
         repaint();
     }
 
