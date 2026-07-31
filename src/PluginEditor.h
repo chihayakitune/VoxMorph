@@ -1291,9 +1291,17 @@ public:
     enum class Tree { none, mid, last };
     void setTree (Tree t) { tree = t; resized(); repaint(); }
 
-    // for the flow lines: where the knob and the row label sit
+    // for the flow lines: where the knob sits, and the label's TEXT box —
+    // the routes connect to the glyphs, so the slack in the label component
+    // must not count as part of the node
     juce::Rectangle<int> knobBounds()  const { return slider.getBounds(); }
     juce::Rectangle<int> labelBounds() const { return name.getBounds(); }
+    juce::Rectangle<int> labelTextBounds() const
+    {
+        const int w = 2 + (int) std::ceil (juce::GlyphArrangement::getStringWidth (
+                                               ak::font (12.5f), name.getText()));
+        return name.getBounds().withWidth (juce::jmin (w, name.getWidth()));
+    }
 
     juce::ToggleButton& getToggle() { return toggle; }
     juce::ComboBox&     getCombo()  { return combo; }
@@ -5046,41 +5054,46 @@ public:
         paintFlowLines (g);
     }
 
-    // ---- signal-chain flow lines (v0.36.0) --------------------------------
-    // Three routes leave the character's collar and run to the three knobs of
-    // the conversion chain, in processing order:
+    // ---- signal-chain flow routes (v0.36.0) ------------------------------
+    // A node diagram, not a drawn curve: the conversion chain is
     //
-    //     notch --1--> marker --2--> heading --3--> label --4--> knob
+    //     collar -> [marker] -> [HEADING] -> [label] -> (knob)
     //
-    // Each leg is its OWN cubic Bezier with hand-placed control points and a
-    // small trim at both ends, so the route reads as a series of connected
-    // hops rather than one snaking line. (v0.35.0 ran a single Catmull-Rom
-    // through all five anchors and it wandered badly: with the anchors that
-    // far apart the spline has to bulge to stay smooth, which threw the curve
-    // out past the cards and against the window edge.)
+    // and every edge attaches to the BOUNDARY of the node it joins — the
+    // glyph box of the heading and label text, the marker's disc, the knob's
+    // and the collar's rim. Nothing is drawn across a node; the node itself
+    // is the break in the run. That is what keeps the lines off the text.
+    //
+    // Runs are horizontal wherever the two nodes allow it, and every change
+    // of direction is a tangent arc, so straights and curves meet smoothly.
     //
     // Purely decorative; nothing here reads or writes a parameter.
     void paintFlowLines (juce::Graphics& g)
     {
         if (currentPage != 0 || cardPitch == nullptr || heroOuter <= 0.0f) return;
 
-        // a point on the collar; JUCE angles, 0 = 12 o'clock, clockwise
         auto onCollar = [this] (float deg)
         {
             const float a = juce::degreesToRadians (deg);
             return heroC + juce::Point<float> (std::sin (a), -std::cos (a)) * heroOuter;
         };
 
-        // Measured off the annotated reference: the routes leave the collar
-        // WELL BELOW the strip's edge — around 7:30 for the two left-hand
-        // chains and its mirror for AIR — not at the fillet notch on the edge
-        // itself, which is where v0.35.2 attached them (about 50 px too high).
-        struct Route { juce::Point<float> from; ak::Card* card; ParamRow* row; };
-        const Route routes[3] = {
-            { onCollar (218.0f), cardPitch,   rowPitch   },
-            { onCollar (208.0f), cardFormant, rowFormant },
-            { onCollar (142.0f), cardAir,     rowAir     },
+        // Angles and marker positions are measured off the annotated
+        // reference, per column: the PITCH run is nearly 3x longer than the
+        // other two, so one shared fraction cannot place all three markers.
+        struct Route
+        {
+            float collarDeg, markT;
+            ak::Card* card; ParamRow* row;
         };
+        const Route routes[3] = {
+            { 218.0f, 0.62f, cardPitch,   rowPitch   },
+            { 208.0f, 0.66f, cardFormant, rowFormant },
+            { 142.0f, 0.39f, cardAir,     rowAir     },
+        };
+
+        constexpr float kMarkR = 13.0f;   // marker disc
+        constexpr float kGapN  = 6.0f;    // clearance around every node
 
         juce::Graphics::ScopedSaveState ss (g);
         g.reduceClipRegion (juce::Rectangle<int> (0, bandArea.getBottom(),
@@ -5090,74 +5103,95 @@ public:
         {
             if (rt.card == nullptr || rt.row == nullptr) continue;
 
-            // The vertical leg runs down the LABEL's left edge — not outside
-            // the card — so it lines up with the text it points at, and the
-            // horizontal run passes behind the heading to reach that column.
-            const auto title = rt.card->titleTextBounds();
-            const auto lblB  = rt.row->labelBounds();
-            const auto turn  = getLocalPoint (rt.row,
-                                   juce::Point<int> (lblB.getX(), lblB.getCentreY())).toFloat();
-            const auto headY = getLocalPoint (rt.card,
-                                   juce::Point<int> (0, title.getCentreY())).toFloat().y;
-            const juce::Point<float> corner (turn.x, headY);
+            const auto collar = onCollar (rt.collarDeg);
 
-            const auto kb    = rt.row->knobBounds();
-            const auto kc    = getLocalPoint (rt.row, kb.getCentre()).toFloat();
-            const float kr   = (float) juce::jmin (kb.getWidth(), kb.getHeight()) * 0.5f;
-            const auto knobP = kc + juce::Point<float> (-0.68f, 0.68f) * kr;   // 7:30 on the rim
+            // --- node boxes, in editor coordinates ---------------------
+            const auto headBox = getLocalArea (rt.card, rt.card->titleTextBounds()).toFloat();
+            const auto lblBox  = getLocalArea (rt.row,  rt.row->labelTextBounds()).toFloat();
+            const auto kb      = rt.row->knobBounds();
+            const auto knobC   = getLocalPoint (rt.row, kb.getCentre()).toFloat();
+            const float knobR  = (float) juce::jmin (kb.getWidth(), kb.getHeight()) * 0.5f;
 
-            // the marker sits on the run itself, a little under halfway from
-            // the collar — on the horizontal for the outer columns, on the
-            // diagonal for FORMANT, which starts much higher than its heading
-            const auto  mark = rt.from + (corner - rt.from) * 0.45f;
-            const auto  d12  = corner - mark;
-            const float lead = juce::jmax (48.0f, std::abs (d12.x) * 0.35f);
+            // the run reaches the heading on whichever side it comes from;
+            // the drop always hangs off the heading's left edge, which is the
+            // same column the label starts in
+            const bool  fromRight = collar.x > headBox.getCentreX();
+            const juce::Point<float> headIn (fromRight ? headBox.getRight() + kGapN
+                                                       : headBox.getX() - kGapN,
+                                             headBox.getCentreY());
+            const float colX = juce::jmin (headBox.getX(), lblBox.getX());
+
+            const auto mark = collar + (headIn - collar) * rt.markT;
 
             g.setColour (ak::treeLine);
-            // 1  leaves the collar radially, then swings onto the run
-            bezierLeg (g, rt.from,
-                          rt.from + (rt.from - heroC) * 0.22f,
-                          mark - d12 * 0.42f, mark, 7.0f, 16.0f);
-            // 2  the run up to the heading, arriving horizontally at the turn
-            bezierLeg (g, mark, mark + d12 * 0.38f,
-                          corner + juce::Point<float> (d12.x > 0.0f ? -lead : lead, 0.0f),
-                          corner, 16.0f, 4.0f);
-            // 3  straight down the label column
-            bezierLeg (g, corner, corner + juce::Point<float> (0.0f, 24.0f),
-                          turn - juce::Point<float> (0.0f, 24.0f), turn, 5.0f, 5.0f);
-            // 4  out past the label, then up onto the knob's rim
-            bezierLeg (g, turn,
-                          turn + juce::Point<float> (juce::jmax (70.0f, (knobP.x - turn.x) * 0.6f), 0.0f),
-                          knobP + juce::Point<float> (-52.0f, 44.0f), knobP, 5.0f, 4.0f);
 
-            // the ADVANCED glyph marks the step and breaks the run
+            // 1  collar -> marker: leaves the rim radially, eases into the
+            //    direction of the run and stops at the marker's disc
+            {
+                const auto dir = (collar - heroC) / heroOuter;
+                const auto to  = mark - (mark - collar) / (mark - collar).getDistanceFromOrigin()
+                                          * (kMarkR + 2.0f);
+                juce::Path pth;
+                pth.startNewSubPath (collar + dir * kGapN);
+                pth.cubicTo (collar + dir * (kGapN + 34.0f),
+                             to + juce::Point<float> (fromRight ? 56.0f : -56.0f, 0.0f), to);
+                stroke (g, pth);
+            }
+
+            // 2  marker -> heading: horizontal wherever it can be, and always
+            //    arriving horizontally so the node is met square-on
+            {
+                const auto from = mark + (headIn - mark) / (headIn - mark).getDistanceFromOrigin()
+                                           * (kMarkR + 2.0f);
+                juce::Path pth;
+                pth.startNewSubPath (from);
+                if (std::abs (headIn.y - from.y) < 1.5f)
+                    pth.lineTo (headIn);                                  // pure horizontal
+                else
+                    pth.cubicTo (from + juce::Point<float> ((headIn.x - from.x) * 0.45f, 0.0f),
+                                 headIn + juce::Point<float> ((from.x - headIn.x) * 0.45f, 0.0f),
+                                 headIn);
+                stroke (g, pth);
+            }
+
+            // 3  heading -> label: a straight drop down their shared column,
+            //    clear of both glyph boxes
+            {
+                juce::Path pth;
+                pth.startNewSubPath (colX, headBox.getBottom() + kGapN);
+                pth.lineTo (colX, lblBox.getY() - kGapN);
+                stroke (g, pth);
+            }
+
+            // 4  label -> knob: straight out of the label, then one tangent
+            //    arc onto the knob's rim
+            {
+                const juce::Point<float> dir (-0.7071f, 0.7071f);          // 7:30
+                const auto rim  = knobC + dir * (knobR + kGapN);
+                const auto from = juce::Point<float> (lblBox.getRight() + kGapN,
+                                                      lblBox.getCentreY());
+                const float run = juce::jmax (40.0f, (rim.x - from.x) * 0.55f);
+                juce::Path pth;
+                pth.startNewSubPath (from);
+                pth.cubicTo (from + juce::Point<float> (run, 0.0f),
+                             rim + dir * 46.0f, rim);
+                stroke (g, pth);
+            }
+
+            // the marker disc last, so it sits cleanly on top
             const auto sym = ak::tintedImage ("ui_mark_M_Advanced_png", ak::treeLine);
-            const juce::Rectangle<float> box (22.0f, 22.0f);
             g.setColour (ak::bodyFill);
-            g.fillEllipse (box.expanded (4.0f).withCentre (mark));
-            ak::drawFitted (g, sym, box.withCentre (mark));
+            g.fillEllipse (juce::Rectangle<float> (kMarkR * 2.0f, kMarkR * 2.0f).withCentre (mark));
+            ak::drawFitted (g, sym, juce::Rectangle<float> (21.0f, 21.0f).withCentre (mark));
         }
     }
 
-    // one leg: a cubic Bezier, pulled back from both ends so the route breaks
-    // cleanly at each anchor instead of touching the text it points at
-    static void bezierLeg (juce::Graphics& g, juce::Point<float> p0, juce::Point<float> c1,
-                           juce::Point<float> c2, juce::Point<float> p1,
-                           float trimStart, float trimEnd)
+    // same weight as the tree brackets (they fill a 1 px rect), so both kinds
+    // of connector read as one family
+    static void stroke (juce::Graphics& g, const juce::Path& p)
     {
-        auto pull = [] (juce::Point<float> from, juce::Point<float> toward, float d)
-        {
-            const auto v = toward - from;
-            const float len = v.getDistanceFromOrigin();
-            return len > d ? from + v * (d / len) : from;
-        };
-        juce::Path path;
-        path.startNewSubPath (pull (p0, c1, trimStart));
-        path.cubicTo (c1, c2, pull (p1, c2, trimEnd));
-        // same weight as the tree brackets (they fill a 1 px rect), so the
-        // two kinds of connector read as one family
-        g.strokePath (path, juce::PathStrokeType (1.0f, juce::PathStrokeType::curved,
-                                                        juce::PathStrokeType::rounded));
+        g.strokePath (p, juce::PathStrokeType (1.0f, juce::PathStrokeType::curved,
+                                                     juce::PathStrokeType::rounded));
     }
 
     void resized() override
