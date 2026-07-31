@@ -5089,36 +5089,45 @@ public:
         {
             if (rt.card == nullptr || rt.row == nullptr) continue;
 
-            const auto title  = rt.card->titleTextBounds();
-            const auto corner = getLocalPoint (rt.card,
-                                    juce::Point<int> (-10, title.getCentreY())).toFloat();
-            const auto lblB   = rt.row->labelBounds();
-            const auto turn   = getLocalPoint (rt.row,
-                                    juce::Point<int> (0, lblB.getCentreY())).toFloat()
-                                        .withX (corner.x);
-            const auto kb     = rt.row->knobBounds();
-            const auto kc     = getLocalPoint (rt.row, kb.getCentre()).toFloat();
-            const float kr    = (float) juce::jmin (kb.getWidth(), kb.getHeight()) * 0.5f;
-            const auto knobP  = kc + juce::Point<float> (-0.68f, 0.68f) * kr;   // 7:30 on the rim
+            // The vertical leg runs down the LABEL's left edge — not outside
+            // the card — so it lines up with the text it points at, and the
+            // horizontal run passes behind the heading to reach that column.
+            const auto title = rt.card->titleTextBounds();
+            const auto lblB  = rt.row->labelBounds();
+            const auto turn  = getLocalPoint (rt.row,
+                                   juce::Point<int> (lblB.getX(), lblB.getCentreY())).toFloat();
+            const auto headY = getLocalPoint (rt.card,
+                                   juce::Point<int> (0, title.getCentreY())).toFloat().y;
+            const juce::Point<float> corner (turn.x, headY);
 
-            // the marker sits on the horizontal run, at heading height
-            const juce::Point<float> mark (corner.x + (rt.from.x - corner.x) * 0.42f, corner.y);
-            const float side = rt.from.x > corner.x ? 1.0f : -1.0f;   // travel direction
+            const auto kb    = rt.row->knobBounds();
+            const auto kc    = getLocalPoint (rt.row, kb.getCentre()).toFloat();
+            const float kr   = (float) juce::jmin (kb.getWidth(), kb.getHeight()) * 0.5f;
+            const auto knobP = kc + juce::Point<float> (-0.68f, 0.68f) * kr;   // 7:30 on the rim
+
+            // the marker sits on the run itself, a little under halfway from
+            // the collar — on the horizontal for the outer columns, on the
+            // diagonal for FORMANT, which starts much higher than its heading
+            const auto  mark = rt.from + (corner - rt.from) * 0.45f;
+            const auto  d12  = corner - mark;
+            const float lead = juce::jmax (48.0f, std::abs (d12.x) * 0.35f);
 
             g.setColour (ak::treeLine);
-            // 1  collar -> marker: leaves the circle diagonally, flattens out
-            bezierLeg (g, rt.from, rt.from + juce::Point<float> (-side * 54.0f, 26.0f),
-                          mark + juce::Point<float> (side * 74.0f, 0.0f), mark, 7.0f, 16.0f);
-            // 2  marker -> heading corner: the straight horizontal run
-            bezierLeg (g, mark, mark - juce::Point<float> (side * 40.0f, 0.0f),
-                          corner + juce::Point<float> (side * 40.0f, 0.0f), corner, 16.0f, 5.0f);
-            // 3  heading -> label: straight down the card's outer margin
-            bezierLeg (g, corner, corner + juce::Point<float> (0.0f, 22.0f),
-                          turn - juce::Point<float> (0.0f, 22.0f), turn, 6.0f, 6.0f);
-            // 4  label -> knob: away horizontally, then up onto the rim
+            // 1  leaves the collar radially, then swings onto the run
+            bezierLeg (g, rt.from,
+                          rt.from + (rt.from - heroC) * 0.22f,
+                          mark - d12 * 0.42f, mark, 7.0f, 16.0f);
+            // 2  the run up to the heading, arriving horizontally at the turn
+            bezierLeg (g, mark, mark + d12 * 0.38f,
+                          corner + juce::Point<float> (d12.x > 0.0f ? -lead : lead, 0.0f),
+                          corner, 16.0f, 4.0f);
+            // 3  straight down the label column
+            bezierLeg (g, corner, corner + juce::Point<float> (0.0f, 24.0f),
+                          turn - juce::Point<float> (0.0f, 24.0f), turn, 5.0f, 5.0f);
+            // 4  out past the label, then up onto the knob's rim
             bezierLeg (g, turn,
-                          turn + juce::Point<float> (juce::jmax (60.0f, (knobP.x - turn.x) * 0.55f), 0.0f),
-                          knobP + juce::Point<float> (-46.0f, 40.0f), knobP, 6.0f, 4.0f);
+                          turn + juce::Point<float> (juce::jmax (70.0f, (knobP.x - turn.x) * 0.6f), 0.0f),
+                          knobP + juce::Point<float> (-52.0f, 44.0f), knobP, 5.0f, 4.0f);
 
             // the ADVANCED glyph marks the step and breaks the run
             const auto sym = ak::tintedImage ("ui_mark_M_Advanced_png", ak::treeLine);
@@ -5144,7 +5153,9 @@ public:
         juce::Path path;
         path.startNewSubPath (pull (p0, c1, trimStart));
         path.cubicTo (c1, c2, pull (p1, c2, trimEnd));
-        g.strokePath (path, juce::PathStrokeType (1.4f, juce::PathStrokeType::curved,
+        // same weight as the tree brackets (they fill a 1 px rect), so the
+        // two kinds of connector read as one family
+        g.strokePath (path, juce::PathStrokeType (1.0f, juce::PathStrokeType::curved,
                                                         juce::PathStrokeType::rounded));
     }
 
