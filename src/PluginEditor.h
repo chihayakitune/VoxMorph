@@ -1083,7 +1083,22 @@ public:
     {
         rp = proc->apvts.getParameter (id);
 
-        name.setText (displayName, juce::dontSendNotification);
+        // v0.36.5: the unit moves out of the label and into the read-out, so
+        // "F1 Shift (st)" becomes the label "F1 Shift" next to a box reading
+        // "-0.00st". Only rows that HAVE a read-out can take one; a trailing
+        // "(...)" on a toggle or a dropdown is left alone.
+        juce::String label = displayName.trim();
+        if ((k == Kind::slider || k == Kind::knob) && label.endsWithChar (')'))
+        {
+            const int open = label.lastIndexOfChar ('(');
+            if (open > 0)
+            {
+                unit  = label.substring (open + 1, label.length() - 1).trim();
+                label = label.substring (0, open).trim();
+            }
+        }
+
+        name.setText (label, juce::dontSendNotification);
         name.setTooltip (tipText);
         name.setFont (ak::font (12.5f));
         name.setColour (juce::Label::textColourId, ak::ink);
@@ -1124,6 +1139,18 @@ public:
                                      juce::sendNotificationSync);
                     syncValueText();
                 };
+                // Type over the number, not the unit: the editor opens on the
+                // bare value, so "2.00st" offers "2.00", and typing 3 + Enter
+                // reads back "3.00st". Slider::getValueFromText drops the
+                // suffix anyway, so leaving it in place also still works.
+                value.onEditorShow = [this]
+                {
+                    if (auto* ed = value.getCurrentTextEditor())
+                    {
+                        ed->setText (withoutUnit (value.getText()), false);
+                        ed->selectAll();
+                    }
+                };
                 slider.onValueChange = [this] { syncValueText(); };
                 if (rp != nullptr)
                 {
@@ -1132,6 +1159,9 @@ public:
                     slider.setDoubleClickReturnValue (
                         true, (double) rp->convertFrom0to1 (rp->getDefaultValue()));
                 }
+                // after the attachment: it rewrites the text conversion but
+                // never touches the suffix, which is appended on top of it
+                slider.setTextValueSuffix (unit);
                 syncValueText();
                 break;
 
@@ -1315,8 +1345,16 @@ private:
         value.setText (slider.getTextFromValue (slider.getValue()), juce::dontSendNotification);
     }
 
+    juce::String withoutUnit (juce::String t) const
+    {
+        t = t.trim();
+        return (unit.isNotEmpty() && t.endsWith (unit))
+                 ? t.dropLastCharacters (unit.length()).trim() : t;
+    }
+
     VoxMorphProcessor* proc = nullptr;
     juce::String id;
+    juce::String unit;                 // "st" / "dB" / "%" / "Hz", "" if none
     Kind kind;
     Tree tree { Tree::none };
     ak::Tone tone { ak::Tone::blue };
