@@ -1161,7 +1161,20 @@ public:
                 }
                 // after the attachment: it rewrites the text conversion but
                 // never touches the suffix, which is appended on top of it
-                slider.setTextValueSuffix (unit);
+                if (unit.isNotEmpty()) slider.setTextValueSuffix (" " + unit);
+                // A parameter sitting at exactly zero prints "-0.00": its raw
+                // value lands a hair below zero and the formatter keeps the
+                // minus. Drop it on every row — a stray minus on a default
+                // value reads as a bug. setSignedValue() builds on top.
+                {
+                    auto base = slider.textFromValueFunction;
+                    slider.textFromValueFunction = [base] (double v)
+                    {
+                        auto s = (base != nullptr ? base (v) : juce::String (v, 2)).trim();
+                        return (s.startsWithChar ('-') && s.substring (1).containsOnly ("0.,"))
+                                 ? s.substring (1) : s;
+                    };
+                }
                 syncValueText();
                 break;
 
@@ -1320,6 +1333,24 @@ public:
     // with an L instead of running it through.
     enum class Tree { none, mid, last };
     void setTree (Tree t) { tree = t; resized(); repaint(); }
+
+    // Reads the value as a SHIFT, so an upward one says so: "+9.00 st". The
+    // parameter prints its own minus and prints an exact zero as "-0.00", so
+    // the sign is decided from the DIGITS rather than from the raw value.
+    // Only affects the read-out; typing is unchanged (the sign is optional).
+    void setSignedValue()
+    {
+        auto base = slider.textFromValueFunction;
+        slider.textFromValueFunction = [base] (double v)
+        {
+            auto s = (base != nullptr ? base (v) : juce::String (v, 2)).trim();
+            const bool neg = s.startsWithChar ('-');
+            s = s.trimCharactersAtStart ("+-");
+            if (s.containsOnly ("0.,")) return s;              // zero: no sign
+            return (neg ? "-" : "+") + s;
+        };
+        syncValueText();
+    }
 
     // for the flow lines: where the knob sits, and the label's TEXT box —
     // the routes connect to the glyphs, so the slack in the label component
@@ -5446,24 +5477,25 @@ private:
 
         // -- column 1 --------------------------------------------------
         cardPitch = &newCard ("PITCH", "ui_mark_M_Pitch_png", ak::headBlue);
-        rowPitch = &knob (*cardPitch, "pitch", "Pitch",
+        rowPitch = &knob (*cardPitch, "pitch", "Pitch (st)",
             tip ("Shifts the pitch in semitones. The timbre (formants) stays unchanged. "
                  "Male-to-female: +5 to +7. Female-to-male: around -5.",
                  "声の高さを半音単位で変えます。声色(フォルマント)は変わりません。"
                  "女声化は+5〜+7、男声化は-5前後が目安。"), ak::Tone::blue);
+        rowPitch->setSignedValue();
         // Robotize / Robot Pitch were dropped from the UI in v0.35.0 (unused).
         // The parameters stay registered, so saved sessions and presets that
         // carry them still load and behave exactly as before.
 
         cardInton = &newCard ("INTONATION", "ui_mark_M_Intonation_png", ak::headBlue);
-        slider (*cardInton, "range", "Intonation Amount (%)",
+        slider (*cardInton, "range", "Intonation (%)",
             tip ("Exaggerates or flattens the pitch movement (intonation). 100% = unchanged. "
                  "Unlike 'Pitch', which moves the whole voice up or down, this scales only the movement. "
                  "110-140% recommended for male-to-female.",
                  "声の抑揚(音程の上がり下がり)を強調/抑制します。100%=変化なし。"
                  "Pitchが声全体を平行移動するのに対し、こちらは動きの幅だけを変えます。"
                  "女声化では110〜140%が目安です。"));
-        slider (*cardInton, "center", "Intonation Pivot (Hz)",
+        slider (*cardInton, "center", "Center (Hz)",
             tip ("The pitch that intonation scaling expands around. Set it near the average pitch "
                  "of the converted voice (200-250 Hz for a female voice). No effect at 100% Amount.",
                  "抑揚を拡大/縮小するときの中心になる音程。変換後の声の平均的な高さに"
@@ -5525,11 +5557,12 @@ private:
 
         // -- column 2: FORMANT ----------------------------------------
         cardFormant = &newCard ("FORMANT", "ui_mark_M_Formant_png", ak::headBlue);
-        rowFormant = &knob (*cardFormant, "formant", "Formant",
+        rowFormant = &knob (*cardFormant, "formant", "Formant (st)",
             tip ("Changes the vocal-tract size = the timbre, without changing pitch. "
                  "+ sounds younger/feminine, - sounds deeper/masculine. +3 to +4 for male-to-female.",
                  "声道の長さ=声の響き・声色を変えます。ピッチは変わりません。"
                  "+で若く/女性的に、-で太く/男性的に。女声化は+3〜+4が目安。"), ak::Tone::pink);
+        rowFormant->setSignedValue();
         auto& rConst = slider (*cardFormant, "consonant", "Const (st)",
             tip ("Extra shift applied only to unvoiced consonants (s, sh...), added on top of Formant. "
                  "Female consonants are brighter: try +2 to +3. Too much sounds like a lisp.",
@@ -5541,29 +5574,29 @@ private:
                  "try F1 +1 to +2 when F2 is +2 to +4.",
                  "第1フォルマント(顎の開き・喉の広さ)だけを動かします(全体Formantに加算)。"
                  "女声化はF1をF2より控えめに上げると自然です(F2が+2〜+4のときF1は+1〜+2)。"), ak::Tone::pink);
-        auto& rF1G = slider (*cardFormant, "f1gain", "F1 Gain (dB)",
-            tip ("Boost or cut around the first formant. Cutting a few dB thins out a 'boomy' "
-                 "chest resonance.",
-                 "第1フォルマント付近の強さ。数dB下げると胸に響く「太さ」が抜けます。"), ak::Tone::pink);
         auto& rF2S = slider (*cardFormant, "f2shift", "F2 Shift (st)",
             tip ("Moves only the second formant (tongue position). The strongest single cue for "
                  "perceived gender/age of the vowels: +2 to +4 sounds younger and more feminine.",
                  "第2フォルマント(舌の位置)だけを動かします。母音の性別・年齢感に最も効く帯域で、"
                  "+2〜+4で若く女性的に聞こえます。"), ak::Tone::pink);
-        auto& rF2G = slider (*cardFormant, "f2gain", "F2 Gain (dB)",
-            tip ("Boost or cut around the second formant. A few dB of boost adds clarity and "
-                 "'presence' to the vowels.",
-                 "第2フォルマント付近の強さ。数dB上げると母音の明瞭さ・華やかさが出ます。"), ak::Tone::pink);
         auto& rF3S = slider (*cardFormant, "f3shift", "F3 Shift (st)",
             tip ("Moves only the third formant (front cavity / lip area). Small shifts (+1 to +2) "
                  "refine the impression of a shorter vocal tract.",
                  "第3フォルマント(声道前部・唇まわり)だけを動かします。+1〜+2の小さめの操作で"
                  "「声道が短い」印象を仕上げます。"), ak::Tone::pink);
+        auto& rF1G = slider (*cardFormant, "f1gain", "F1 Gain (dB)",
+            tip ("Boost or cut around the first formant. Cutting a few dB thins out a 'boomy' "
+                 "chest resonance.",
+                 "第1フォルマント付近の強さ。数dB下げると胸に響く「太さ」が抜けます。"), ak::Tone::pink);
+        auto& rF2G = slider (*cardFormant, "f2gain", "F2 Gain (dB)",
+            tip ("Boost or cut around the second formant. A few dB of boost adds clarity and "
+                 "'presence' to the vowels.",
+                 "第2フォルマント付近の強さ。数dB上げると母音の明瞭さ・華やかさが出ます。"), ak::Tone::pink);
         auto& rF3G = slider (*cardFormant, "f3gain", "F3 Gain (dB)",
             tip ("Boost or cut around the third formant. Boosting adds sheen and 'sparkle' - "
                  "this region carries much of a voice's charm.",
                  "第3フォルマント付近の強さ。上げると艶・張りが出ます。声の「華」が乗る帯域です。"), ak::Tone::pink);
-        bracket ({ &rConst, &rF1S, &rF1G, &rF2S, &rF2G, &rF3S, &rF3G });
+        bracket ({ &rConst, &rF1S, &rF2S, &rF3S, &rF1G, &rF2G, &rF3G });
         cardFormant->addGap (14);          // blank line before AEIOU
 
         toggle (*cardFormant, "vadapt", "AEIOU Character",
@@ -5618,7 +5651,13 @@ private:
 
         // -- bottom row ------------------------------------------------
         cardHigh = &newCard ("HIGH RANGE / LOW LIMIT", "ui_mark_M_HighRange_png", ak::headBlue);
-        slider (*cardHigh, "hifreq", "High Range Start (Hz)",
+        toggle (*cardHigh, "hienable", "High Range",
+            tip ("Switches the high-range guard on and off in one go - the three settings "
+                 "bracketed under it. Off leaves loud, high notes converted by the normal "
+                 "Pitch and Formant amounts.",
+                 "高音域ガード(下にぶら下がる3項目)をまとめてオン/オフします。"
+                 "オフのときは、高い声もPitch/Formantの通常の変化量のまま変換されます。"));
+        auto& rHiF = slider (*cardHigh, "hifreq", "High Range Start (Hz)",
             tip ("When your INPUT pitch (before conversion) rises above this - laughing, squealing, "
                  "exclamations - the Pitch/Formant shifts blend smoothly toward the High amounts "
                  "below, reaching them fully one octave up. Stops laughs from being shifted into "
@@ -5627,23 +5666,32 @@ private:
                  "フォルマントの変化量が下のHigh設定へ滑らかに移行し、1オクターブ上で完全に"
                  "切り替わります。笑い声が不自然な高音まで上がるのを防ぎます。0=オフ。"
                  "250〜350Hzが目安。"));
-        slider (*cardHigh, "hipitch", "High Pitch Amount (%)",
+        auto& rHiP = slider (*cardHigh, "hipitch", "High Pitch Amount (%)",
             tip ("How much of the Pitch shift remains in the high range. 100% = same as normal, "
                  "0% = no shift there (laughs keep their natural pitch). Try 30-60%.",
                  "高音域で残すPitchシフトの割合。100%=通常と同じ、0%=シフトなし(笑い声は"
                  "地声の高さのまま)。30〜60%が目安。"));
-        slider (*cardHigh, "hiformant", "High Fmt Amount (%)",
+        auto& rHiA = slider (*cardHigh, "hiformant", "High Fmt Amount (%)",
             tip ("How much of the Formant shift remains in the high range. Usually leave at 100% "
                  "so the voice keeps its character while only the pitch settles down.",
                  "高音域で残すFormantシフトの割合。通常は100%のまま(声色は保ちつつピッチだけ"
                  "落ち着かせる)が自然です。"));
+        bracket ({ &rHiF, &rHiP, &rHiA });
+        cardHigh->addGap (8);              // blank line before the next group
+
+        toggle (*cardHigh, "lowlimit", "Low Limit",
+            tip ("Switches the low-pitch floor below on and off. Off lets the converted "
+                 "pitch fall as low as it likes.",
+                 "下のLow Pitch Floorをオン/オフします。オフのときは変換後のピッチが"
+                 "どこまで低くなっても引き上げません。"));
         slider (*cardHigh, "pitchfloor", "Low Pitch Floor (Hz)",
             tip ("If the converted pitch falls below this, it is lifted softly toward the floor. "
                  "Useful when your voice drifts too low while speaking. 0 = off. "
                  "Try 140-180 with a female target voice.",
                  "変換後のピッチがこの値を下回ったとき、滑らかに引き上げます。"
                  "話しているうちに声が低くなりすぎる場合の補正用。0=オフ。"
-                 "女声化なら140〜180が目安です。"));
+                 "女声化なら140〜180が目安です。"))
+            .setTree (ParamRow::Tree::last);
 
         cardOutput = &newCard ("OUTPUT", "ui_mark_M_Output_png", ak::headBlue);
         slider (*cardOutput, "gain", "Gain (dB)",

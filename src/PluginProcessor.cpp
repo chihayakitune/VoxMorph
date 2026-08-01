@@ -125,6 +125,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::NormalisableRange<float> (0.0f, 300.0f, 1.0f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "robotHz", 1 }, "Robot Pitch (Hz)",
                 juce::NormalisableRange<float> (40.0f, 400.0f, 0.1f, 0.5f), 120.0f));
+    // v0.36.6: on/off for the two guards. Both default to ON so that every
+    // session and preset saved before they existed loads unchanged — with
+    // their amount at 0 (hifreq / pitchfloor) the guard is inert anyway, so
+    // "on with nothing set" is exactly the old behaviour.
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "hienable", 1 }, "High Range", true));
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "lowlimit", 1 }, "Low Limit", true));
     layout.add (std::make_unique<P> (juce::ParameterID { "hifreq", 1 }, "High Range Start (Hz)",
                 juce::NormalisableRange<float> (0.0f, 600.0f, 1.0f, 0.5f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "hipitch", 1 }, "High Pitch Amount (%)",
@@ -193,6 +201,8 @@ VoxMorphProcessor::VoxMorphProcessor()
     pAirShine = apvts.getRawParameterValue ("airshine");
     // (deprecated "airband"/"air2"/"air2low" are intentionally not read)
     pGci     = apvts.getRawParameterValue ("gci");
+    pHiOn    = apvts.getRawParameterValue ("hienable");
+    pLowOn   = apvts.getRawParameterValue ("lowlimit");
     pHiFreq  = apvts.getRawParameterValue ("hifreq");
     pHiPitch = apvts.getRawParameterValue ("hipitch");
     pHiFmt   = apvts.getRawParameterValue ("hiformant");
@@ -462,7 +472,10 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.airPreserve   = pAir->load();          // Natural Air (standard path)
     p.airShineDb    = pAirShine->load();     // Air Shine
     p.gciSync       = pGci->load() > 0.5f;
-    p.hiRangeHz     = pHiFreq->load();       // high-range guard (laughs)
+    // The toggles gate the guards here rather than in the engine: it already
+    // reads "start = 0" and "floor = 0" as off, so switching them off is the
+    // same code path it has always taken.
+    p.hiRangeHz     = pHiOn->load() > 0.5f ? pHiFreq->load() : 0.0f;
     p.hiPitchAmt    = pHiPitch->load() * 0.01f;
     p.hiFormantAmt  = pHiFmt->load()   * 0.01f;
     p.tiltDb        = pTilt->load();
@@ -493,7 +506,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.jitter        = pJitter->load();
     p.robotize      = pRobot->load() > 0.5f;
     p.lowVoice      = pLowVoice->load() > 0.5f;
-    p.pitchFloorHz  = pFloor->load();
+    p.pitchFloorHz  = pLowOn->load() > 0.5f ? pFloor->load() : 0.0f;
     p.lowLatency    = pLowLat->load() > 0.5f;
     p.robotHz       = pRobotHz->load();
     p.mix           = pMix->load();
