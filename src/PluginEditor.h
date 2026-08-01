@@ -5067,6 +5067,10 @@ public:
     // Runs are horizontal wherever the two nodes allow it, and every change
     // of direction is a tangent arc, so straights and curves meet smoothly.
     //
+    // v0.36.4: the collar angles, marker placement and handle fractions below
+    // are FITTED to the user's annotated reference (RMS under 3 px on all
+    // three routes), not chosen by eye.
+    //
     // Purely decorative; nothing here reads or writes a parameter.
     void paintFlowLines (juce::Graphics& g)
     {
@@ -5081,19 +5085,29 @@ public:
         // Angles and marker positions are measured off the annotated
         // reference, per column: the PITCH run is nearly 3x longer than the
         // other two, so one shared fraction cannot place all three markers.
+        // markDy drops the marker below the heading's line. 0 keeps step 2 a
+        // pure horizontal straight (PITCH, FORMANT); the AIR run would
+        // otherwise be dead flat end to end, so its marker hangs below and
+        // the run S-curves back up into the heading.
         struct Route
         {
-            float collarDeg, markT;
+            float collarDeg, markT, markDy;
             ak::Card* card; ParamRow* row;
         };
         const Route routes[3] = {
-            { 218.0f, 0.62f, cardPitch,   rowPitch   },
-            { 208.0f, 0.66f, cardFormant, rowFormant },
-            { 142.0f, 0.39f, cardAir,     rowAir     },
+            { 218.0f, 0.620f,  0.0f, cardPitch,   rowPitch   },
+            { 188.5f, 0.546f,  0.0f, cardFormant, rowFormant },
+            { 132.4f, 0.397f, 18.0f, cardAir,     rowAir     },
         };
 
         constexpr float kMarkR = 13.0f;   // marker disc
         constexpr float kGapN  = 6.0f;    // clearance around every node
+        // Bezier handles as a FRACTION of each run's own length. Fixed
+        // lengths were the bug behind the old shapes: 34 px and 56 px are
+        // longer than the AIR and FORMANT runs themselves (~42 px), so those
+        // curves doubled back on their own start before reaching the marker.
+        constexpr float kHRadial = 0.19f; // leaving the collar, along the rim's radius
+        constexpr float kHFlat   = 0.73f; // arriving at the marker, horizontal
 
         juce::Graphics::ScopedSaveState ss (g);
         g.reduceClipRegion (juce::Rectangle<int> (0, bandArea.getBottom(),
@@ -5127,41 +5141,47 @@ public:
             const float colX = (float) getLocalPoint (
                                    rt.card, juce::Point<int> (rt.card->treeRailX(), 0)).x;
 
-            // v0.36.1: the marker sits ON the heading's line, so the run
-            // between the two is a true horizontal straight (step 2 below
-            // takes its straight branch). Only the x is interpolated; the
-            // whole drop from the collar is absorbed by step 1's easing.
             const juce::Point<float> mark (collar.x + (headIn.x - collar.x) * rt.markT,
-                                           headIn.y);
+                                           headIn.y + rt.markDy);
+            // Both legs meet the disc on its SIDES, so each one leaves and
+            // arrives horizontally. Stopping along the chord instead (what
+            // this used to do) left the line hanging in the air beside the
+            // disc rather than touching it — clearest on FORMANT, where the
+            // run came in steeply and stopped 13 px above the marker.
+            const float side = fromRight ? 1.0f : -1.0f;
+            const juce::Point<float> markIn  (mark.x + side * (kMarkR + 2.0f), mark.y);
+            const juce::Point<float> markOut (mark.x - side * (kMarkR + 2.0f), mark.y);
 
             g.setColour (ak::treeLine);
 
-            // 1  collar -> marker: leaves the rim radially, eases into the
-            //    direction of the run and stops at the marker's disc
+            // 1  collar -> marker: leaves the rim radially, eases over into
+            //    horizontal and meets the disc square on its side
             {
-                const auto dir = (collar - heroC) / heroOuter;
-                const auto to  = mark - (mark - collar) / (mark - collar).getDistanceFromOrigin()
-                                          * (kMarkR + 2.0f);
+                const auto  dir = (collar - heroC) / heroOuter;
+                const auto  from = collar + dir * kGapN;
+                const float leg  = from.getDistanceFrom (markIn);
                 juce::Path pth;
-                pth.startNewSubPath (collar + dir * kGapN);
-                pth.cubicTo (collar + dir * (kGapN + 34.0f),
-                             to + juce::Point<float> (fromRight ? 56.0f : -56.0f, 0.0f), to);
+                pth.startNewSubPath (from);
+                pth.cubicTo (from + dir * (kHRadial * leg),
+                             markIn + juce::Point<float> (side * kHFlat * leg, 0.0f),
+                             markIn);
                 stroke (g, pth);
             }
 
-            // 2  marker -> heading: horizontal wherever it can be, and always
-            //    arriving horizontally so the node is met square-on
+            // 2  marker -> heading: a horizontal straight when the two sit on
+            //    one line, otherwise an S that leaves and arrives horizontally
             {
-                const auto from = mark + (headIn - mark) / (headIn - mark).getDistanceFromOrigin()
-                                           * (kMarkR + 2.0f);
                 juce::Path pth;
-                pth.startNewSubPath (from);
-                if (std::abs (headIn.y - from.y) < 1.5f)
+                pth.startNewSubPath (markOut);
+                if (std::abs (headIn.y - markOut.y) < 1.5f)
                     pth.lineTo (headIn);                                  // pure horizontal
                 else
-                    pth.cubicTo (from + juce::Point<float> ((headIn.x - from.x) * 0.45f, 0.0f),
-                                 headIn + juce::Point<float> ((from.x - headIn.x) * 0.45f, 0.0f),
+                {
+                    const float dx = headIn.x - markOut.x;
+                    pth.cubicTo (markOut + juce::Point<float> (dx * 0.36f, 0.0f),
+                                 headIn  - juce::Point<float> (dx * 0.64f, 0.0f),
                                  headIn);
+                }
                 stroke (g, pth);
             }
 
