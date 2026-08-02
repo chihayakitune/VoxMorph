@@ -4877,22 +4877,23 @@ public:
 // with your voice even when the vowel tracker is not running.
 // ---------------------------------------------------------------------------
 // The character badge in the middle of the band, and the mini visualiser that
-// rings it (v0.36.9, replacing the AEIOU percentages).
+// sits inside it (v0.36.10).
 //
-// The ring lives in the dark COLLAR around the portrait and never covers her
-// face: one mirrored spectrum, INPUT growing inward and OUTPUT growing
-// outward from a baseline circle, 20 Hz at 12 o'clock sweeping clockwise to
-// 20 kHz. Seeing the two apart is the whole point of a formant shifter — the
-// output's peaks sit above the input's, and you can watch that happen while
-// you talk. Mint = input / pink = output, the same pairing the Visualizer
-// page uses.
+// A soft arc of rounded bars along the BOTTOM INSIDE of the portrait — a
+// little smile of sound. It is the converted OUTPUT spectrum, low
+// frequencies on the left rising to the right, tinted along the same
+// blue -> lavender -> pink sweep as the ANOKOE wordmark so it belongs to the
+// rest of the window rather than looking like lab equipment.
 //
-// Fed by the shared SpectrumData, so it obeys the same "nobody is looking,
-// stop filling the taps" rule as that page. NOTE: this badge is on screen on
-// EVERY page, so registering it does keep the analysis running the whole time
-// — one FFT per frame on the message thread plus the audio thread's ring
-// writes. That is the standing price of a live visualiser in the spot the
-// user looks at most; Performance Mode still throttles the frame rate.
+// It is translucent and it does overlap her shoulder, which is fine: the
+// bottom of the circle is the quiet part of the picture. Nothing is drawn
+// over her face, and the dark collar around the badge is left plain.
+//
+// Fed by the shared SpectrumData. NOTE: this badge is on screen on EVERY
+// page, so registering it keeps the analysis running the whole time — one
+// FFT per frame on the message thread plus the audio thread's ring writes.
+// That is the standing price of a live visualiser in the spot the user looks
+// at most; Performance Mode still throttles the frame rate.
 class HeroCircle : public juce::Component, public juce::SettableTooltipClient,
                    private juce::Timer
 {
@@ -4900,15 +4901,15 @@ public:
     explicit HeroCircle (VoxMorphProcessor& p) : proc (p)
     {
         setTooltip (vmTip (
-            "Your voice around the character: the INPUT spectrum grows inward "
-            "(mint) and the CONVERTED OUTPUT grows outward (pink), low "
-            "frequencies at the top sweeping clockwise. Watch the pink peaks "
-            "sit above the mint ones as Formant lifts them. The ring around "
-            "the portrait brightens with the output level.",
-            "キャラクターの周りに今の声を表示します。内側(ミント)が入力、"
-            "外側(ピンク)が変換後の出力のスペクトルで、真上が低音、時計回りに"
-            "高音へ進みます。Formantを上げるとピンクの山がミントより外側へ"
-            "ずれるのが見えます。肖像の縁のリングは出力レベルで明るくなります。"));
+            "Your converted voice, as a soft arc across the bottom of the "
+            "circle: low notes on the left, bright detail on the right. It "
+            "moves whenever sound is leaving the plugin, so it doubles as a "
+            "'you are being heard' light. The portrait's rim brightens with "
+            "the output level too.",
+            "変換後の声を、円の下側に沿ったやわらかいアーチで表示します。"
+            "左が低音、右にいくほど高音です。プラグインから音が出ている間ずっと"
+            "動くので、「声が届いているか」の確認にも使えます。"
+            "肖像のふちも出力レベルで明るくなります。"));
         startTimerHz (24);
     }
 
@@ -4935,14 +4936,20 @@ private:
         repaint();       // SpectrumData repaints us too; this drives the rim
     }
 
-    // A spectrum column's dB -> 0..1 for the ring. Tighter than the
-    // Visualizer page's full range: this is a 14 px tall bar, so -54..0 dB
-    // with a slight gamma keeps ordinary speech in the middle of the sweep
-    // instead of hugging the baseline.
+    // a spectrum column's dB -> 0..1. The bars are ~30 px, so the range is
+    // tighter than the Visualizer page's: ordinary speech should land in the
+    // middle of the sweep, not hug the baseline.
     static float norm (float db)
     {
-        const float t = juce::jlimit (0.0f, 1.0f, (db + 54.0f) / 54.0f);
-        return std::pow (t, 0.72f);
+        return std::pow (juce::jlimit (0.0f, 1.0f, (db + 54.0f) / 54.0f), 0.8f);
+    }
+
+    // the wordmark's own gradient: soft periwinkle -> lavender -> soft pink
+    static juce::Colour arcColour (float t)
+    {
+        const juce::Colour a (0xff8fa8e6), b (0xffb6a5e2), d (0xfff0a3c2);
+        return t < 0.5f ? a.interpolatedWith (b, juce::jlimit (0.0f, 1.0f, t * 2.0f))
+                        : b.interpolatedWith (d, juce::jlimit (0.0f, 1.0f, (t - 0.5f) * 2.0f));
     }
 
     void paint (juce::Graphics& g) override
@@ -4954,79 +4961,66 @@ private:
         // the component spans the portrait AND the collar the band bulges out
         const float portR  = outerR * (float) ak::kHeroR
                                     / (float) (ak::kHeroR + ak::kHeroRim);
-        const float collar = juce::jmax (6.0f, outerR - portR);
+        const auto  port   = juce::Rectangle<float> (portR * 2.0f, portR * 2.0f).withCentre (c);
 
-        paintRing (g, c, portR, collar);
+        juce::Graphics::ScopedSaveState ss (g);
+        juce::Path clip;
+        clip.addEllipse (port);
+        g.reduceClipRegion (clip);           // everything stays inside the badge
 
-        {
-            juce::Graphics::ScopedSaveState ss (g);
-            juce::Path clip;
-            const auto port = juce::Rectangle<float> (portR * 2.0f, portR * 2.0f).withCentre (c);
-            clip.addEllipse (port);
-            g.reduceClipRegion (clip);
-            g.setColour (juce::Colours::white);
-            g.fillEllipse (port);
-            // the art is already a circle on white, drawn edge to edge
-            if (auto art = ak::image ("ui_hero_character_png"); art.isValid())
-                g.drawImage (art, port, juce::RectanglePlacement::fillDestination, false);
-        }
+        g.setColour (juce::Colours::white);
+        g.fillEllipse (port);
+        // the art is already a circle on white, drawn edge to edge
+        if (auto art = ak::image ("ui_hero_character_png"); art.isValid())
+            g.drawImage (art, port, juce::RectanglePlacement::fillDestination, false);
+
+        paintArc (g, c, portR);
 
         // the portrait's own edge, brightening with the output level
-        g.setColour (juce::Colours::white.withAlpha (0.30f + 0.45f * halo));
-        g.drawEllipse (juce::Rectangle<float> (portR * 2.0f, portR * 2.0f)
-                           .withCentre (c).reduced (0.75f), 1.5f);
+        g.setColour (juce::Colours::white.withAlpha (0.25f + 0.40f * halo));
+        g.drawEllipse (port.reduced (0.75f), 1.5f);
     }
 
-    // mirrored spectrum bars around the collar
-    void paintRing (juce::Graphics& g, juce::Point<float> c, float portR, float collar)
+    void paintArc (juce::Graphics& g, juce::Point<float> c, float portR)
     {
-        constexpr int kBars = 56;
-        const float base   = portR + collar * 0.50f;   // bars grow either side
-        const float maxLen = collar * 0.34f;           // tips stay off the band's edge
-        const float minLen = 1.6f;                     // a quiet ring is still a ring
-        const float thick  = juce::jmax (1.8f, collar * 0.155f);
+        constexpr int   kBars   = 22;                        // chunky, not dense
+        constexpr float kFromDeg = 24.0f, kToDeg = 156.0f;   // y is down: the bottom sweep
+        // Only the range a voice actually occupies, ~80 Hz to ~8 kHz. The
+        // full 20 Hz - 20 kHz axis would spend a third of the arc on bands
+        // that are always empty, and the smile would sit lopsided.
+        constexpr int   kColLo = 44, kColHi = 192;
+        const float rBase  = portR * 0.955f;                 // just inside the rim
+        const float maxLen = portR * 0.30f;
+        const float minLen = portR * 0.030f;                 // a row of beads when quiet
+        const float thick  = juce::jmax (2.5f, portR * 0.062f);
 
-        // the baseline itself, so the ring reads as a designed element even in
-        // silence rather than as a row of stray ticks
-        g.setColour (juce::Colours::white.withAlpha (0.10f));
-        g.drawEllipse (juce::Rectangle<float> (base * 2.0f, base * 2.0f).withCentre (c), 1.0f);
-
-        const std::vector<float>* inCols  = spec != nullptr ? &spec->in()  : nullptr;
-        const std::vector<float>* outCols = spec != nullptr ? &spec->out() : nullptr;
+        const std::vector<float>* cols = spec != nullptr ? &spec->out() : nullptr;
 
         for (int i = 0; i < kBars; ++i)
         {
-            // 12 o'clock = the lowest column, then clockwise
-            const float a  = juce::MathConstants<float>::twoPi * (float) i / (float) kBars
-                               - juce::MathConstants<float>::halfPi;
+            const float t = (float) i / (float) (kBars - 1);
+            const float a = juce::degreesToRadians (kFromDeg + (kToDeg - kFromDeg) * (1.0f - t));
             const juce::Point<float> dir (std::cos (a), std::sin (a));
 
             // average the columns this bar covers, so nothing is skipped
-            float li = 0.0f, lo = 0.0f;
-            if (inCols != nullptr)
+            float lvl = 0.0f;
+            if (cols != nullptr)
             {
-                const int c0 = i * SpectrumData::kCols / kBars;
-                const int c1 = juce::jmax (c0 + 1, (i + 1) * SpectrumData::kCols / kBars);
-                float si = 0.0f, so = 0.0f;
-                for (int k = c0; k < c1; ++k)
-                {
-                    si += norm ((*inCols) [(size_t) k]);
-                    so += norm ((*outCols)[(size_t) k]);
-                }
-                li = si / (float) (c1 - c0);
-                lo = so / (float) (c1 - c0);
+                const int span = kColHi - kColLo;
+                const int c0 = kColLo + i * span / kBars;
+                const int c1 = juce::jmax (c0 + 1, kColLo + (i + 1) * span / kBars);
+                for (int k = c0; k < c1; ++k) lvl += norm ((*cols)[(size_t) k]);
+                lvl /= (float) (c1 - c0);
             }
 
-            // The collar is only ~34 px, so length alone gives a 5:1 sweep at
-            // best. Brightness carries most of the shape: a quiet band fades
-            // almost out while a loud one is fully lit.
-            auto bar = [&] (float from, float to, juce::Colour col, float level)
-            {
-                g.setColour (col.withAlpha (0.22f + 0.78f * level));
-                g.drawLine ({ c + dir * from, c + dir * to }, thick);
-            };
-            bar (base - 1.5f, base - 1.5f - (minLen + li * maxLen), ak::seriesIn,  li);
-            bar (base + 1.5f, base + 1.5f + (minLen + lo * maxLen), ak::seriesOut, lo);
+            // rounded caps: drawLine would give hard square ends, and the
+            // whole point here is that it reads soft
+            juce::Path bar;
+            bar.startNewSubPath (c + dir * rBase);
+            bar.lineTo (c + dir * (rBase - minLen - lvl * maxLen));
+            g.setColour (arcColour (t).withAlpha (0.30f + 0.50f * lvl));
+            g.strokePath (bar, juce::PathStrokeType (thick, juce::PathStrokeType::curved,
+                                                            juce::PathStrokeType::rounded));
         }
     }
 
