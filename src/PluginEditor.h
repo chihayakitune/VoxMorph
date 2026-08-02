@@ -5082,9 +5082,9 @@ public:
         footer.setFont (ak::font (11.0f));
         footer.setColour (juce::Label::textColourId, ak::heading.withAlpha (0.85f));
         footer.setJustificationType (juce::Justification::centredLeft);
-        footer.setText (juce::String::fromUTF8 (
-            "各項目にマウスを乗せると説明が出ます。数値クリックで入力、リセットボタンで初期値。"),
-            juce::dontSendNotification);
+        // No standing text (v0.36.8). The label stays: flashFooter() still
+        // uses it for transient confirmations, and clears back to empty.
+        footer.setText ({}, juce::dontSendNotification);
         mainPage.addAndMakeVisible (footer);
         defaultFooterText = footer.getText();
 
@@ -5587,12 +5587,6 @@ private:
                  "バイノーラル/ASMR用ステレオマイク向け。左右の入力を2つの独立した変換エンジンで"
                  "並列処理し、立体感を保ったまま変換します。遅延は変わりません(CPUは約2倍)。"
                  "オフ=従来どおりモノラル(左右を合成)。"));
-        slider (*cardAdvanced, "gate", "Noise Gate (dB)",
-            tip ("Mutes the input while it stays below this level - removes fan / room noise "
-                 "between phrases. -80 = off. Set it just above your noise floor (try -55 to -45).",
-                 "入力がこのレベルを下回っている間ミュートし、話していない間のファンノイズや"
-                 "環境音を消します。-80=オフ。ノイズの音量より少し上に設定してください"
-                 "(目安 -55〜-45)。"));
         button (*cardAdvanced, "Experimental", "BETA",
             tip ("Opens the BETA window with the experimental controls (GCI Grain Sync, "
                  "Breath, Legacy Low Latency). They are kept out of the main list because "
@@ -5656,7 +5650,7 @@ private:
             r->onUserEdit = [this] { setFmtCharacterCustom(); };
         cardFormant->addGap (14);          // blank line before AEIOU
 
-        toggle (*cardFormant, "vadapt", "AEIOU Shapes",
+        toggle (*cardFormant, "vadapt", "AEIOU",
             tip ("Shapes the voice character by applying different F1-F3 adjustments to the "
                  "estimated A/E/I/O/U vowel regions. Your manual F1-F3 settings remain the "
                  "base values; the per-vowel offsets are added on top. Off = previous behaviour.",
@@ -5705,6 +5699,13 @@ private:
         slider (*cardQuality, "jitter", "Natural Jitter",
             tip ("Adds tiny natural pitch fluctuations to reduce the 'machine' feel. Try around 0.1.",
                  "ごく小さな音程の揺らぎを加え、変換の機械っぽさを和らげます。0.1前後から。"));
+        slider (*cardQuality, "gate", "Noise Gate (dB)",
+            tip ("Mutes the input while it stays below this level - removes fan / room noise "
+                 "between phrases. -80 = off. Set it just above your noise floor (try -55 to -45).",
+                 "入力がこのレベルを下回っている間ミュートし、話していない間のファンノイズや"
+                 "環境音を消します。-80=オフ。ノイズの音量より少し上に設定してください"
+                 "(目安 -55〜-45)。"));
+
 
         // -- bottom row ------------------------------------------------
         cardHigh = &newCard ("HIGH RANGE / LOW LIMIT", "ui_mark_M_HighRange_png", ak::headBlue);
@@ -5936,8 +5937,13 @@ private:
         auto r = mainPage.getLocalBounds();
         footer.setBounds (r.removeFromBottom (footerH + 4).withTrimmedTop (4));
 
+        r.reduce (ak::kPageMarginX, 0);          // breathing room at both edges
+
         const int usable = r.getWidth() - 2 * ak::kGap;
-        const int w1 = juce::jmax (250, (int) ((float) usable * 0.92f / 3.16f));
+        // The side columns take kMidTrim/2 each, so the FORMANT column in the
+        // middle ends up kMidTrim narrower without changing the total.
+        const int w1 = juce::jmax (250, (int) ((float) usable * 0.92f / 3.16f))
+                         + ak::kMidTrim / 2;
         const int w2 = usable - w1 * 2;
 
         auto c1 = r.removeFromLeft (w1);   r.removeFromLeft (ak::kGap);

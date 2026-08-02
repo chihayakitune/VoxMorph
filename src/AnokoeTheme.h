@@ -96,6 +96,9 @@ namespace anokoe
     constexpr int   kActionsW    = 40;
     constexpr int   kLabelW      = 150;
     constexpr int   kGap         = 10;
+    constexpr int   kPageMarginX = 8;     // main grid inset from both edges
+    constexpr int   kMidTrim     = 8;     // taken off the middle column and
+                                          // handed to the two side ones
     constexpr int   kSidebarW    = 132;
     constexpr int   kHeaderH     = 94;    // v0.34.0: 1.5x the v0.32 height
     constexpr int   kBandH       = 158;   // dark hero band
