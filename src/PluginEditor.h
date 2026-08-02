@@ -4875,6 +4875,24 @@ public:
 //
 // A second, outer halo follows the OUTPUT level, so the circle still breathes
 // with your voice even when the vowel tracker is not running.
+// ---------------------------------------------------------------------------
+// The character badge in the middle of the band, and the mini visualiser that
+// rings it (v0.36.9, replacing the AEIOU percentages).
+//
+// The ring lives in the dark COLLAR around the portrait and never covers her
+// face: one mirrored spectrum, INPUT growing inward and OUTPUT growing
+// outward from a baseline circle, 20 Hz at 12 o'clock sweeping clockwise to
+// 20 kHz. Seeing the two apart is the whole point of a formant shifter — the
+// output's peaks sit above the input's, and you can watch that happen while
+// you talk. Mint = input / pink = output, the same pairing the Visualizer
+// page uses.
+//
+// Fed by the shared SpectrumData, so it obeys the same "nobody is looking,
+// stop filling the taps" rule as that page. NOTE: this badge is on screen on
+// EVERY page, so registering it does keep the analysis running the whole time
+// — one FFT per frame on the message thread plus the audio thread's ring
+// writes. That is the standing price of a live visualiser in the spot the
+// user looks at most; Performance Mode still throttles the frame rate.
 class HeroCircle : public juce::Component, public juce::SettableTooltipClient,
                    private juce::Timer
 {
@@ -4882,130 +4900,139 @@ public:
     explicit HeroCircle (VoxMorphProcessor& p) : proc (p)
     {
         setTooltip (vmTip (
-            "The AEIOU balance of your voice right now, as a ring around the character: "
-            "how much /a/ /i/ /u/ /e/ /o/ the engine hears. It needs AEIOU Character "
-            "switched on (FORMANT) with Amount above 0, because the vowel tracking is "
-            "part of that feature. The soft outer halo follows the output level and works "
-            "at all times.",
-            "いま話している声の母音バランス(あいうえおの割合)を、キャラクターの周りの"
-            "リングで表示します。FORMANTのAEIOU CharacterがオンでAmountが0より大きい"
-            "ときに動きます(母音の推定がこの機能の一部のため)。外側のふんわりした光は"
-            "出力レベルに追従し、こちらは常に動作します。"));
+            "Your voice around the character: the INPUT spectrum grows inward "
+            "(mint) and the CONVERTED OUTPUT grows outward (pink), low "
+            "frequencies at the top sweeping clockwise. Watch the pink peaks "
+            "sit above the mint ones as Formant lifts them. The ring around "
+            "the portrait brightens with the output level.",
+            "キャラクターの周りに今の声を表示します。内側(ミント)が入力、"
+            "外側(ピンク)が変換後の出力のスペクトルで、真上が低音、時計回りに"
+            "高音へ進みます。Formantを上げるとピンクの山がミントより外側へ"
+            "ずれるのが見えます。肖像の縁のリングは出力レベルで明るくなります。"));
         startTimerHz (24);
     }
 
-private:
-    static constexpr int kV = 5;
-    static constexpr const char* kLbl[kV] = { "A", "I", "U", "E", "O" };
+    // the editor hands over the shared analyser once it exists
+    void setSpectrum (SpectrumData* s) { spec = s; }
 
-    static juce::Colour vowelColour (int i)
+    // The bounds are a SQUARE around the badge, but only the disc is ours:
+    // without this the corners would swallow clicks over the band.
+    bool hitTest (int x, int y) override
     {
-        static const juce::Colour c[kV] = {
-            juce::Colour (0xfff08ba5), juce::Colour (0xff54c0aa), juce::Colour (0xffa79ee0),
-            juce::Colour (0xffe3a63c), juce::Colour (0xff6fb2dc)
-        };
-        return c[juce::jlimit (0, kV - 1, i)];
+        auto b = getLocalBounds().toFloat();
+        const float r = juce::jmin (b.getWidth(), b.getHeight()) * 0.5f;
+        return b.getCentre().getDistanceFrom ({ (float) x, (float) y }) <= r;
     }
 
+private:
     void timerCallback() override
     {
         if (! isShowing()) return;
-        const bool  live = proc.uiVowelActive.load (std::memory_order_relaxed);
-        const float conf = proc.uiVowelConf  .load (std::memory_order_relaxed);
-        const bool  good = live && conf > 0.02f;
-        if (good)
-        {
-            float w[kV];
-            VowelAdaptiveWarp::anchorWeights (proc.uiVowelH.load (std::memory_order_relaxed),
-                                              proc.uiVowelF.load (std::memory_order_relaxed), w);
-            for (int i = 0; i < kV; ++i) sm[i] += 0.22f * (w[i] - sm[i]);
-        }
-        fade   += 0.14f * ((good ? 1.0f : 0.15f) - fade);
-        active  = live;
-
         const float pk = juce::jmax (proc.uiOutL.peak.load (std::memory_order_relaxed),
                                      proc.uiOutR.peak.load (std::memory_order_relaxed));
         const float db = juce::Decibels::gainToDecibels (pk, -60.0f);
         halo += 0.25f * (juce::jlimit (0.0f, 1.0f, (db + 54.0f) / 54.0f) - halo);
-        repaint();
+        repaint();       // SpectrumData repaints us too; this drives the rim
+    }
+
+    // A spectrum column's dB -> 0..1 for the ring. Tighter than the
+    // Visualizer page's full range: this is a 14 px tall bar, so -54..0 dB
+    // with a slight gamma keeps ordinary speech in the middle of the sweep
+    // instead of hugging the baseline.
+    static float norm (float db)
+    {
+        const float t = juce::jlimit (0.0f, 1.0f, (db + 54.0f) / 54.0f);
+        return std::pow (t, 0.72f);
     }
 
     void paint (juce::Graphics& g) override
     {
         auto b = getLocalBounds().toFloat();
-        const float side = juce::jmin (b.getWidth(), b.getHeight());
-        const auto  c    = b.getCentre();
-        const float portR = side * 0.5f - 2.0f;
-        const auto  port  = juce::Rectangle<float> (portR * 2.0f, portR * 2.0f).withCentre (c);
+        const float side   = juce::jmin (b.getWidth(), b.getHeight());
+        const auto  c      = b.getCentre();
+        const float outerR = side * 0.5f;
+        // the component spans the portrait AND the collar the band bulges out
+        const float portR  = outerR * (float) ak::kHeroR
+                                    / (float) (ak::kHeroR + ak::kHeroRim);
+        const float collar = juce::jmax (6.0f, outerR - portR);
 
-        // v0.33.0: the coloured AEIOU ring is gone — the dark collar around
-        // the portrait is drawn by the band itself, and the only live
-        // decoration left is the rim, which brightens with the output level.
-        float sum = 0.0f;
-        for (int i = 0; i < kV; ++i) sum += juce::jmax (0.0f, sm[i]);
+        paintRing (g, c, portR, collar);
 
         {
             juce::Graphics::ScopedSaveState ss (g);
             juce::Path clip;
+            const auto port = juce::Rectangle<float> (portR * 2.0f, portR * 2.0f).withCentre (c);
             clip.addEllipse (port);
             g.reduceClipRegion (clip);
-            g.setColour (juce::Colour (0xfff2f6ff));
+            g.setColour (juce::Colours::white);
             g.fillEllipse (port);
-
-            // the art is a rounded-square app icon, so oversize it: the
-            // square edges land outside the circular clip
-            if (auto ic = ak::image ("icon_png"); ic.isValid())
-                g.drawImage (ic, port.expanded (portR * 0.16f).translated (0.0f, -portR * 0.10f),
-                             juce::RectanglePlacement::fillDestination, false);
-
-            // caption plate: a chord across the WIDE part of the circle (not
-            // the very bottom, where it would be too narrow for five
-            // readings), faded in from the top so it does not cut a hard
-            // line across her face
-            auto plate = juce::Rectangle<float> (port.getX(), c.y + portR * 0.14f,
-                                                 port.getWidth(), portR * 0.66f);
-            g.setGradientFill (juce::ColourGradient (
-                juce::Colour (0x00161a2c), plate.getCentreX(), plate.getY(),
-                juce::Colour (0xe6161a2c), plate.getCentreX(), plate.getY() + plate.getHeight() * 0.45f,
-                false));
-            g.fillRect (plate);
-
-            auto line1 = plate.removeFromTop (plate.getHeight() * 0.52f)
-                              .withTrimmedTop (portR * 0.14f);
-            g.setColour (ak::bandDim);
-            g.setFont (ak::font (juce::jmax (8.0f, portR * 0.125f), true));
-            g.drawText (active ? "AEIOU BALANCE" : "AEIOU CHARACTER OFF",
-                        line1.toNearestInt(), juce::Justification::centred, false);
-
-            if (active && sum > 1.0e-6f)
-            {
-                // the circle narrows toward the bottom, so keep the row well
-                // inside the chord width or the outer cells get clipped
-                auto rowArea = plate.reduced (portR * 0.30f, 0.0f);
-                const float cw = rowArea.getWidth() / (float) kV;
-                g.setFont (ak::font (juce::jmax (7.5f, portR * 0.115f)));
-                for (int i = 0; i < kV; ++i)
-                {
-                    auto cell = rowArea.withWidth (cw).translated (cw * (float) i, 0.0f);
-                    g.setColour (vowelColour (i).withMultipliedAlpha (0.45f + 0.55f * fade));
-                    g.drawText (juce::String (kLbl[i]) + " "
-                                  + juce::String (juce::roundToInt (
-                                        juce::jmax (0.0f, sm[i]) / sum * 100.0f)) + "%",
-                                cell.toNearestInt(), juce::Justification::centred, false);
-                }
-            }
+            // the art is already a circle on white, drawn edge to edge
+            if (auto art = ak::image ("ui_hero_character_png"); art.isValid())
+                g.drawImage (art, port, juce::RectanglePlacement::fillDestination, false);
         }
 
-        // rim: a quiet ring that brightens with the output level, so the
-        // circle still reacts to your voice without the busy coloured donut
+        // the portrait's own edge, brightening with the output level
         g.setColour (juce::Colours::white.withAlpha (0.30f + 0.45f * halo));
-        g.drawEllipse (port.reduced (0.75f), 1.5f);
+        g.drawEllipse (juce::Rectangle<float> (portR * 2.0f, portR * 2.0f)
+                           .withCentre (c).reduced (0.75f), 1.5f);
+    }
+
+    // mirrored spectrum bars around the collar
+    void paintRing (juce::Graphics& g, juce::Point<float> c, float portR, float collar)
+    {
+        constexpr int kBars = 56;
+        const float base   = portR + collar * 0.50f;   // bars grow either side
+        const float maxLen = collar * 0.34f;           // tips stay off the band's edge
+        const float minLen = 1.6f;                     // a quiet ring is still a ring
+        const float thick  = juce::jmax (1.8f, collar * 0.155f);
+
+        // the baseline itself, so the ring reads as a designed element even in
+        // silence rather than as a row of stray ticks
+        g.setColour (juce::Colours::white.withAlpha (0.10f));
+        g.drawEllipse (juce::Rectangle<float> (base * 2.0f, base * 2.0f).withCentre (c), 1.0f);
+
+        const std::vector<float>* inCols  = spec != nullptr ? &spec->in()  : nullptr;
+        const std::vector<float>* outCols = spec != nullptr ? &spec->out() : nullptr;
+
+        for (int i = 0; i < kBars; ++i)
+        {
+            // 12 o'clock = the lowest column, then clockwise
+            const float a  = juce::MathConstants<float>::twoPi * (float) i / (float) kBars
+                               - juce::MathConstants<float>::halfPi;
+            const juce::Point<float> dir (std::cos (a), std::sin (a));
+
+            // average the columns this bar covers, so nothing is skipped
+            float li = 0.0f, lo = 0.0f;
+            if (inCols != nullptr)
+            {
+                const int c0 = i * SpectrumData::kCols / kBars;
+                const int c1 = juce::jmax (c0 + 1, (i + 1) * SpectrumData::kCols / kBars);
+                float si = 0.0f, so = 0.0f;
+                for (int k = c0; k < c1; ++k)
+                {
+                    si += norm ((*inCols) [(size_t) k]);
+                    so += norm ((*outCols)[(size_t) k]);
+                }
+                li = si / (float) (c1 - c0);
+                lo = so / (float) (c1 - c0);
+            }
+
+            // The collar is only ~34 px, so length alone gives a 5:1 sweep at
+            // best. Brightness carries most of the shape: a quiet band fades
+            // almost out while a loud one is fully lit.
+            auto bar = [&] (float from, float to, juce::Colour col, float level)
+            {
+                g.setColour (col.withAlpha (0.22f + 0.78f * level));
+                g.drawLine ({ c + dir * from, c + dir * to }, thick);
+            };
+            bar (base - 1.5f, base - 1.5f - (minLen + li * maxLen), ak::seriesIn,  li);
+            bar (base + 1.5f, base + 1.5f + (minLen + lo * maxLen), ak::seriesOut, lo);
+        }
     }
 
     VoxMorphProcessor& proc;
-    float sm[kV] = { 0.2f, 0.2f, 0.2f, 0.2f, 0.2f };
-    float fade = 0.15f, halo = 0.0f;
-    bool  active = false;
+    SpectrumData* spec = nullptr;
+    float halo = 0.0f;
 };
 
 // ===========================================================================
@@ -5049,6 +5076,8 @@ public:
 
         addAndMakeVisible (header);
         addAndMakeVisible (hero);
+        hero.setSpectrum (&specData);
+        specData.addView (&hero);          // the badge is a spectrum view too
 
         // ---- sidebar ----------------------------------------------------
         static const struct { const char* label; const char* icon; } kPages[] = {
@@ -5380,7 +5409,9 @@ public:
         heroC = { (float) bandArea.getCentreX(), (float) bandArea.getBottom() - 74.0f };
         heroOuter = (float) (ak::kHeroR + ak::kHeroRim);
         bandShape = ak::bandPath (bandArea, heroC, heroOuter);
-        hero.setBounds (juce::Rectangle<int> (ak::kHeroR * 2, ak::kHeroR * 2)
+        // spans the portrait AND the collar: the mini visualiser's ring is
+        // drawn in the collar, so the component has to reach heroOuter
+        hero.setBounds (juce::Rectangle<int> ((int) (heroOuter * 2.0f), (int) (heroOuter * 2.0f))
                             .withCentre (heroC.roundToInt()));
 
         // page tabs hang off the band's bottom edge: Main / Matching / ASMR on
