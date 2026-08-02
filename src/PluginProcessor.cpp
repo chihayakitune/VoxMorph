@@ -42,6 +42,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::ParameterID { "vcharacter", 1 }, "AEIOU Character Type",
                 juce::StringArray { "Natural", "Soft", "Active", "Loli",
                                     "Anime", "Lily", "Elegant", "Uni", "Custom" }, 0));
+    // Fmt Character (v0.36.7): a preset for the seven global formant rows
+    // (Consonant + F1-F3 shift/gain). UI-only — the editor writes those
+    // parameters, the engine never reads this. Defaults to Custom so an
+    // existing session keeps whatever its sliders already hold instead of
+    // claiming to be a character it is not.
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+                juce::ParameterID { "fcharacter", 1 }, "Fmt Character Type",
+                juce::StringArray { "Natural", "Soft", "Active", "Loli",
+                                    "Anime", "Lily", "Elegant", "Uni", "Custom" }, 8));
     // Custom map: 15 shift ids (vowel a/i/u/e/o x F1/F2/F3, semitones) +
     // 15 gain ids (dB, v0.27.0), defaults = the Natural preset. Kept in
     // the state even while a built-in Character is selected.

@@ -4,6 +4,7 @@
 #include "MatchingEngine.h"
 #include "SampleTargetCatalog.h"
 #include "AnokoeWidgets.h"
+#include "FmtCharacterPresets.h"
 
 namespace ak = anokoe;   // ANOKOE skin: colours, art and skinned widgets
 
@@ -1053,12 +1054,33 @@ inline juce::String vmSetOutputDevice (const juce::String& name)
     auto* dm = vmDeviceManager();
     if (dm == nullptr)
         return juce::String::fromUTF8 ("スタンドアロン版でのみ使用できます。");
-    juce::AudioDeviceManager::AudioDeviceSetup s;
-    dm->getAudioDeviceSetup (s);
-    if (s.outputDeviceName == name) return {};
-    s.outputDeviceName = name;
-    s.useDefaultOutputChannels = true;
-    return dm->setAudioDeviceSetup (s, true);
+    juce::AudioDeviceManager::AudioDeviceSetup before;
+    dm->getAudioDeviceSetup (before);
+    if (before.outputDeviceName == name) return {};
+
+    // Check the name against the live list FIRST. JUCE's
+    // setAudioDeviceSetup() calls deleteCurrentDevice() before it verifies
+    // that the requested device exists, so handing it a name that is not
+    // there tears down the device that is currently open and then returns
+    // "No such device" — leaving the app with neither an input nor an output
+    // selected. That was the MONITOR bug: the picker stored the decorated
+    // "... (offline)" label as if it were a device name.
+    if (name.isNotEmpty() && ! vmOutputDeviceNames().contains (name))
+        return juce::String::fromUTF8 ("デバイスが見つかりません: ") + name;
+
+    auto wanted = before;
+    wanted.outputDeviceName = name;
+    wanted.useDefaultOutputChannels = true;
+    const auto err = dm->setAudioDeviceSetup (wanted, true);
+
+    // Belt and braces: anything else that fails (device busy, sample rate
+    // refused) has also already closed the old device, so put it back.
+    if (err.isNotEmpty())
+    {
+        auto restore = before;
+        dm->setAudioDeviceSetup (restore, true);
+    }
+    return err;
 }
 
 // ---- reusable parameter row (v0.31.0: the only row type in the skinned UI) -
@@ -1138,6 +1160,7 @@ public:
                     slider.setValue (slider.getValueFromText (value.getText()),
                                      juce::sendNotificationSync);
                     syncValueText();
+                    if (onUserEdit) onUserEdit();
                 };
                 // Type over the number, not the unit: the editor opens on the
                 // bare value, so "2.00st" offers "2.00", and typing 3 + Enter
@@ -1162,6 +1185,22 @@ public:
                 // after the attachment: it rewrites the text conversion but
                 // never touches the suffix, which is appended on top of it
                 if (unit.isNotEmpty()) slider.setTextValueSuffix (" " + unit);
+                // onUserEdit fires for a HAND edit only — a drag, or a click
+                // on the track, which JUCE also starts a drag for. NOT
+                // slider.onValueChange: that fires for a preset, the host or
+                // a Fmt Character too, none of which mean the user has taken
+                // the row off its character. Set after the attachment and
+                // chained onto whatever is already there: JUCE 8.0.4's
+                // SliderParameterAttachment happens to use a Listener rather
+                // than this callback, but nothing guarantees that.
+                {
+                    auto previous = slider.onDragStart;
+                    slider.onDragStart = [this, previous]
+                    {
+                        if (previous) previous();
+                        if (onUserEdit) onUserEdit();
+                    };
+                }
                 // A parameter sitting at exactly zero prints "-0.00": its raw
                 // value lands a hair below zero and the formatter keeps the
                 // minus. Drop it on every row — a stray minus on a default
@@ -1200,6 +1239,7 @@ public:
             rp->beginChangeGesture();
             rp->setValueNotifyingHost (rp->getDefaultValue());
             rp->endChangeGesture();
+            if (onUserEdit) onUserEdit();
         };
         lock.onClick = [this]
         {
@@ -1368,6 +1408,7 @@ public:
     juce::ComboBox&     getCombo()  { return combo; }
     juce::TextButton&   getButton() { return action; }
     std::function<void()> onLockChanged;
+    std::function<void()> onUserEdit;      // the user moved THIS row by hand
 
 private:
     void syncValueText()
@@ -3941,8 +3982,13 @@ public:
         monBox.onChange = [this]
         {
             if (updating) return;
-            proc.monitorDeviceName = monBox.getSelectedId() <= 1 ? juce::String()
-                                                                 : monBox.getText();
+            // Never store what the LIST says: an offline device is shown with
+            // a "(未接続 / offline)" suffix, and storing that decorated label
+            // as a device name is what used to knock out the input and output
+            // selection when MONITOR was pressed (see vmSetOutputDevice).
+            const int sel = monBox.getSelectedId();
+            proc.monitorDeviceName = sel <= 1 ? juce::String()
+                                              : monNames[sel - 2];
         };
         addAndMakeVisible (monBox);
 
@@ -4084,10 +4130,14 @@ private:
         const auto names = vmOutputDeviceNames();
         monBox.clear (juce::dontSendNotification);
         monBox.addItem (juce::String::fromUTF8 ("-- 未設定 / not set --"), 1);
+        // monNames[id - 2] is the REAL device name behind each item; the item
+        // text may carry an "offline" suffix and must never be used as one.
+        monNames.clear();
         int id = 2, selId = 1;
         for (const auto& n : names)
         {
             monBox.addItem (n, id);
+            monNames.add (n);
             if (n == proc.monitorDeviceName) selId = id;
             ++id;
         }
@@ -4096,6 +4146,7 @@ private:
         {
             monBox.addItem (proc.monitorDeviceName
                               + juce::String::fromUTF8 ("  (未接続 / offline)"), id);
+            monNames.add (proc.monitorDeviceName);
             selId = id;
         }
         monBox.setSelectedId (selId, juce::dontSendNotification);
@@ -4104,6 +4155,7 @@ private:
     VoxMorphProcessor& proc;
     juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
     juce::TooltipWindow  tips { this, 400 };
+    juce::StringArray monNames;        // real device name per monBox item
     juce::Label hDevice, hMonitor, hPerf, hSafety, monLbl, monNote, bufLbl, bufNote;
     std::unique_ptr<juce::AudioDeviceSelectorComponent> sel;
     juce::ComboBox   monBox;
@@ -5563,7 +5615,8 @@ private:
                  "声道の長さ=声の響き・声色を変えます。ピッチは変わりません。"
                  "+で若く/女性的に、-で太く/男性的に。女声化は+3〜+4が目安。"), ak::Tone::pink);
         rowFormant->setSignedValue();
-        auto& rConst = slider (*cardFormant, "consonant", "Const (st)",
+        addFmtCharacterRow();
+        auto& rConst = slider (*cardFormant, "consonant", "Co Shift (st)",
             tip ("Extra shift applied only to unvoiced consonants (s, sh...), added on top of Formant. "
                  "Female consonants are brighter: try +2 to +3. Too much sounds like a lisp.",
                  "無声子音(サ行・シャ行など)だけを追加でシフトします(Formantに加算)。"
@@ -5597,9 +5650,13 @@ private:
                  "this region carries much of a voice's charm.",
                  "第3フォルマント付近の強さ。上げると艶・張りが出ます。声の「華」が乗る帯域です。"), ak::Tone::pink);
         bracket ({ &rConst, &rF1S, &rF2S, &rF3S, &rF1G, &rF2G, &rF3G });
+        // picking a character writes these seven; moving any of them by hand
+        // puts the dropdown back to Custom
+        for (auto* r : { &rConst, &rF1S, &rF2S, &rF3S, &rF1G, &rF2G, &rF3G })
+            r->onUserEdit = [this] { setFmtCharacterCustom(); };
         cardFormant->addGap (14);          // blank line before AEIOU
 
-        toggle (*cardFormant, "vadapt", "AEIOU Character",
+        toggle (*cardFormant, "vadapt", "AEIOU Shapes",
             tip ("Shapes the voice character by applying different F1-F3 adjustments to the "
                  "estimated A/E/I/O/U vowel regions. Your manual F1-F3 settings remain the "
                  "base values; the per-vowel offsets are added on top. Off = previous behaviour.",
@@ -5657,7 +5714,7 @@ private:
                  "Pitch and Formant amounts.",
                  "高音域ガード(下にぶら下がる3項目)をまとめてオン/オフします。"
                  "オフのときは、高い声もPitch/Formantの通常の変化量のまま変換されます。"));
-        auto& rHiF = slider (*cardHigh, "hifreq", "High Range Start (Hz)",
+        auto& rHiF = slider (*cardHigh, "hifreq", "High Pitch Roof (Hz)",
             tip ("When your INPUT pitch (before conversion) rises above this - laughing, squealing, "
                  "exclamations - the Pitch/Formant shifts blend smoothly toward the High amounts "
                  "below, reaching them fully one octave up. Stops laughs from being shifted into "
@@ -5666,12 +5723,12 @@ private:
                  "フォルマントの変化量が下のHigh設定へ滑らかに移行し、1オクターブ上で完全に"
                  "切り替わります。笑い声が不自然な高音まで上がるのを防ぎます。0=オフ。"
                  "250〜350Hzが目安。"));
-        auto& rHiP = slider (*cardHigh, "hipitch", "High Pitch Amount (%)",
+        auto& rHiP = slider (*cardHigh, "hipitch", "High Pitch Keep (%)",
             tip ("How much of the Pitch shift remains in the high range. 100% = same as normal, "
                  "0% = no shift there (laughs keep their natural pitch). Try 30-60%.",
                  "高音域で残すPitchシフトの割合。100%=通常と同じ、0%=シフトなし(笑い声は"
                  "地声の高さのまま)。30〜60%が目安。"));
-        auto& rHiA = slider (*cardHigh, "hiformant", "High Fmt Amount (%)",
+        auto& rHiA = slider (*cardHigh, "hiformant", "High Fmt Keep (%)",
             tip ("How much of the Formant shift remains in the high range. Usually leave at 100% "
                  "so the voice keeps its character while only the pitch settles down.",
                  "高音域で残すFormantシフトの割合。通常は100%のまま(声色は保ちつつピッチだけ"
@@ -5713,11 +5770,79 @@ private:
             r->setTree (++i == n ? ParamRow::Tree::last : ParamRow::Tree::mid);
     }
 
+    // Fmt Character: a preset for the seven global formant rows below it.
+    // Nothing is hidden or disabled while one is selected — the rows stay
+    // live, and touching any of them drops the dropdown back to Custom.
+    void addFmtCharacterRow()
+    {
+        fmtCombo = std::make_unique<ParamRow> (proc, "fcharacter", ParamRow::Kind::combo,
+            "Fmt Character",
+            tip ("Presets the seven rows below (Co Shift and F1-F3 shift / gain) in one "
+                 "move. The rows stay editable: change any of them and this goes back to "
+                 "Custom. Same character names as AEIOU Character, but this shifts the "
+                 "whole vocal tract while that one shapes the five vowels apart.",
+                 "下の7項目(Co ShiftとF1〜F3のShift/Gain)をまとめて設定します。"
+                 "各項目はそのまま操作でき、どれか1つでも動かすとCustomに戻ります。"
+                 "名前はAEIOU Characterと共通ですが、あちらが母音ごとの差を"
+                 "作るのに対し、こちらは声道全体を動かします。"),
+            ak::Tone::pink);
+        fmtCombo->setLookAndFeel (&lnfPink);
+        fmtCombo->onLockChanged = [this] { syncLockUI(); };
+        rows.push_back (fmtCombo.get());
+        cardFormant->add (*fmtCombo, 32);
+
+        // The ComboBoxAttachment listens as a ComboBox::Listener, and JUCE
+        // calls listeners BEFORE onChange — so by the time this runs the
+        // parameter already holds the new choice.
+        fmtCombo->getCombo().onChange = [this]
+        {
+            applyFmtCharacter (fmtCombo->getCombo().getSelectedItemIndex());
+        };
+    }
+
+    void applyFmtCharacter (int index)
+    {
+        if (index < 0 || index >= kFmtCustom) return;      // Custom writes nothing
+        const auto& m = getFmtCharacterMap (index);
+
+        // One undo step for the whole character, and locked rows are left
+        // alone — same contract as the AEIOU detail window's Copy to Custom.
+        proc.history.group ([&]
+        {
+            auto put = [this] (const char* id, float v)
+            {
+                if (proc.isParamLocked (id)) return;
+                if (auto* rp = proc.apvts.getParameter (id))
+                {
+                    rp->beginChangeGesture();
+                    rp->setValueNotifyingHost (rp->convertTo0to1 (v));
+                    rp->endChangeGesture();
+                }
+            };
+            put ("consonant", m.consonantSt);
+            put ("f1shift", m.shiftSt[0]);  put ("f1gain", m.gainDb[0]);
+            put ("f2shift", m.shiftSt[1]);  put ("f2gain", m.gainDb[1]);
+            put ("f3shift", m.shiftSt[2]);  put ("f3gain", m.gainDb[2]);
+        });
+    }
+
+    void setFmtCharacterCustom()
+    {
+        if (proc.isParamLocked ("fcharacter")) return;
+        if (auto* cp = proc.apvts.getParameter ("fcharacter"))
+            if (cp->convertFrom0to1 (cp->getValue()) < (float) kFmtCustom - 0.5f)
+            {
+                cp->beginChangeGesture();
+                cp->setValueNotifyingHost (cp->convertTo0to1 ((float) kFmtCustom));
+                cp->endChangeGesture();
+            }
+    }
+
     // AEIOU character dropdown, then DETAIL... on its own line beneath it
     void addAeiouRow()
     {
         aeiouCombo = std::make_unique<ParamRow> (proc, "vcharacter", ParamRow::Kind::combo,
-            "Character",
+            "AEIOU Character",
             tip ("Choose the voice character:\n"
                  "Natural - natural feminine balance / Soft - soft and rounded / "
                  "Active - bright and energetic / Loli - small and youthful / "
@@ -5785,9 +5910,9 @@ private:
 
     // ---- MAIN page grid --------------------------------------------------
     // Three columns, no bottom row (v0.35.0):
-    //   1  PITCH / INTONATION / HIGH RANGE / VOICE QUALITY
+    //   1  PITCH / INTONATION / HIGH RANGE
     //   2  FORMANT              (pushed down past the character's bulge)
-    //   3  AIR / ADVANCED / OUTPUT
+    //   3  AIR / ADVANCED / VOICE QUALITY / OUTPUT
     void layoutMainPage()
     {
         mainScroll.setBounds (pageArea);
@@ -5800,9 +5925,9 @@ private:
             for (auto* c : cs) h += c->preferredHeight() + ak::kGap;
             return juce::jmax (0, h - ak::kGap);
         };
-        const int col1 = stack ({ cardPitch, cardInton, cardHigh, cardQuality });
+        const int col1 = stack ({ cardPitch, cardInton, cardHigh });
         const int col2 = c2Top + cardFormant->preferredHeight();
-        const int col3 = stack ({ cardAir, cardAdvanced, cardOutput });
+        const int col3 = stack ({ cardAir, cardAdvanced, cardQuality, cardOutput });
 
         const int footerH = 22;
         mainPage.setSize (vw, juce::jmax (juce::jmax (col1, juce::jmax (col2, col3)) + footerH + 10,
@@ -5824,13 +5949,13 @@ private:
             card->setBounds (col.removeFromTop (card->preferredHeight()));
             col.removeFromTop (ak::kGap);
         };
-        place (c1, cardPitch);  place (c1, cardInton);
-        place (c1, cardHigh);   place (c1, cardQuality);
+        place (c1, cardPitch);  place (c1, cardInton);  place (c1, cardHigh);
 
         c2.removeFromTop (c2Top);            // clear the character's bulge
         cardFormant->setBounds (c2.removeFromTop (cardFormant->preferredHeight()));
 
-        place (c3, cardAir);  place (c3, cardAdvanced);  place (c3, cardOutput);
+        place (c3, cardAir);      place (c3, cardAdvanced);
+        place (c3, cardQuality); place (c3, cardOutput);
     }
 
     // ---- misc ------------------------------------------------------------
@@ -5940,6 +6065,7 @@ private:
     ParamRow* rowPitch = nullptr; ParamRow* rowFormant = nullptr; ParamRow* rowAir = nullptr;
     LayoutBox aeiouRow;
     std::unique_ptr<ParamRow> aeiouCombo;
+    std::unique_ptr<ParamRow> fmtCombo;
     juce::TextButton detailBtn;
     std::unique_ptr<PresetBar> presetBar;
     StatusView  status   { proc };
