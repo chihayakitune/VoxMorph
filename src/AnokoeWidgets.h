@@ -21,6 +21,16 @@ public:
     explicit ToneLookAndFeel (Tone t) : tone (t)
     {
         setColour (juce::Label::textColourId,               ink);
+        // Editing a value box: Label::createEditorComponent() copies these
+        // three into the TextEditor it makes. LookAndFeel_V4 specifies them
+        // from its DEFAULT (dark) scheme, so without this the text you type
+        // comes out white on white and the box looks empty.
+        setColour (juce::Label::textWhenEditingColourId,       ink);
+        setColour (juce::Label::backgroundWhenEditingColourId, juce::Colours::white);
+        setColour (juce::Label::outlineWhenEditingColourId,    toneInk (t));
+        setColour (juce::TextEditor::highlightColourId,        toneInk (t).withAlpha (0.28f));
+        setColour (juce::TextEditor::highlightedTextColourId,  ink);
+        setColour (juce::CaretComponent::caretColourId,        ink);
         setColour (juce::Slider::textBoxTextColourId,       ink);
         setColour (juce::Slider::textBoxBackgroundColourId, valueFill);
         setColour (juce::Slider::textBoxOutlineColourId,    valueLine);

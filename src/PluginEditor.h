@@ -1896,15 +1896,15 @@ public:
         const auto b        = getLocalBounds().toFloat().reduced (1.5f);
         const bool selected = getToggleState();
 
-        const juce::Colour bg = selected ? juce::Colour (0xff54bda1)  // mint
-                                         : juce::Colour (0xfffcfaf9); // near-white
-        const juce::Colour edge = selected ? ak::heading
-                                           : juce::Colour (0xffe4dadd);
+        // v0.36.11: on the ANOKOE palette. These used to be a warm near-white
+        // with a mint selection, which read as a different app next to MAIN.
+        const juce::Colour bg   = selected ? ak::sidebarSel : juce::Colours::white;
+        const juce::Colour edge = selected ? ak::headBlue   : ak::line;
         g.setColour (bg);
         g.fillRoundedRectangle (b, 10.0f);
         if (hover && ! selected)
         {
-            g.setColour (juce::Colour (0x22a889f4));
+            g.setColour (ak::pluginFill.withAlpha (0.75f));
             g.fillRoundedRectangle (b, 10.0f);
         }
         g.setColour (edge);
@@ -1913,8 +1913,7 @@ public:
         // icon area: top ~60 %. Placeholder shape until real icons ship.
         const float iconH = b.getHeight() * 0.55f;
         auto iconR = b.reduced (10.0f).withHeight (iconH);
-        g.setColour (selected ? juce::Colour (0xfffcfaf9)
-                              : juce::Colour (0xffbfd9d2));
+        g.setColour (selected ? juce::Colours::white : ak::treeLine);
         switch (iconKind)
         {
             case TileIconKind::file:
@@ -1930,7 +1929,7 @@ public:
             {
                 // record dot: solid circle in the accent colour
                 const float rad = std::min (iconR.getWidth(), iconR.getHeight()) * 0.28f;
-                g.setColour (juce::Colour (0xffd65a7a));   // Error/record red
+                g.setColour (juce::Colour (0xffe07a99));   // the app's pink
                 g.fillEllipse (iconR.getCentreX() - rad, iconR.getCentreY() - rad,
                                rad * 2.0f, rad * 2.0f);
                 break;
@@ -1950,9 +1949,8 @@ public:
         }
 
         // label: bottom area
-        g.setColour (selected ? juce::Colour (0xfffcfaf9)
-                              : juce::Colour (0xff606a68));
-        g.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
+        g.setColour (selected ? juce::Colours::white : ak::ctrlInk);
+        g.setFont (ak::font (11.0f, true));
         auto textR = b.withY (b.getY() + iconH + 4.0f)
                       .withHeight (b.getHeight() - iconH - 6.0f);
         // read via getButtonText() so recBtn.setButtonText("Recording...")
@@ -1994,15 +1992,14 @@ public:
         auto initHeading = [this] (juce::Label& l, const char* t)
         {
             l.setText (t, juce::dontSendNotification);
-            l.setFont (juce::Font (juce::FontOptions (13.5f, juce::Font::bold)));
-            l.setColour (juce::Label::textColourId, ak::heading);
+            ak::styleSectionHeading (l);
             addAndMakeVisible (l);
         };
-        // ASCII only -- avoids any codepage confusion on Windows toolchains
-        // and matches the "TargetCharacter / MyVoice / AutoMatching" spec
-        initHeading (hTargetCharacter, "TargetCharacter");
-        initHeading (hMyVoice,         "MyVoice");
-        initHeading (hAutoMatching,    "AutoMatching");
+        // ASCII only -- avoids any codepage confusion on Windows toolchains.
+        // Spaced caps to match the MAIN page's card titles.
+        initHeading (hTargetCharacter, "TARGET CHARACTER");
+        initHeading (hMyVoice,         "MY VOICE");
+        initHeading (hAutoMatching,    "AUTO MATCHING");
 
         addAndMakeVisible (recBtn);
         addAndMakeVisible (myVoiceFileBtn);
@@ -2187,7 +2184,8 @@ public:
     // v0.31.2: sits on the ANOKOE page gradient, so it draws its own card
     void paint (juce::Graphics& g) override
     {
-        ak::paintCard (g, getLocalBounds().toFloat());
+        // no panel: the page sits on the same flat body tone as MAIN
+        juce::ignoreUnused (g);
     }
 
     void resized() override
@@ -2930,8 +2928,7 @@ public:
     explicit PresetPanel (VoxMorphProcessor& p) : proc (p)
     {
         heading.setText ("PRESETS", juce::dontSendNotification);
-        heading.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-        heading.setColour (juce::Label::textColourId, ak::heading);
+        ak::styleSectionHeading (heading);
         addAndMakeVisible (heading);
 
         help.setJustificationType (juce::Justification::topLeft);
@@ -2973,8 +2970,7 @@ public:
         addAndMakeVisible (pvLbl);
 
         hProfiles.setText ("PROFILES", juce::dontSendNotification);
-        hProfiles.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-        hProfiles.setColour (juce::Label::textColourId, ak::heading);
+        ak::styleSectionHeading (hProfiles);
         addAndMakeVisible (hProfiles);
 
         pNameEdit.setTextToShowWhenEmpty (juce::String::fromUTF8 ("プロファイル名"),
@@ -3040,7 +3036,8 @@ public:
     // v0.31.2: sits on the ANOKOE page gradient, so it draws its own card
     void paint (juce::Graphics& g) override
     {
-        ak::paintCard (g, getLocalBounds().toFloat());
+        // no panel: the page sits on the same flat body tone as MAIN
+        juce::ignoreUnused (g);
     }
 
     void resized() override
@@ -3631,8 +3628,7 @@ public:
     explicit AsmrPanel (VoxMorphProcessor& p) : proc (p), pad (p)
     {
         heading.setText ("ASMR POSITION", juce::dontSendNotification);
-        heading.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-        heading.setColour (juce::Label::textColourId, ak::heading);
+        ak::styleSectionHeading (heading);
         addAndMakeVisible (heading);
 
         help.setJustificationType (juce::Justification::topLeft);
@@ -3662,7 +3658,8 @@ public:
     // v0.31.2: sits on the ANOKOE page gradient, so it draws its own card
     void paint (juce::Graphics& g) override
     {
-        ak::paintCard (g, getLocalBounds().toFloat());
+        // no panel: the page sits on the same flat body tone as MAIN
+        juce::ignoreUnused (g);
     }
 
     void resized() override
@@ -4207,8 +4204,7 @@ public:
         setLookAndFeel (&lnf);
 
         heading.setText ("BETA", juce::dontSendNotification);
-        heading.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
-        heading.setColour (juce::Label::textColourId, ak::heading);
+        ak::styleSectionHeading (heading);
         addAndMakeVisible (heading);
 
         note.setText (juce::String::fromUTF8 (
@@ -5444,7 +5440,13 @@ public:
         // pushed down past the bulge (see layoutMainPage).
         bulgeBottom = bandArea.getBottom() - 74 + ak::kHeroR + ak::kHeroRim;
         pageArea = r.reduced (12, 8).withTop (bandArea.getBottom() + 8);
-        for (auto* pg : pages) pg->setBounds (pageArea);
+        // MAIN pushes only its middle column past the bulge; the other pages
+        // are single blocks, so they start below it altogether. Without this
+        // their top row sits on top of the dark collar.
+        const auto sidePages = pageArea.withTop (
+            juce::jmax (pageArea.getY(), bulgeBottom + 12));
+        for (auto* pg : pages)
+            pg->setBounds (pg == &mainScroll ? pageArea : sidePages);
         layoutMainPage();
     }
 

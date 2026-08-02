@@ -376,6 +376,15 @@ namespace anokoe
         g.fillRect (b);
     }
 
+    // A section heading on the pages that are not MAIN. Same size, weight
+    // and blue as a MAIN card's title, so the whole window reads as one
+    // design instead of each page having its own idea of a heading.
+    inline void styleSectionHeading (juce::Label& l)
+    {
+        l.setFont (font (15.0f, true));
+        l.setColour (juce::Label::textColourId, headBlue);
+    }
+
     // A card panel: translucent white, hairline border, top inset highlight.
     inline void paintCard (juce::Graphics& g, juce::Rectangle<float> b,
                            juce::Colour fill = cardFill)
