@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(VoxMorph VERSION 0.36.11)
+project(VoxMorph VERSION 0.36.12)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
