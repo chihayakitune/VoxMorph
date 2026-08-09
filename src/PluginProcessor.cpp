@@ -869,6 +869,7 @@ void VoxMorphProcessor::getStateInformation (juce::MemoryBlock& dest)
     {
         xml->setAttribute ("lockedIds", lockedIds.joinIntoString (","));   // 🔒 params
         xml->setAttribute ("monitorDevice", monitorDeviceName);            // MONITOR target
+        xml->setAttribute ("characterImage", characterImagePath);          // badge picture
         copyXmlToBinary (*xml, dest);
     }
 }
@@ -883,6 +884,10 @@ void VoxMorphProcessor::setStateInformation (const void* data, int size)
         // elsewhere simply leaves the existing choice alone (no attribute).
         if (xml->hasAttribute ("monitorDevice"))
             monitorDeviceName = xml->getStringAttribute ("monitorDevice");
+        // Same reasoning for the badge picture: a path from another machine
+        // will not resolve, and HeroCircle falls back to the built-in art.
+        if (xml->hasAttribute ("characterImage"))
+            characterImagePath = xml->getStringAttribute ("characterImage");
         apvts.replaceState (juce::ValueTree::fromXml (*xml));
     }
 }

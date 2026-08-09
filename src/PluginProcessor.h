@@ -208,6 +208,12 @@ public:
     // The name is saved with the plugin state; the live monitoring state is not.
     juce::String monitorDeviceName, preMonitorDeviceName;
 
+    // The picture in the character badge (message thread only). Empty = the
+    // built-in art. Saved with the plugin state like monitorDeviceName, and
+    // for the same reason it is a PATH, not the pixels: the state travels
+    // between sessions, not between machines.
+    juce::String characterImagePath;
+
     // AEIOU vowel readout (v0.30.2) for the vowel donut in the VISUALIZER.
     // These are the engine's OWN vowel coordinate — the same numbers the
     // AEIOU Character warp acts on — republished through atomics because the

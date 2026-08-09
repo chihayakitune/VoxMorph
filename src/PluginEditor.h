@@ -4872,24 +4872,20 @@ public:
 // A second, outer halo follows the OUTPUT level, so the circle still breathes
 // with your voice even when the vowel tracker is not running.
 // ---------------------------------------------------------------------------
-// The character badge in the middle of the band, and the mini visualiser that
-// sits inside it (v0.36.10).
+// The character badge in the middle of the band (v0.36.13).
 //
-// A soft arc of rounded bars along the BOTTOM INSIDE of the portrait — a
-// little smile of sound. It is the converted OUTPUT spectrum, low
-// frequencies on the left rising to the right, tinted along the same
-// blue -> lavender -> pink sweep as the ANOKOE wordmark so it belongs to the
-// rest of the window rather than looking like lab equipment.
+// Just the portrait now. The spectrum arc that used to ride along the bottom
+// of it was dropped: at this size it was too small to read anything from, and
+// keeping it alive forced the FFT and the audio thread's taps to run on every
+// page. The analysis is back to running only while the Visualizer page is up.
 //
-// It is translucent and it does overlap her shoulder, which is fine: the
-// bottom of the circle is the quiet part of the picture. Nothing is drawn
-// over her face, and the dark collar around the badge is left plain.
+// The picture can be the user's own: click the badge for "Choose image..." /
+// "Use the default". The chosen path lives in the processor's state, so it
+// comes back with the session. Any aspect ratio works — the image is scaled
+// to FILL the circle and centre-cropped.
 //
-// Fed by the shared SpectrumData. NOTE: this badge is on screen on EVERY
-// page, so registering it keeps the analysis running the whole time — one
-// FFT per frame on the message thread plus the audio thread's ring writes.
-// That is the standing price of a live visualiser in the spot the user looks
-// at most; Performance Mode still throttles the frame rate.
+// The rim still brightens with the output level, which is the one live thing
+// worth keeping here: it says "sound is leaving the plugin" at a glance.
 class HeroCircle : public juce::Component, public juce::SettableTooltipClient,
                    private juce::Timer
 {
@@ -4897,20 +4893,29 @@ public:
     explicit HeroCircle (VoxMorphProcessor& p) : proc (p)
     {
         setTooltip (vmTip (
-            "Your converted voice, as a soft arc across the bottom of the "
-            "circle: low notes on the left, bright detail on the right. It "
-            "moves whenever sound is leaving the plugin, so it doubles as a "
-            "'you are being heard' light. The portrait's rim brightens with "
-            "the output level too.",
-            "変換後の声を、円の下側に沿ったやわらかいアーチで表示します。"
-            "左が低音、右にいくほど高音です。プラグインから音が出ている間ずっと"
-            "動くので、「声が届いているか」の確認にも使えます。"
-            "肖像のふちも出力レベルで明るくなります。"));
+            "Click to use your own picture here. The rim brightens with the "
+            "output level, so it also tells you sound is leaving the plugin.",
+            "クリックすると好きな画像に変更できます。ふちは出力レベルで明るくなるので、"
+            "音が出ているかの確認にも使えます。"));
         startTimerHz (24);
+        reloadImage();
     }
 
-    // the editor hands over the shared analyser once it exists
-    void setSpectrum (SpectrumData* s) { spec = s; }
+    // Re-reads proc.characterImagePath. Called on construction and after the
+    // host restores a session, so a saved picture comes back on its own.
+    void reloadImage()
+    {
+        custom = juce::Image();
+        const auto path = proc.characterImagePath;
+        if (path.isNotEmpty())
+        {
+            const juce::File f (path);
+            if (f.existsAsFile())
+                custom = juce::ImageFileFormat::loadFrom (f);
+        }
+        loadedFrom = path;
+        repaint();
+    }
 
     // The bounds are a SQUARE around the badge, but only the disc is ours:
     // without this the corners would swallow clicks over the band.
@@ -4921,31 +4926,55 @@ public:
         return b.getCentre().getDistanceFrom ({ (float) x, (float) y }) <= r;
     }
 
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        if (! e.mouseWasClicked()) return;
+        juce::PopupMenu m;
+        m.setLookAndFeel (&getLookAndFeel());
+        m.addItem (1, juce::String::fromUTF8 ("画像を選択... / Choose image..."));
+        m.addItem (2, juce::String::fromUTF8 ("既定の画像に戻す / Use the default"),
+                   proc.characterImagePath.isNotEmpty());
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+            [this] (int r)
+            {
+                if (r == 1) chooseImage();
+                else if (r == 2) { proc.characterImagePath.clear(); reloadImage(); }
+            });
+    }
+
 private:
+    void chooseImage()
+    {
+        chooser = std::make_unique<juce::FileChooser> (
+            juce::String::fromUTF8 ("キャラクター画像を選択 / Choose a character image"),
+            juce::File(), "*.png;*.jpg;*.jpeg;*.gif;*.bmp");
+        chooser->launchAsync (juce::FileBrowserComponent::openMode
+                            | juce::FileBrowserComponent::canSelectFiles,
+            [this] (const juce::FileChooser& fc)
+            {
+                const auto f = fc.getResult();
+                if (f == juce::File()) return;             // cancelled
+                // Only commit a path we could actually decode, so a bad pick
+                // cannot leave the badge blank on the next launch.
+                if (juce::ImageFileFormat::loadFrom (f).isValid())
+                {
+                    proc.characterImagePath = f.getFullPathName();
+                    reloadImage();
+                }
+            });
+    }
+
     void timerCallback() override
     {
         if (! isShowing()) return;
+        // the host may have restored a different picture under us
+        if (loadedFrom != proc.characterImagePath) reloadImage();
+
         const float pk = juce::jmax (proc.uiOutL.peak.load (std::memory_order_relaxed),
                                      proc.uiOutR.peak.load (std::memory_order_relaxed));
         const float db = juce::Decibels::gainToDecibels (pk, -60.0f);
-        halo += 0.25f * (juce::jlimit (0.0f, 1.0f, (db + 54.0f) / 54.0f) - halo);
-        repaint();       // SpectrumData repaints us too; this drives the rim
-    }
-
-    // a spectrum column's dB -> 0..1. The bars are ~30 px, so the range is
-    // tighter than the Visualizer page's: ordinary speech should land in the
-    // middle of the sweep, not hug the baseline.
-    static float norm (float db)
-    {
-        return std::pow (juce::jlimit (0.0f, 1.0f, (db + 54.0f) / 54.0f), 0.8f);
-    }
-
-    // the wordmark's own gradient: soft periwinkle -> lavender -> soft pink
-    static juce::Colour arcColour (float t)
-    {
-        const juce::Colour a (0xff8fa8e6), b (0xffb6a5e2), d (0xfff0a3c2);
-        return t < 0.5f ? a.interpolatedWith (b, juce::jlimit (0.0f, 1.0f, t * 2.0f))
-                        : b.interpolatedWith (d, juce::jlimit (0.0f, 1.0f, (t - 0.5f) * 2.0f));
+        const float want = juce::jlimit (0.0f, 1.0f, (db + 54.0f) / 54.0f);
+        if (std::abs (want - halo) > 0.002f) { halo += 0.25f * (want - halo); repaint(); }
     }
 
     void paint (juce::Graphics& g) override
@@ -4959,69 +4988,29 @@ private:
                                     / (float) (ak::kHeroR + ak::kHeroRim);
         const auto  port   = juce::Rectangle<float> (portR * 2.0f, portR * 2.0f).withCentre (c);
 
-        juce::Graphics::ScopedSaveState ss (g);
-        juce::Path clip;
-        clip.addEllipse (port);
-        g.reduceClipRegion (clip);           // everything stays inside the badge
+        {
+            juce::Graphics::ScopedSaveState ss (g);
+            juce::Path clip;
+            clip.addEllipse (port);
+            g.reduceClipRegion (clip);
+            g.setColour (juce::Colours::white);
+            g.fillEllipse (port);
+            // fillDestination scales to cover and centre-crops, so any shape
+            // of picture fills the circle without distortion
+            const auto& art = custom.isValid() ? custom : ak::image ("ui_hero_character_png");
+            if (art.isValid())
+                g.drawImage (art, port, juce::RectanglePlacement::fillDestination, false);
+        }
 
-        g.setColour (juce::Colours::white);
-        g.fillEllipse (port);
-        // the art is already a circle on white, drawn edge to edge
-        if (auto art = ak::image ("ui_hero_character_png"); art.isValid())
-            g.drawImage (art, port, juce::RectanglePlacement::fillDestination, false);
-
-        paintArc (g, c, portR);
-
-        // the portrait's own edge, brightening with the output level
+        // the portrait's edge, brightening with the output level
         g.setColour (juce::Colours::white.withAlpha (0.25f + 0.40f * halo));
         g.drawEllipse (port.reduced (0.75f), 1.5f);
     }
 
-    void paintArc (juce::Graphics& g, juce::Point<float> c, float portR)
-    {
-        constexpr int   kBars   = 22;                        // chunky, not dense
-        constexpr float kFromDeg = 24.0f, kToDeg = 156.0f;   // y is down: the bottom sweep
-        // Only the range a voice actually occupies, ~80 Hz to ~8 kHz. The
-        // full 20 Hz - 20 kHz axis would spend a third of the arc on bands
-        // that are always empty, and the smile would sit lopsided.
-        constexpr int   kColLo = 44, kColHi = 192;
-        const float rBase  = portR * 0.955f;                 // just inside the rim
-        const float maxLen = portR * 0.30f;
-        const float minLen = portR * 0.030f;                 // a row of beads when quiet
-        const float thick  = juce::jmax (2.5f, portR * 0.062f);
-
-        const std::vector<float>* cols = spec != nullptr ? &spec->out() : nullptr;
-
-        for (int i = 0; i < kBars; ++i)
-        {
-            const float t = (float) i / (float) (kBars - 1);
-            const float a = juce::degreesToRadians (kFromDeg + (kToDeg - kFromDeg) * (1.0f - t));
-            const juce::Point<float> dir (std::cos (a), std::sin (a));
-
-            // average the columns this bar covers, so nothing is skipped
-            float lvl = 0.0f;
-            if (cols != nullptr)
-            {
-                const int span = kColHi - kColLo;
-                const int c0 = kColLo + i * span / kBars;
-                const int c1 = juce::jmax (c0 + 1, kColLo + (i + 1) * span / kBars);
-                for (int k = c0; k < c1; ++k) lvl += norm ((*cols)[(size_t) k]);
-                lvl /= (float) (c1 - c0);
-            }
-
-            // rounded caps: drawLine would give hard square ends, and the
-            // whole point here is that it reads soft
-            juce::Path bar;
-            bar.startNewSubPath (c + dir * rBase);
-            bar.lineTo (c + dir * (rBase - minLen - lvl * maxLen));
-            g.setColour (arcColour (t).withAlpha (0.30f + 0.50f * lvl));
-            g.strokePath (bar, juce::PathStrokeType (thick, juce::PathStrokeType::curved,
-                                                            juce::PathStrokeType::rounded));
-        }
-    }
-
     VoxMorphProcessor& proc;
-    SpectrumData* spec = nullptr;
+    juce::Image  custom;
+    juce::String loadedFrom;
+    std::unique_ptr<juce::FileChooser> chooser;
     float halo = 0.0f;
 };
 
@@ -5066,8 +5055,6 @@ public:
 
         addAndMakeVisible (header);
         addAndMakeVisible (hero);
-        hero.setSpectrum (&specData);
-        specData.addView (&hero);          // the badge is a spectrum view too
 
         // ---- sidebar ----------------------------------------------------
         static const struct { const char* label; const char* icon; } kPages[] = {
