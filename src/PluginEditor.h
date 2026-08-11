@@ -935,6 +935,17 @@ inline juce::Array<juce::File> voxMorphPresetFiles()
     return files;
 }
 
+// A .vmpreset is the APVTS state plus the few non-parameter things a preset
+// should carry. Every writer goes through here (the MAIN bar, the PRESETS tab
+// and MATCHING all save presets) so the format cannot drift between them.
+inline std::unique_ptr<juce::XmlElement> voxMorphPresetXml (VoxMorphProcessor& proc)
+{
+    auto xml = proc.apvts.copyState().createXml();
+    if (xml != nullptr)
+        xml->setAttribute ("characterImage", proc.characterImagePath);
+    return xml;
+}
+
 // Apply a .vmpreset to the processor: ONE undo step, locked parameters keep
 // their current value, and parameters missing from the file fall back to
 // their default (the semantics PresetPanel has had since v0.19.0 — this is
@@ -969,6 +980,10 @@ inline bool voxMorphApplyPreset (VoxMorphProcessor& proc, const juce::File& file
                 }
             }
     });
+    // Presets written before v0.36.14 have no picture in them; leave whatever
+    // is showing alone rather than clearing it.
+    if (xml->hasAttribute ("characterImage"))
+        proc.characterImagePath = xml->getStringAttribute ("characterImage");
     return true;
 }
 
@@ -1447,97 +1462,102 @@ private:
 // Horizontal bar of the plugin's REAL output level (after mute, output gain,
 // ASMR pan and the Post FX chain). Filled bar = RMS, thin marker = peak, on a
 // -60 .. +6 dB scale; the fill turns amber near 0 dBFS and pink when clipping.
-class OutputMeter : public juce::Component, public juce::SettableTooltipClient,
+// ---------------------------------------------------------------------------
+// OUTPUT lamps (v0.36.14, replacing the level bar). One per channel, because
+// a dead channel is the failure you actually want to catch — a single summed
+// bar hides it.
+//
+// Three states in one lamp: dark = silence, mint = signal, pink = the channel
+// touched 0 dBFS. The pink LATCHES for a moment: a clip is a handful of
+// samples and would be over before you looked up.
+class OutputLamps : public juce::Component, public juce::SettableTooltipClient,
                     private juce::Timer
 {
 public:
-    explicit OutputMeter (VoxMorphProcessor& p) : proc (p)
+    explicit OutputLamps (VoxMorphProcessor& p) : proc (p)
     {
         setTooltip (vmTip (
-            "Level of the signal actually leaving VoxMorph: after Mute, Output Gain, the "
-            "ASMR position and any Post FX. The bar is the average (RMS) level and the thin "
-            "marker is the recent peak. Aim for the peak to sit in the mint / amber area; "
-            "pink means 0 dBFS is being hit and the output may be clipping - lower Output Gain.",
-            "VoxMorphから実際に出ている音のレベルです(Mute・Output Gain・ASMR位置・Post FXの"
-            "すべてを通過した後)。バーが平均(RMS)レベル、細い線が直近のピークです。ピークが"
-            "ミント〜アンバーの範囲に収まるのが目安で、ピンクは0dBFSに達している状態=音が"
-            "割れる可能性があります。その場合はOutput Gainを下げてください。"));
+            "The signal actually leaving VoxMorph, per channel (after Mute, Output "
+            "Gain, the ASMR position and any Post FX). Dark = silence, mint = sound "
+            "is going out, and pink means that channel hit 0 dBFS and may be "
+            "clipping - lower Output Gain. Pink stays lit for a moment so a brief "
+            "clip cannot slip past.",
+            "VoxMorphから実際に出ている音を左右それぞれ表示します(Mute・Output Gain・"
+            "ASMR位置・Post FXをすべて通過した後)。消灯=無音、ミント=出力あり、"
+            "ピンクはそのチャンネルが0dBFSに達した状態で音が割れる可能性があります"
+            "(Output Gainを下げてください)。ピンクは一瞬のクリップを見逃さないよう"
+            "少しの間点灯し続けます。"));
         startTimerHz (30);
     }
 
 private:
-    static float pos (float lin)                       // linear -> 0..1 on the scale
-    {
-        const float db = juce::Decibels::gainToDecibels (lin, -60.0f);
-        return juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 66.0f);   // -60 .. +6 dB
-    }
+    static constexpr float kPeakDb  = -0.5f;   // "this channel is at the ceiling"
+    static constexpr float kHoldSec = 1.2f;    // how long pink stays lit
+
+    struct Lamp { float lvl = 0.0f, hold = 0.0f; };
 
     void timerCallback() override
     {
         if (const int hz = vmDrawHz (proc, 30); hz != rateHz)
         { rateHz = hz; startTimerHz (hz); }   // Performance Mode
         if (! isShowing()) return;
-        // the louder of the two output channels — the standard reading for a
-        // single-bar level meter
-        const float r = juce::jmax (proc.uiOutL.rms .load (std::memory_order_relaxed),
-                                    proc.uiOutR.rms .load (std::memory_order_relaxed));
-        const float p = juce::jmax (proc.uiOutL.peak.load (std::memory_order_relaxed),
-                                    proc.uiOutR.peak.load (std::memory_order_relaxed));
-        if (r == rms && p == pk) return;               // idle: no repaint
-        rms = r;  pk = p;
-        repaint();
+
+        const float dt = 1.0f / (float) juce::jmax (1, rateHz);
+        bool dirty = false;
+        auto step = [&] (Lamp& lamp, const VoxMorphProcessor::LevelMeter& m)
+        {
+            const float pk = m.peak.load (std::memory_order_relaxed);
+            const float db = juce::Decibels::gainToDecibels (pk, -100.0f);
+            const float want = juce::jlimit (0.0f, 1.0f, (db + 54.0f) / 54.0f);
+            if (std::abs (want - lamp.lvl) > 0.004f) { lamp.lvl += 0.4f * (want - lamp.lvl); dirty = true; }
+            if (db >= kPeakDb)                       { lamp.hold = kHoldSec; dirty = true; }
+            else if (lamp.hold > 0.0f)               { lamp.hold = juce::jmax (0.0f, lamp.hold - dt); dirty = true; }
+        };
+        step (l, proc.uiOutL);
+        step (r, proc.uiOutR);
+        if (dirty) repaint();
     }
 
-    // v0.31.0: the ANOKOE volume strip art. The -60..+6 dB reading and the
-    // ballistics are unchanged; only the drawing moved to the new skin.
     void paint (juce::Graphics& g) override
     {
-        auto row = getLocalBounds();
-        auto valBox = row.removeFromRight (56).reduced (0, 4);
-        row.removeFromRight (4);
+        auto b = getLocalBounds().toFloat().reduced (0.0f, 2.0f);
+        const float d = juce::jlimit (10.0f, 15.0f, b.getHeight() - 4.0f);
 
-        auto bar = row.toFloat().reduced (0.0f, 3.0f);
-        const auto base = ak::image ("ui_volume_basew_png");
-        const auto fill = ak::image ("ui_volume_fill_png");
-        if (base.isValid())
-            g.drawImage (base, bar, juce::RectanglePlacement::stretchToFit, false);
-        else
+        auto one = [&] (juce::Rectangle<float> area, const char* name, const Lamp& lamp)
         {
-            g.setColour (juce::Colour (0xffe9edfb));
-            g.fillRoundedRectangle (bar, 5.0f);
-        }
+            const auto dot = juce::Rectangle<float> (d, d)
+                                 .withCentre ({ area.getX() + d * 0.5f, area.getCentreY() });
+            const bool peaking = lamp.hold > 0.0f;
 
-        const float peakDb = juce::Decibels::gainToDecibels (pk, -60.0f);
-        const float w = bar.getWidth() * pos (rms);
-        if (w > 1.0f)
-        {
-            juce::Graphics::ScopedSaveState ss (g);
-            g.reduceClipRegion (bar.withWidth (w).getSmallestIntegerContainer());
-            if (fill.isValid())
-                g.drawImage (fill, bar, juce::RectanglePlacement::stretchToFit, false);
-            else
+            g.setColour (ak::valueFill);                       // the unlit body
+            g.fillEllipse (dot);
+            if (peaking || lamp.lvl > 0.02f)
             {
-                g.setColour (ak::seriesOut);
-                g.fillRoundedRectangle (bar.withWidth (w), 5.0f);
+                g.setColour (peaking ? juce::Colour (0xffe0607f)
+                                     : ak::seriesIn.withAlpha (0.30f + 0.70f * lamp.lvl));
+                g.fillEllipse (dot);
+                // a soft bloom so a lit lamp reads from across the room
+                g.setColour ((peaking ? juce::Colour (0xffe0607f) : ak::seriesIn)
+                                 .withAlpha (peaking ? 0.22f : 0.18f * lamp.lvl));
+                g.fillEllipse (dot.expanded (d * 0.28f));
             }
-        }
-        if (pk > 0.0f)
-        {
-            g.setColour (peakDb >= -0.1f ? juce::Colour (0xffe23b52)
-                                         : ak::heading.withAlpha (0.7f));
-            g.fillRect (bar.getX() + juce::jmax (1.0f, bar.getWidth() * pos (pk) - 1.0f),
-                        bar.getY(), 2.0f, bar.getHeight());
-        }
+            g.setColour (ak::valueLine);
+            g.drawEllipse (dot.reduced (0.5f), 1.0f);
 
-        g.setColour (ak::ink);
-        g.setFont (ak::font (11.0f));
-        g.drawText (pk > 0.0f ? juce::String (peakDb, 1) + " dB" : juce::String ("-inf"),
-                    valBox, juce::Justification::centredRight);
+            g.setColour (ak::ink);
+            g.setFont (ak::font (11.0f, true));
+            g.drawText (name, area.withTrimmedLeft (d + 5.0f).toNearestInt(),
+                        juce::Justification::centredLeft, false);
+        };
+
+        const float cell = juce::jmin (52.0f, b.getWidth() * 0.5f);
+        one (b.removeFromLeft (cell), "L", l);
+        one (b.removeFromLeft (cell), "R", r);
     }
 
     VoxMorphProcessor& proc;
-    int rateHz = 30;   // current timer rate; Performance Mode lowers it
-    float rms = -1.0f, pk = -1.0f;
+    int  rateHz = 30;      // current timer rate; Performance Mode lowers it
+    Lamp l, r;
 };
 
 // VoiceProfile <-> XML (.vmprofile files, saved next to the presets)
@@ -2821,7 +2841,7 @@ private:
         }
         const auto file = presetDir().getChildFile (juce::File::createLegalFileName (name)
                                                     + ".vmpreset");
-        if (auto xml = proc.apvts.copyState().createXml();
+        if (auto xml = voxMorphPresetXml (proc);
             xml != nullptr && xml->writeTo (file) && file.existsAsFile())
         {
             saveNameEdit.clear();
@@ -3200,7 +3220,7 @@ private:
         }
         const auto file = presetDir().getChildFile (juce::File::createLegalFileName (name)
                                                     + ".vmpreset");
-        if (auto xml = proc.apvts.copyState().createXml(); xml != nullptr && xml->writeTo (file))
+        if (auto xml = voxMorphPresetXml (proc); xml != nullptr && xml->writeTo (file))
         {
             nameEdit.clear();
             refreshList (file.getFileNameWithoutExtension());
@@ -3429,11 +3449,25 @@ private:
                       + (sel.isNotEmpty() ? sel : juce::String::fromUTF8 ("(未選択)")),
                    sel.isNotEmpty());
         m.addItem (2, juce::String::fromUTF8 ("別名で保存 / Save as new..."));
+        // The badge picture is part of the preset, so it belongs on the same
+        // menu. It used to be a click on the badge itself, which got in the
+        // way of just looking at her.
+        m.addSeparator();
+        m.addItem (3, juce::String::fromUTF8 ("キャラクター画像を選択... / Choose character image..."));
+        m.addItem (4, juce::String::fromUTF8 ("既定の画像に戻す / Use the default image"),
+                   proc.characterImagePath.isNotEmpty());
         m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&saveBtn),
             [this, sel] (int r)
             {
                 if (r == 1)      writePreset (sel);
                 else if (r == 2) askNewName();
+                else if (r == 3) chooseCharacterImage();
+                else if (r == 4)
+                {
+                    proc.characterImagePath.clear();
+                    report (juce::String::fromUTF8 ("キャラクター画像を既定に戻しました"
+                                                    " (保存するとプリセットにも反映されます)"));
+                }
             });
     }
 
@@ -3468,12 +3502,39 @@ private:
             }), false);
     }
 
+    // Sets proc.characterImagePath; HeroCircle notices on its own timer.
+    // Only a file that actually decoded is committed, so a bad pick cannot
+    // leave the badge blank at the next launch.
+    void chooseCharacterImage()
+    {
+        imgChooser = std::make_unique<juce::FileChooser> (
+            juce::String::fromUTF8 ("キャラクター画像を選択 / Choose a character image"),
+            juce::File(), "*.png;*.jpg;*.jpeg;*.gif;*.bmp");
+        imgChooser->launchAsync (juce::FileBrowserComponent::openMode
+                               | juce::FileBrowserComponent::canSelectFiles,
+            [this] (const juce::FileChooser& fc)
+            {
+                const auto f = fc.getResult();
+                if (f == juce::File()) return;                       // cancelled
+                if (! juce::ImageFileFormat::loadFrom (f).isValid())
+                {
+                    report (juce::String::fromUTF8 ("この画像は読み込めませんでした: ")
+                              + f.getFileName());
+                    return;
+                }
+                proc.characterImagePath = f.getFullPathName();
+                report (juce::String::fromUTF8 ("\xE2\x9C\x93 キャラクター画像: ")
+                          + f.getFileName()
+                          + juce::String::fromUTF8 (" (保存するとプリセットにも入ります)"));
+            });
+    }
+
     void writePreset (const juce::String& name)
     {
         if (name.isEmpty()) return;
         const auto file = voxMorphPresetDir()
                             .getChildFile (juce::File::createLegalFileName (name) + ".vmpreset");
-        auto xml = proc.apvts.copyState().createXml();
+        auto xml = voxMorphPresetXml (proc);
         if (xml != nullptr && xml->writeTo (file))
         {
             refreshList (file.getFileNameWithoutExtension());
@@ -3511,6 +3572,7 @@ private:
     void report (const juce::String& s) { if (status) status (s); }
 
     VoxMorphProcessor& proc;
+    std::unique_ptr<juce::FileChooser> imgChooser;
     std::function<void (const juce::String&)> status;
     juce::Array<juce::File> files;
     RescanComboBox   box;
@@ -4863,14 +4925,6 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-// Hero circle (v0.32.0): the character portrait that sits in the dark band,
-// wearing the live AEIOU balance as a ring. The ring is the same measurement
-// the VISUALIZER page's vowel donut shows — the engine's own vowel coordinate
-// through VowelAdaptiveWarp::anchorWeights — so it needs AEIOU Character on;
-// with it off the ring rests as a quiet idle band and the caption says so.
-//
-// A second, outer halo follows the OUTPUT level, so the circle still breathes
-// with your voice even when the vowel tracker is not running.
 // ---------------------------------------------------------------------------
 // The character badge in the middle of the band (v0.36.13).
 //
@@ -4893,11 +4947,13 @@ public:
     explicit HeroCircle (VoxMorphProcessor& p) : proc (p)
     {
         setTooltip (vmTip (
-            "Click to use your own picture here. The rim brightens with the "
-            "output level, so it also tells you sound is leaving the plugin.",
-            "クリックすると好きな画像に変更できます。ふちは出力レベルで明るくなるので、"
-            "音が出ているかの確認にも使えます。"));
-        startTimerHz (24);
+            "The picture is yours to choose: the preset SAVE button's menu has "
+            "\"Choose character image...\". It is stored in the preset, so each "
+            "preset can carry its own picture.",
+            "画像はプリセットのSAVEボタンのメニュー内「キャラクター画像を選択...」から"
+            "変更できます。プリセットに保存されるので、プリセットごとに別の画像を"
+            "持たせられます。"));
+        startTimerHz (4);            // only watches for the picture changing
         reloadImage();
     }
 
@@ -4926,55 +4982,13 @@ public:
         return b.getCentre().getDistanceFrom ({ (float) x, (float) y }) <= r;
     }
 
-    void mouseUp (const juce::MouseEvent& e) override
-    {
-        if (! e.mouseWasClicked()) return;
-        juce::PopupMenu m;
-        m.setLookAndFeel (&getLookAndFeel());
-        m.addItem (1, juce::String::fromUTF8 ("画像を選択... / Choose image..."));
-        m.addItem (2, juce::String::fromUTF8 ("既定の画像に戻す / Use the default"),
-                   proc.characterImagePath.isNotEmpty());
-        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
-            [this] (int r)
-            {
-                if (r == 1) chooseImage();
-                else if (r == 2) { proc.characterImagePath.clear(); reloadImage(); }
-            });
-    }
-
 private:
-    void chooseImage()
-    {
-        chooser = std::make_unique<juce::FileChooser> (
-            juce::String::fromUTF8 ("キャラクター画像を選択 / Choose a character image"),
-            juce::File(), "*.png;*.jpg;*.jpeg;*.gif;*.bmp");
-        chooser->launchAsync (juce::FileBrowserComponent::openMode
-                            | juce::FileBrowserComponent::canSelectFiles,
-            [this] (const juce::FileChooser& fc)
-            {
-                const auto f = fc.getResult();
-                if (f == juce::File()) return;             // cancelled
-                // Only commit a path we could actually decode, so a bad pick
-                // cannot leave the badge blank on the next launch.
-                if (juce::ImageFileFormat::loadFrom (f).isValid())
-                {
-                    proc.characterImagePath = f.getFullPathName();
-                    reloadImage();
-                }
-            });
-    }
-
     void timerCallback() override
     {
         if (! isShowing()) return;
         // the host may have restored a different picture under us
         if (loadedFrom != proc.characterImagePath) reloadImage();
 
-        const float pk = juce::jmax (proc.uiOutL.peak.load (std::memory_order_relaxed),
-                                     proc.uiOutR.peak.load (std::memory_order_relaxed));
-        const float db = juce::Decibels::gainToDecibels (pk, -60.0f);
-        const float want = juce::jlimit (0.0f, 1.0f, (db + 54.0f) / 54.0f);
-        if (std::abs (want - halo) > 0.002f) { halo += 0.25f * (want - halo); repaint(); }
     }
 
     void paint (juce::Graphics& g) override
@@ -5002,16 +5016,11 @@ private:
                 g.drawImage (art, port, juce::RectanglePlacement::fillDestination, false);
         }
 
-        // the portrait's edge, brightening with the output level
-        g.setColour (juce::Colours::white.withAlpha (0.25f + 0.40f * halo));
-        g.drawEllipse (port.reduced (0.75f), 1.5f);
     }
 
     VoxMorphProcessor& proc;
     juce::Image  custom;
     juce::String loadedFrom;
-    std::unique_ptr<juce::FileChooser> chooser;
-    float halo = 0.0f;
 };
 
 // ===========================================================================
@@ -5105,7 +5114,7 @@ public:
             // only ask for it while a meter is actually on screen. The
             // ballistics settle in ~20 ms, well inside the ~330 ms it takes
             // this poller to notice a page switch.
-            proc.uiWantsMeters.store (levels.isShowing() || outMeter.isShowing(),
+            proc.uiWantsMeters.store (levels.isShowing() || outLamps.isShowing(),
                                       std::memory_order_relaxed);
         };
         histPoll.startTimerHz (3);
@@ -5772,7 +5781,7 @@ private:
         slider (*cardOutput, "mix", "Mix",
             tip ("Balance between the converted voice (1.0) and the original (0.0). Usually 1.0.",
                  "変換した声(1.0)と元の声(0.0)の割合。通常は1.0のままにします。"));
-        cardOutput->add (outMeter, 24);
+        cardOutput->add (outLamps, 24);
         cardOutput->add (status, 30);   // latency read-out (v0.35.0: no donut)
     }
 
@@ -6089,7 +6098,7 @@ private:
     juce::TextButton detailBtn;
     std::unique_ptr<PresetBar> presetBar;
     StatusView  status   { proc };
-    OutputMeter outMeter { proc };
+    OutputLamps outLamps { proc };
     juce::Label footer;
     juce::String defaultFooterText;
 
