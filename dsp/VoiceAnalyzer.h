@@ -160,11 +160,17 @@ public:
     // kept for callers that only have the frequencies (built-in catalog)
     static float reliability (float F, float f0) { return density (F, f0); }
 
-    static VoiceProfile analyze (const float* x, int n, double fs)
+    // maxSec caps how much audio is measured. The 20 s default is a
+    // RESPONSIVENESS budget for the interactive path (Record / Load Target
+    // runs on the message thread while the user waits), not a statement about
+    // how much data the estimator wants -- it always wants more. The offline
+    // catalog generator (test/profile_dump.cpp) passes the full length so a
+    // built-in target is measured over the whole recording.
+    static VoiceProfile analyze (const float* x, int n, double fs, double maxSec = 20.0)
     {
         VoiceProfile out;
         constexpr int W = 2048, hop = 1024, N = 4096, NB = N / 2;
-        n = std::min (n, (int) (fs * 20.0));
+        n = std::min (n, (int) (fs * maxSec));
         const int maxLag = (int) (fs / 60.0), minLag = std::max (2, (int) (fs / 500.0));
         if (n < W + maxLag + 8) return out;
 

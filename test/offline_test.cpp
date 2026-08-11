@@ -2,6 +2,7 @@
 #include "../dsp/PsolaEngine.h"
 #include "../dsp/VoiceAnalyzer.h"
 #include "../dsp/MatchingEngine.h"
+#include "../dsp/SampleTargetCatalog.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -914,6 +915,63 @@ int main()
             std::printf ("degenerate profiles stay finite: %s\n", ok ? "PASS" : "FAIL");
             if (! ok) ++mFail;
         }
+
+        // (i) built-in target catalog. Every entry has to be usable as a
+        //     target from a plain male source -- that is the only thing the
+        //     catalog exists to do, and it is where hand-written numbers go
+        //     wrong silently (the v0.28.0 entries shipped tiltDb on the wrong
+        //     SCALE and railed Auto-Set to maximum brightness for two
+        //     releases before anyone noticed).
+        //
+        //     The v0.37.0 character entries are MEASURED, so they carry a
+        //     per-vowel table and take the vowel-matched path; the five
+        //     generic entries do not and take the global fallback. Both are
+        //     correct, and the check asserts each takes the path its data
+        //     supports rather than assuming one of them.
+        {
+            auto A = utter (150.0, 1.00, "01234");     // male, published F1-F3
+            const auto me = VoiceAnalyzer::analyze (A.data(), (int) A.size(), FS);
+            int n = 0;
+            const auto* cat = getSampleTargets (n);
+            bool ok = (n > 0) && me.valid();
+            for (int i = 0; i < n; ++i)
+            {
+                const auto& e = cat[i];
+                const auto& t = e.profile;
+                bool eOk = t.valid() && sampleTargetIndexById (e.id) == i;
+                const auto r = MatchingEngine::autoSet (me, t);
+                if (r.count == 0 || r.count > MatchingEngine::kMax) eOk = false;
+                for (int c = 0; c < r.count; ++c)
+                    if (! std::isfinite (r.changes[c].value)) eOk = false;
+
+                // pitch must land on the target median, less the perceptual bias
+                const double landed = me.f0Hz * std::pow (2.0, r.pitch/12.0);
+                const double want   = t.f0Hz * std::pow (2.0, -MatchingEngine::kPitchBias/12.0);
+                if (std::abs (12.0*std::log2 (landed/want)) > 0.05) eOk = false;
+
+                // A male source against any of these -- all of them are
+                // higher and smaller-tract than he is -- must ask for a
+                // POSITIVE formant shift. A negative one is the signature of
+                // the failure mode this whole path was rewritten for.
+                if (! (r.formant > 0.0f)) eOk = false;
+
+                const bool measured = t.vowelsMeasured() > 0;
+                if (r.fellBack == measured) eOk = false;
+                // texture is only derived when the target actually carries it
+                if (r.airApplied != measured) eOk = false;
+                if (measured && r.vowelsMatched < 2) eOk = false;
+
+                std::printf ("   %-18s pitch %+6.2f  formant %+5.2f  band %+.2f/%+.2f/%+.2f"
+                             "  vowels %d  agree %.2f st  air %.2f/%.2f  %s\n",
+                             e.id, r.pitch, r.formant, r.bandShiftSt[0], r.bandShiftSt[1],
+                             r.bandShiftSt[2], r.vowelsMatched, r.agreementSt,
+                             r.air, r.airshine, eOk ? "" : "   <-- BAD");
+                if (! eOk) ok = false;
+            }
+            std::printf ("built-in target catalog: %d entries all usable from a male source  %s\n",
+                         n, ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+        }
     }
     std::printf ("Matching checks: %s (%d failure(s))\n",
                  mFail == 0 ? "ALL PASS" : "FAILURES", mFail);
@@ -1476,5 +1534,8 @@ int main()
                  vaFail == 0 ? "ALL PASS" : "FAILURES", vaFail);
 
     std::puts ("done");
-    return (naFail + vaFail) == 0 ? 0 : 1;
+    // mFail was missing from this sum, so every Matching check -- including
+    // the ground-truth formant accuracy ones -- printed FAIL and still exited
+    // 0. A check that cannot fail the run is not a check.
+    return (mFail + naFail + vaFail) == 0 ? 0 : 1;
 }
