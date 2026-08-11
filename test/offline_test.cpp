@@ -658,6 +658,103 @@ int main()
             if (! ok) ++mFail;
         }
 
+        // (a2) THE SAME THING, BUT WITH f0 MOVING. (a) holds f0 fixed inside
+        //      each case, and that is exactly how a -15.6 st F1 error shipped
+        //      unnoticed through v0.37.0: real speech sweeps its pitch, and
+        //      the profile is a median over frames whose identifiability
+        //      therefore VARIES. A fixed-f0 test can only ever see the
+        //      average case; it cannot see a statistic being captured by the
+        //      frames that measured nothing.
+        //
+        //      What went wrong: harmonicEnvelope extrapolates FLAT below the
+        //      first harmonic, extractPeaks accepted that flat run as a
+        //      sequence of maxima (its `>=` test is satisfied everywhere on a
+        //      plateau), and those fake peaks carry H1's level -- the largest
+        //      thing in the F1 band on a high voice -- so assignFormants,
+        //      which selects by level, chose the extrapolation. It returned
+        //      F1 values BELOW the speaker's own f0 with full confidence, and
+        //      because the fallback for a not-found band also voted in the
+        //      median, the median WAS the fallback. See VoiceAnalyzer.h
+        //      extractPeaks / bandReliability.
+        {
+            struct Case { const char* nm; double mid; };
+            const Case cs[] = { { "260 Hz", 260.0 }, { "310 Hz", 310.0 },
+                                { "370 Hz", 370.0 } };
+            bool ok = true;
+            int nAns = 0, nRefused = 0;
+            double worstTrusted = 0.0;
+            std::printf ("   %-5s %-8s %8s %8s %6s %6s\n",
+                         "vowel", "f0 centre", "trueF1", "gotF1", "err", "rel");
+            for (int v = 0; v < 5; ++v)
+                for (const auto& c : cs)
+                {
+                    // one vowel, f0 swept +-4.5 st -- the span the real
+                    // character recordings show (9.0-12.0 st p10..p90)
+                    std::vector<float> x;
+                    for (int k = 0; k < 10; ++k)
+                    {
+                        const double st = -4.5 + 9.0 * (double) (k % 7) / 6.0;
+                        auto seg = vowel (VFF[v], c.mid * std::pow (2.0, st/12.0),
+                                          1.0, 0.9, (unsigned) (k*17+5));
+                        x.insert (x.end(), seg.begin(), seg.end());
+                    }
+                    const auto p = VoiceAnalyzer::analyze (x.data(), (int) x.size(), FS);
+                    if (! p.valid()) continue;
+                    const bool answered = p.F[0] > 0.0f;
+                    const double err = answered
+                        ? 12.0 * std::log2 (p.F[0] / VFF[v][0]) : 0.0;
+                    if (answered) ++nAns; else ++nRefused;
+                    // The contract is NOT "always right" -- for a close vowel
+                    // on a high voice F1 really does sit at or under the first
+                    // harmonic and cannot be recovered. The contract is:
+                    // whatever it reports as TRUSTED (rel >= kMinRel) must be
+                    // right, and it must never report a confident F1 below the
+                    // speaker's own fundamental.
+                    if (answered && p.rel[0] >= MatchingEngine::kMinRel)
+                    {
+                        worstTrusted = std::max (worstTrusted, std::abs (err));
+                        if (std::abs (err) > 2.0) ok = false;
+                        if (p.F[0] < p.f0Hz) ok = false;
+                    }
+                    std::printf ("   /%s/  %-8s %8.0f %8s %+6.2f %6.2f%s\n",
+                                 VN[v], c.nm, VFF[v][0],
+                                 answered ? std::to_string ((int) p.F[0]).c_str() : "(none)",
+                                 err, p.rel[0],
+                                 (answered && p.rel[0] >= MatchingEngine::kMinRel
+                                  && std::abs (err) > 2.0) ? "   <-- BAD" : "");
+                }
+            std::printf ("moving-f0 F1: %d answered / %d refused, worst TRUSTED error "
+                         "%.2f st (<= 2.0), none below own f0  %s\n",
+                         nAns, nRefused, worstTrusted, ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+        }
+
+        // (a3) A band that was never located must not drive a level trim.
+        //      L = 0 means "as loud as the strongest formant", so an ungated
+        //      f*gain read a missing band as maximally loud and asked for
+        //      several dB on the strength of nothing.
+        {
+            auto A = utter (150.0, 1.00, "01234");
+            auto B = utterT (VFF, 330.0, 1.10, "01234");
+            const auto p1 = VoiceAnalyzer::analyze (A.data(), (int) A.size(), FS);
+            const auto p2 = VoiceAnalyzer::analyze (B.data(), (int) B.size(), FS);
+            const auto r  = MatchingEngine::autoSet (p1, p2);
+            const char* gid[3] = { "f1gain", "f2gain", "f3gain" };
+            bool ok = true;
+            for (int b = 0; b < 3; ++b)
+            {
+                float g = 0.0f;
+                for (int i = 0; i < r.count; ++i)
+                    if (std::string (r.changes[i].id) == gid[b]) g = r.changes[i].value;
+                const bool usable = r.bandRel[b] >= MatchingEngine::kMinRel;
+                if (! usable && g != 0.0f) ok = false;
+                std::printf ("   %s rel=%.2f -> gain %+.2f dB%s\n",
+                             gid[b], r.bandRel[b], g, usable ? "" : "  (band not located)");
+            }
+            std::printf ("unlocated band writes no gain trim: %s\n", ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+        }
+
         // (b) the reliability law itself: nothing below the fundamental is
         //     ever trusted, everything well above it is
         {

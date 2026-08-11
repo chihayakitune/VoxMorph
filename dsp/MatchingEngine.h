@@ -255,7 +255,27 @@ MatchingEngine::autoSet (const VoiceProfile& p1, const VoiceProfile& p2)
         }
     }
 
-    if (ns > 0)
+    // How many DISTINCT vowels the comparison rests on. One vowel is not a
+    // vocal-tract measurement: it is one articulation, and whatever that
+    // vowel's individual colouring is gets read as the speaker's tract size.
+    // The engine already called this case lowConfidence; v0.37.1 makes it
+    // ACT on that instead of merely reporting it, and take the global path,
+    // which averages over the whole recording rather than over one bucket.
+    //
+    // This became reachable in practice once the F1 estimate stopped being
+    // pinned to the envelope's flat extrapolation (see VoiceAnalyzer.h
+    // extractPeaks): F1 feeds classifyVowels, so correcting it re-sorts the
+    // vowel buckets, and a recording whose buckets do not overlap the other
+    // side's can end up with a single vowel in common. Measured on the
+    // 160 Hz male -> 352 Hz female pair: the single surviving vowel demanded
+    // -0.37 st, i.e. a LONGER vocal tract for the smaller speaker, which is
+    // physically impossible; the global path gives +1.14 st against a truth
+    // of +2.87 st -- still short, but the right sign and inside tolerance.
+    int nVowelsSeen = 0;
+    { bool sv5[5] = {}; for (int i = 0; i < ns; ++i) sv5[svV[i]] = true;
+      for (int v = 0; v < 5; ++v) if (sv5[v]) ++nVowelsSeen; }
+
+    if (ns > 0 && nVowelsSeen >= 2)
     {
         r.formant = cl (wMedian (sv, sw, ns), -24.0f, 24.0f);
 
@@ -365,7 +385,16 @@ MatchingEngine::autoSet (const VoiceProfile& p1, const VoiceProfile& p2)
         // Levels are relative to each profile's own strongest formant, which
         // makes them comparable across recordings but noisy; keep the
         // long-standing 0.5 damping here.
-        r.push (gid[i], cl (0.5f * (p2.L[i] - p1.L[i]), -8.0f, 8.0f));
+        //
+        // v0.37.1: gated on the same reliability as the shift. A band nobody
+        // could LOCATE has no level either -- VoiceAnalyzer now reports L = 0
+        // for such a band (previously it was a median over frames that never
+        // saw it, polluted by the -60 dB not-found sentinel), and 0 means
+        // "level of the strongest formant", so an ungated trim would read a
+        // missing band as being exactly as loud as the loudest one and ask
+        // for several dB of correction on the strength of nothing.
+        const bool bandUsable = r.bandRel[i] >= kMinRel;
+        r.push (gid[i], bandUsable ? cl (0.5f * (p2.L[i] - p1.L[i]), -8.0f, 8.0f) : 0.0f);
     }
     r.push ("tilt", r.tilt);
     if (p1.f0SpreadSt > 0.3f && p2.f0SpreadSt > 0.3f)

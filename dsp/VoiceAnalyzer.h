@@ -52,6 +52,7 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 // Per-vowel sub-profile (A, I, U, E, O — same order as
 // AEIOUCharacterMap / VowelAdaptiveWarp anchors).
@@ -180,6 +181,7 @@ public:
         std::vector<double> dfn ((size_t) maxLD + 2, 1.0), mag ((size_t) NB + 1);
         std::vector<float>  A ((size_t) N), V ((size_t) N), Acur ((size_t) N);
         std::vector<float>  f0v, Fv[3], Lv[3], Rv[3], Hv[3], tv, hfv;
+        std::vector<uint8_t> Ov[3];             // per band: real peak, or held fallback?
         std::vector<float>  pkF, pkL;           // cached peaks, kMaxPeaks/frame
         std::vector<int>    pkN, vv;            // peak count / vowel class
 
@@ -245,7 +247,7 @@ public:
             // to be scaled to this speaker's vocal tract before it is safe
             // to apply (see the two-pass step after this loop).
             float pf[kMaxPeaks], pl[kMaxPeaks];
-            const int npk = extractPeaks (V.data(), N, NB, fs, pf, pl);
+            const int npk = extractPeaks (V.data(), N, NB, fs, pf, pl, f0);
             if (npk < 3) continue;
 
             double eLo = 0.0, eHi = 0.0;
@@ -291,31 +293,39 @@ public:
         {
             const size_t nf = f0v.size();
             auto runPass = [&] (float refScale,
-                                std::vector<float>* Fo, std::vector<float>* Lo)
+                                std::vector<float>* Fo, std::vector<float>* Lo,
+                                std::vector<uint8_t>* Oo)
             {
-                for (int b = 0; b < 3; ++b) { Fo[b].clear(); Lo[b].clear(); }
+                for (int b = 0; b < 3; ++b) { Fo[b].clear(); Lo[b].clear(); Oo[b].clear(); }
                 float prev[3] = { -1.0f, -1.0f, -1.0f };
                 for (size_t i = 0; i < nf; ++i)
                 {
-                    float Fi[3], Li[3];
+                    float Fi[3], Li[3]; bool ob[3] = { false, false, false };
                     if (! assignFormants (&pkF[i * kMaxPeaks], &pkL[i * kMaxPeaks],
-                                          pkN[i], refScale, prev, Fi, Li))
-                    { for (int b = 0; b < 3; ++b) { Fo[b].push_back (0.0f); Lo[b].push_back (0.0f); } }
+                                          pkN[i], refScale, prev, Fi, Li, ob))
+                    { for (int b = 0; b < 3; ++b)
+                      { Fo[b].push_back (0.0f); Lo[b].push_back (0.0f); Oo[b].push_back (0); } }
                     else
                     {
                         for (int b = 0; b < 3; ++b)
-                        { Fo[b].push_back (Fi[b]); Lo[b].push_back (Li[b]); prev[b] = Fi[b]; }
+                        { Fo[b].push_back (Fi[b]); Lo[b].push_back (Li[b]);
+                          Oo[b].push_back (ob[b] ? 1u : 0u); prev[b] = Fi[b]; }
                     }
                 }
             };
             std::vector<float> F1p[3], L1p[3];
-            runPass (1.0f, F1p, L1p);
-            // scale from the two bands that survive on real speech
+            std::vector<uint8_t> O1p[3];
+            runPass (1.0f, F1p, L1p, O1p);
+            // Scale from the two bands that survive on real speech -- and only
+            // from frames that actually OBSERVED them. Held-over fallbacks sit
+            // at the 1500/2600 Hz defaults, i.e. exactly at scale 1.0, so
+            // letting them vote drags the estimate toward "average speaker",
+            // which is the systematic pull this two-pass step exists to undo.
             std::vector<float> r2, r3;
             for (size_t i = 0; i < nf; ++i)
             {
-                if (F1p[1][i] > 0.0f) r2.push_back (F1p[1][i] / 1500.0f);
-                if (F1p[2][i] > 0.0f) r3.push_back (F1p[2][i] / 2600.0f);
+                if (O1p[1][i] && F1p[1][i] > 0.0f) r2.push_back (F1p[1][i] / 1500.0f);
+                if (O1p[2][i] && F1p[2][i] > 0.0f) r3.push_back (F1p[2][i] / 2600.0f);
             }
             float sc = 1.0f;
             if (! r2.empty() && ! r3.empty())
@@ -329,7 +339,7 @@ public:
             // published-formant cases: 3/5 correct with no adaptation,
             // 5/5 at 0.5 damping, and undamped it starts overshooting.
             out.tractScale = std::clamp (1.0f + 0.5f * (sc - 1.0f), 0.85f, 1.25f);
-            runPass (out.tractScale, Fv, Lv);
+            runPass (out.tractScale, Fv, Lv, Ov);
         }
         // drop frames the final pass could not assign
         {
@@ -339,15 +349,20 @@ public:
                 if (! (Fv[0][i] > 0.0f)) continue;
                 f0v[w] = f0v[i]; tv[w] = tv[i];
                 for (int b = 0; b < 3; ++b)
-                { Fv[b][w] = Fv[b][i]; Lv[b][w] = Lv[b][i]; Hv[b][w] = Hv[b][i]; }
+                { Fv[b][w] = Fv[b][i]; Lv[b][w] = Lv[b][i]; Hv[b][w] = Hv[b][i];
+                  Ov[b][w] = Ov[b][i]; }
                 ++w;
             }
             f0v.resize (w); tv.resize (w);
-            for (int b = 0; b < 3; ++b) { Fv[b].resize (w); Lv[b].resize (w); Hv[b].resize (w); }
+            for (int b = 0; b < 3; ++b)
+            { Fv[b].resize (w); Lv[b].resize (w); Hv[b].resize (w); Ov[b].resize (w); }
         }
+        // A frame that never located the band has no reliability to report --
+        // not a small one, none. Zeroing it here also routes those frames down
+        // classifyVowels' F2-only path automatically (it gates on Rv[0]).
         for (size_t i = 0; i < f0v.size(); ++i)
             for (int b = 0; b < 3; ++b)
-                Rv[b].push_back (reliability (Fv[b][i], f0v[i], Hv[b][i]));
+                Rv[b].push_back (Ov[b][i] ? reliability (Fv[b][i], f0v[i], Hv[b][i]) : 0.0f);
 
         out.voicedFrames = (int) f0v.size();
         if (out.voicedFrames < 5) return out;
@@ -364,21 +379,30 @@ public:
             out.f0SpreadSt = 0.5f * (st[hi] - st[lo]);
         }
 
-        float Lmed[3];
+        float Lmed[3] = { 0.0f, 0.0f, 0.0f };
+        bool  seen[3] = { false, false, false };
         for (int fi = 0; fi < 3; ++fi)
         {
-            out.F[fi]   = median (Fv[fi]);
-            Lmed[fi]    = median (Lv[fi]);
-            out.rel[fi] = median (Rv[fi]);
-            out.hnr[fi] = median (Hv[fi]);
+            out.F[fi]   = medianWhere (Fv[fi], Ov[fi]);
+            Lmed[fi]    = medianWhere (Lv[fi], Ov[fi]);
+            out.rel[fi] = bandReliability (Rv[fi], Ov[fi]);
+            out.hnr[fi] = median (Hv[fi]);   // a band property, not a peak property
+            seen[fi]    = out.F[fi] > 0.0f;
         }
-        const float Lmax = std::max ({ Lmed[0], Lmed[1], Lmed[2] });
-        for (int fi = 0; fi < 3; ++fi) out.L[fi] = Lmed[fi] - Lmax;
+        // Levels are relative to the strongest formant, so an unobserved band
+        // must not be a candidate for "strongest" -- and it reports 0 dB
+        // (= no claim) rather than a number derived from frames that never
+        // saw it. MatchingEngine additionally refuses to trim gain on a band
+        // whose reliability is below kMinRel.
+        float Lmax = -1.0e30f;
+        for (int fi = 0; fi < 3; ++fi) if (seen[fi]) Lmax = std::max (Lmax, Lmed[fi]);
+        for (int fi = 0; fi < 3; ++fi)
+            out.L[fi] = (seen[fi] && Lmax > -1.0e29f) ? Lmed[fi] - Lmax : 0.0f;
         out.tiltDb = median (tv);
         if (! hfv.empty()) out.hfDb = median (hfv);
 
         classifyVowels (Fv, Rv, vv);
-        buildVowelProfiles (out, f0v, Fv, Lv, Rv, Hv, vv);
+        buildVowelProfiles (out, f0v, Fv, Lv, Rv, Hv, Ov, vv);
         return out;
     }
 
@@ -482,15 +506,41 @@ private:
     // Interior local maxima of the envelope, parabolically refined. Interior
     // only: a point that is merely the largest value at the edge of a
     // decaying envelope is not a resonance.
+    //
+    // v0.37.1 — two ways a NON-resonance used to be reported as a peak, both
+    // of them the same mistake in different clothes: reporting structure that
+    // the envelope never measured.
+    //
+    //  * harmonicEnvelope holds env[] FLAT at the first harmonic's level for
+    //    every bin BELOW that harmonic (`if (k <= pkB[0]) lv = pkV[0]`).
+    //    Nothing was measured down there -- it is extrapolation, and it
+    //    carries H1's level, which at high pitch is the largest thing in the
+    //    F1 search band. assignFormants picks by LEVEL, so it picked the
+    //    extrapolation. Measured on synthetic /i/ at f0 350 (true F1 352 Hz):
+    //    thirteen "peaks" from 141 to 275 Hz, every one of them at exactly
+    //    46.1 dB -- the signature of a flat run -- and no real interior
+    //    maximum in the band at all. That is where profile F1 values BELOW
+    //    the speaker's own fundamental came from. They were not uncertain
+    //    estimates; they were the left edge of a region with no information
+    //    in it, returned as a confident number. Ground truth over an f0 sweep
+    //    had this reaching -15.6 st.
+    //  * `>=` on both sides makes every point of any flat run a maximum. A
+    //    flat run has no curvature, so it is not a peak however the
+    //    interpolation happened to land. Strict on the left keeps exactly one
+    //    point of a genuine rise-then-plateau and drops the rest.
+    //
+    // Searching from the first harmonic up is not a heuristic threshold: it
+    // is the point below which this envelope contains no measurement.
     static int extractPeaks (const float* V, int N, int NB, double fs,
-                             float* outF, float* outL)
+                             float* outF, float* outL, float f0)
     {
-        const int kl = std::max (1, (int) (150.0 * N / fs));
+        int kl = std::max (1, (int) (150.0 * N / fs));
+        if (f0 > 0.0f) kl = std::max (kl, (int) std::floor ((double) f0 * N / fs));
         const int kh = std::min (NB - 1, (int) (4800.0 * N / fs));
         int n = 0;
         for (int k = kl; k <= kh && n < kMaxPeaks; ++k)
         {
-            if (! (V[k] >= V[k-1] && V[k] >= V[k+1])) continue;
+            if (! (V[k] > V[k-1] && V[k] >= V[k+1])) continue;
             const float d = V[k-1] - 2.0f * V[k] + V[k+1];
             float dk = std::abs (d) > 1.0e-12f ? 0.5f * (V[k-1] - V[k+1]) / d : 0.0f;
             dk = std::clamp (dk, -1.0f, 1.0f);
@@ -523,9 +573,15 @@ private:
     // the formant conversion rides on, and the per-vowel table degrades
     // gracefully (fewer vowels pass their frame count) rather than lying.
     //
+    // `obs` reports, per band, whether a REAL candidate peak was found this
+    // frame or whether the value is the carried-forward fallback. The
+    // fallback is right for the tracker (it keeps F from jumping) and wrong
+    // for the statistics: a held value is not evidence, and before v0.37.1
+    // it voted in the median exactly like a measurement. On a high voice
+    // most F1 frames are fallbacks, so the median WAS the fallback.
     static bool assignFormants (const float* pf, const float* pl, int npk,
                                 float sc, const float* prev,
-                                float* Fout, float* Lout)
+                                float* Fout, float* Lout, bool* obs = nullptr)
     {
         // FIXED search ranges -- the same boxes for every speaker. An
         // earlier cut scaled them by each speaker's own estimated tract size,
@@ -551,6 +607,7 @@ private:
             int best = -1; float bv = -1.0e30f;
             for (int i = 0; i < npk; ++i)
                 if (pf[i] >= lo && pf[i] <= hi && pl[i] > bv) { bv = pl[i]; best = i; }
+            if (obs != nullptr) obs[b] = (best >= 0);
             const float hz = best >= 0 ? pf[best]
                            : ((prev != nullptr && prev[b] > 0.0f) ? prev[b] : defR[b] * s);
             // same 0.7/0.3 tracking the engine applies to trackF[]
@@ -636,11 +693,13 @@ private:
                                     const std::vector<float>* Lv,
                                     const std::vector<float>* Rv,
                                     const std::vector<float>* Hv,
+                                    const std::vector<uint8_t>* Ov,
                                     const std::vector<int>& vv)
     {
         for (int a = 0; a < 5; ++a)
         {
             std::vector<float> g0, gF[3], gL[3], gR[3], gH[3];
+            std::vector<uint8_t> gO[3];
             for (size_t i = 0; i < vv.size(); ++i)
             {
                 if (vv[i] != a) continue;
@@ -651,6 +710,7 @@ private:
                     gL[b].push_back (Lv[b][i]);
                     gR[b].push_back (Rv[b][i]);
                     gH[b].push_back (Hv[b][i]);
+                    gO[b].push_back (Ov[b][i]);
                 }
             }
             auto& vp = out.vow[a];
@@ -659,16 +719,24 @@ private:
             // statistics are only filled in once there are enough frames.
             if (! vp.valid()) continue;
             vp.f0Hz = median (g0);
-            float lm[3];
+            // Same rule as the global profile: only frames that OBSERVED the
+            // band describe it, and coverage is counted within this vowel --
+            // a vowel can be perfectly measurable while its neighbours are
+            // not (open vowels put F1 well above f0; close ones do not).
+            float lm[3] = { 0.0f, 0.0f, 0.0f };
+            bool  sn[3] = { false, false, false };
             for (int b = 0; b < 3; ++b)
             {
-                vp.F[b]   = median (gF[b]);
-                lm[b]     = median (gL[b]);
-                vp.rel[b] = median (gR[b]);
+                vp.F[b]   = medianWhere (gF[b], gO[b]);
+                lm[b]     = medianWhere (gL[b], gO[b]);
+                vp.rel[b] = bandReliability (gR[b], gO[b]);
                 vp.hnr[b] = median (gH[b]);
+                sn[b]     = vp.F[b] > 0.0f;
             }
-            const float mx = std::max ({ lm[0], lm[1], lm[2] });
-            for (int b = 0; b < 3; ++b) vp.L[b] = lm[b] - mx;
+            float mx = -1.0e30f;
+            for (int b = 0; b < 3; ++b) if (sn[b]) mx = std::max (mx, lm[b]);
+            for (int b = 0; b < 3; ++b)
+                vp.L[b] = (sn[b] && mx > -1.0e29f) ? lm[b] - mx : 0.0f;
         }
     }
 
@@ -714,5 +782,69 @@ private:
         const size_t m = v.size() / 2;
         std::nth_element (v.begin(), v.begin() + (long) m, v.end());
         return v[m];
+    }
+
+    // Median over the frames that actually observed the band. Returns 0 when
+    // none did, which every consumer already reads as "not available"
+    // (MatchingEngine gates on F > 0).
+    static float medianWhere (const std::vector<float>& v,
+                              const std::vector<uint8_t>& keep)
+    {
+        std::vector<float> s;
+        s.reserve (v.size());
+        for (size_t i = 0; i < v.size() && i < keep.size(); ++i)
+            if (keep[i]) s.push_back (v[i]);
+        return median (std::move (s));
+    }
+
+public:
+    // COVERAGE: what fraction of frames has to observe a band before its
+    // median means anything. Measured, not chosen -- 210 ground-truth cases
+    // (both sexes x 5 vowels x 7 f0 centres x 3 tract scales, f0 swept 9 st
+    // within each case), error binned by coverage:
+    //
+    //     coverage        |error| median   p90
+    //     under 0.10            5.24     13.73    (+4 cases with no answer)
+    //     0.10 - 0.35           1.70      7.52
+    //     0.35 - 0.70           1.53      3.87
+    //     over  0.70            0.70      6.26
+    //
+    // so the ramp starts where the error stops being dominated by flukes --
+    // below 0.10 the "median" rests on a handful of frames and is wrong by
+    // more than an octave half the time -- and reaches full trust where it
+    // settles near the estimator's own noise floor.
+    //
+    // The p90 at high coverage is NOT a coverage failure and this ramp cannot
+    // fix it: those cases are adjacent formants merging into one envelope
+    // maximum on a high voice (/o/ with F1 450 and F2 1035 reads F2 = 2900,
+    // i.e. it reported F3; /a/ at f0 310 reads F2 = 1009 against a true
+    // 1504, i.e. it reported F1). rel is high there because a peak WAS
+    // identifiable -- rel says nothing about whether the right peak was
+    // assigned to the right band. That is a separate, pre-existing limit of
+    // fixed search ranges plus level-based selection, not addressed here.
+    static constexpr float kCovLo = 0.10f, kCovHi = 0.70f;
+
+    static float coverageWeight (int observed, int total)
+    {
+        if (total <= 0) return 0.0f;
+        const float c = (float) observed / (float) total;
+        return std::clamp ((c - kCovLo) / (kCovHi - kCovLo), 0.0f, 1.0f);
+    }
+
+private:
+    // Band reliability = how well the frames that saw it could resolve it,
+    // scaled by how many frames saw it at all. Before v0.37.1 this was a
+    // plain median over EVERY frame, so on a high voice -- where most F1
+    // frames are held fallbacks with reliability 0 -- the median was 0 and
+    // the band was discarded even when hundreds of frames measured it
+    // cleanly. That is the "rel[0] = 0.00 on all four characters" symptom.
+    static float bandReliability (const std::vector<float>& relPerFrame,
+                                  const std::vector<uint8_t>& observed)
+    {
+        int n = 0;
+        for (size_t i = 0; i < observed.size(); ++i) if (observed[i]) ++n;
+        if (n == 0) return 0.0f;
+        return medianWhere (relPerFrame, observed)
+             * coverageWeight (n, (int) observed.size());
     }
 };

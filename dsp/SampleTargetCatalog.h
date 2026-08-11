@@ -31,15 +31,23 @@
 //   * They carry a full per-vowel table, so matching against them takes the
 //     vowel-matched path and writes a real AEIOU map -- which is the whole
 //     point of measuring a specific character rather than a voice class.
-//   * rel[0] is 0.00 on all four. These are high voices (f0 258-368 Hz), so
-//     F1 sits under 2.5 x f0 and its POSITION is not recoverable from the
-//     recording -- see the identifiability discussion in VoiceAnalyzer.h.
-//     The F[0] / vow[].F[0] figures are kept as measured (several land below
-//     the speaker's own f0, which is the documented signature of exactly this
-//     condition) because rel is what the matcher reads, and at 0.00 the band
-//     contributes nothing and F1 moves with the global formant instead. They
-//     are NOT clamped, substituted or "fixed up": a plausible-looking F1
-//     written in by hand would be believed by everything downstream that
+//   * F1 is now measurable on these voices. REGENERATED in v0.37.1 after
+//     the estimator was fixed -- do not compare these numbers with the
+//     v0.37.0 ones as if both were measurements of the same thing. The
+//     v0.37.0 cut reported F1 = 342-601 Hz with rel = 0.00 across the board,
+//     several of them BELOW the speaker's own fundamental; that was not an
+//     uncertain estimate but the flat extrapolation under the first harmonic
+//     being reported as a resonance (VoiceAnalyzer.h, extractPeaks). With
+//     that removed, F1 comes out at 774-880 Hz -- ordinary open-vowel values
+//     for a small tract -- and rel rises to 0.02-0.45.
+//   * rel[0] still varies a lot between them, and that is the honest signal,
+//     not a defect: Soshi (f0 252 Hz) reaches 0.45, Sara (f0 318 Hz) only
+//     0.02. The higher the voice, the fewer frames put F1 far enough above
+//     f0 to place it. Below MatchingEngine::kMinRel the band simply does not
+//     vote and F1 moves with the global formant, which is the right answer
+//     for a uniformly scaled vocal tract.
+//   * Nothing here is clamped, substituted or "fixed up". A plausible-looking
+//     F1 written in by hand would be believed by everything downstream that
 //     does not check rel, and would be a fabricated measurement.
 //   * hnr / hfDb are populated, so Auto-Set's Air and Air Shine stage runs
 //     against these targets (it self-disables against the generic five,
@@ -111,91 +119,91 @@ inline const SampleTargetEntry* getSampleTargets (int& count)
             15.0f, 240, { 1.0f, 1.0f, 1.0f } }
         },
 
-        // ---- measured character targets (v0.37.0) -------------------------
+        // ---- measured character targets (v0.37.0, remeasured v0.37.1) ------
         // Generated verbatim by test/profile_dump.cpp --cxx; see the file
-        // header for why rel[0] is 0.00 and why F1 is left as measured.
-        // Regenerate rather than edit by hand:
+        // header for how far to trust each band. Regenerate, never hand-edit:
         //   profile_dump <recording>.wav --cxx <id> <En> <Jp>
         //
-        // The four differ in ways Auto-Set reacts to: Soshi is a full
-        // 5.4 st lower than Sara and the only one whose /a/ F1 becomes
-        // measurable (rel 0.59); Kura carries the widest intonation
-        // (5.99 st vs Soshi's 4.52) and the highest F3; Sara is the
-        // brightest (hfDb -25.60, i.e. ~4 dB more above 6 kHz than Kura).
+        // The four differ in ways Auto-Set reacts to: Soshi is 3.8 st lower
+        // than Sara and the only one whose F1 is solidly measurable
+        // (rel 0.45 against Sara's 0.02); Kura carries the widest intonation
+        // (5.63 st against Soshi's 4.25) and by far the highest F3 (3251 Hz);
+        // Sara is the brightest (hfDb -24.86, i.e. ~5.7 dB more above 6 kHz
+        // than Kura) and the darkest in tilt (14.72 against Uru's 20.45).
         { "uru", "Uru", "うる",
-          { /* f0     */ 306.42f,
-            /* spread */ 4.73f,
-            /* F      */ { 382.5f, 1708.5f, 3041.2f },
-            /* L      */ { 0.00f, -18.37f, -25.42f },
-            /* tilt   */ 20.21f,
-            /* frames */ 3820,
-            /* rel    */ { 0.00f, 1.00f, 0.70f },
-            /* hnr    */ { 23.88f, 10.66f, 4.29f },
-            /* hfDb   */ -29.12f,
-            /* tract  */ 1.077f,
+          { /* f0     */ 291.93f,
+            /* spread */ 4.08f,
+            /* F      */ { 879.9f, 1530.6f, 2979.6f },
+            /* L      */ { 0.00f, -9.30f, -17.99f },
+            /* tilt   */ 20.45f,
+            /* frames */ 3018,
+            /* rel    */ { 0.25f, 0.98f, 0.66f },
+            /* hnr    */ { 22.18f, 9.54f, 4.06f },
+            /* hfDb   */ -28.68f,
+            /* tract  */ 1.041f,
             /* vow    */ {
-              /* A */ { 1162, 262.39f, { 759.1f, 1346.7f, 2969.0f }, { 0.00f, -6.21f, -18.59f }, { 0.30f, 0.80f, 0.55f }, { 18.11f, 7.55f, 3.45f } },
-              /* I */ { 314, 341.33f, { 229.1f, 2753.0f, 3242.9f }, { 0.00f, -27.22f, -26.13f }, { 0.00f, 1.00f, 0.90f }, { 31.72f, 13.39f, 5.41f } },
-              /* U */ { 936, 321.24f, { 311.2f, 1719.4f, 2871.1f }, { 0.00f, -18.21f, -26.95f }, { 0.00f, 1.00f, 0.77f }, { 24.19f, 11.79f, 4.68f } },
-              /* E */ { 947, 346.18f, { 259.6f, 2232.8f, 3074.0f }, { 0.00f, -25.90f, -26.37f }, { 0.00f, 1.00f, 0.74f }, { 28.36f, 11.92f, 4.52f } },
-              /* O */ { 461, 291.27f, { 558.9f, 1139.1f, 3215.5f }, { 0.00f, -8.44f, -29.38f }, { 0.00f, 0.50f, 0.97f }, { 22.52f, 11.27f, 5.83f } }
+              /* A */ { 380, 308.85f, { 776.0f, 1237.7f, 3133.8f }, { 0.00f, -5.98f, -24.08f }, { 0.00f, 0.50f, 1.00f }, { 21.07f, 10.25f, 6.13f } },
+              /* I */ { 320, 317.18f, { 707.1f, 2604.1f, 3101.6f }, { 0.00f, -24.54f, -23.86f }, { 0.00f, 1.00f, 0.68f }, { 29.36f, 10.79f, 4.19f } },
+              /* U */ { 679, 307.65f, { 759.3f, 1557.1f, 2838.1f }, { 0.00f, -11.67f, -21.71f }, { 0.00f, 1.00f, 0.73f }, { 22.66f, 10.70f, 4.44f } },
+              /* E */ { 799, 299.61f, { 864.7f, 1975.7f, 2961.4f }, { 0.00f, -11.07f, -14.41f }, { 0.18f, 1.00f, 0.60f }, { 23.35f, 9.39f, 3.71f } },
+              /* O */ { 840, 264.57f, { 941.6f, 1157.3f, 2979.4f }, { 0.00f, -0.05f, -16.89f }, { 0.64f, 0.78f, 0.61f }, { 19.25f, 8.04f, 3.77f } }
             } }
         },
         { "kura", "Kura", "くら",
-          { /* f0     */ 304.88f,
-            /* spread */ 5.99f,
-            /* F      */ { 542.8f, 1582.4f, 3272.6f },
-            /* L      */ { 0.00f, -13.53f, -25.12f },
-            /* tilt   */ 17.67f,
-            /* frames */ 2717,
-            /* rel    */ { 0.00f, 0.85f, 0.45f },
-            /* hnr    */ { 18.34f, 9.45f, 2.87f },
-            /* hfDb   */ -30.04f,
-            /* tract  */ 1.076f,
+          { /* f0     */ 278.47f,
+            /* spread */ 5.63f,
+            /* F      */ { 774.2f, 1476.9f, 3250.5f },
+            /* L      */ { 0.00f, -10.87f, -23.88f },
+            /* tilt   */ 18.56f,
+            /* frames */ 2168,
+            /* rel    */ { 0.13f, 0.85f, 0.41f },
+            /* hnr    */ { 16.90f, 8.77f, 2.61f },
+            /* hfDb   */ -30.54f,
+            /* tract  */ 1.055f,
             /* vow    */ {
-              /* A */ { 738, 268.18f, { 724.3f, 1274.5f, 3368.9f }, { 0.00f, -3.40f, -24.42f }, { 0.00f, 0.68f, 0.41f }, { 15.74f, 9.02f, 2.60f } },
-              /* I */ { 237, 346.12f, { 285.3f, 2595.1f, 3050.3f }, { 0.00f, -22.11f, -20.54f }, { 0.00f, 1.00f, 0.34f }, { 24.39f, 7.14f, 2.22f } },
-              /* U */ { 695, 319.55f, { 491.1f, 1581.9f, 3269.4f }, { 0.00f, -13.88f, -26.25f }, { 0.00f, 1.00f, 0.55f }, { 18.51f, 11.22f, 3.44f } },
-              /* E */ { 694, 319.25f, { 420.2f, 2081.4f, 3127.5f }, { 0.00f, -22.10f, -23.37f }, { 0.00f, 1.00f, 0.43f }, { 19.83f, 8.34f, 2.74f } },
-              /* O */ { 353, 278.82f, { 681.1f, 1105.2f, 3485.9f }, { 0.00f, -3.69f, -27.16f }, { 0.00f, 0.37f, 0.51f }, { 18.07f, 12.49f, 3.19f } }
+              /* A */ { 305, 320.91f, { 806.1f, 1206.6f, 3280.1f }, { 0.00f, -4.72f, -25.92f }, { 0.00f, 0.46f, 0.56f }, { 17.69f, 12.35f, 3.49f } },
+              /* I */ { 177, 268.85f, { 607.8f, 2463.8f, 3157.4f }, { 0.00f, -23.29f, -22.66f }, { 0.00f, 1.00f, 0.30f }, { 20.85f, 5.99f, 1.91f } },
+              /* U */ { 599, 312.02f, { 695.3f, 1457.8f, 3356.1f }, { 0.00f, -11.74f, -26.62f }, { 0.00f, 0.89f, 0.43f }, { 15.95f, 9.86f, 2.77f } },
+              /* E */ { 613, 278.43f, { 724.8f, 1901.1f, 3134.3f }, { 0.00f, -16.51f, -21.48f }, { 0.16f, 1.00f, 0.37f }, { 17.42f, 7.37f, 2.39f } },
+              /* O */ { 474, 254.10f, { 862.3f, 1134.9f, 3305.5f }, { 0.00f, 0.00f, -23.95f }, { 0.55f, 0.82f, 0.38f }, { 15.87f, 9.01f, 2.48f } }
             } }
         },
         { "sara", "Sara", "さら",
-          { /* f0     */ 368.45f,
-            /* spread */ 4.86f,
-            /* F      */ { 341.5f, 1567.2f, 2875.5f },
-            /* L      */ { 0.00f, -17.26f, -24.83f },
-            /* tilt   */ 16.67f,
-            /* frames */ 1510,
-            /* rel    */ { 0.00f, 0.79f, 0.57f },
-            /* hnr    */ { 22.41f, 9.28f, 3.53f },
-            /* hfDb   */ -25.60f,
-            /* tract  */ 1.037f,
+          { /* f0     */ 317.59f,
+            /* spread */ 4.76f,
+            /* F      */ { 845.2f, 1283.7f, 2657.5f },
+            /* L      */ { 0.00f, -7.20f, -17.47f },
+            /* tilt   */ 14.72f,
+            /* frames */ 866,
+            /* rel    */ { 0.02f, 0.55f, 0.46f },
+            /* hnr    */ { 17.85f, 6.55f, 2.89f },
+            /* hfDb   */ -24.86f,
+            /* tract  */ 0.968f,
             /* vow    */ {
-              /* A */ { 341, 305.73f, { 566.9f, 1244.0f, 2740.1f }, { 0.00f, -6.78f, -22.05f }, { 0.00f, 0.47f, 0.46f }, { 17.39f, 6.55f, 2.91f } },
-              /* I */ { 147, 422.03f, { 215.8f, 2571.8f, 3094.9f }, { 0.00f, -25.39f, -23.78f }, { 0.00f, 1.00f, 0.79f }, { 29.64f, 12.37f, 4.78f } },
-              /* U */ { 435, 376.08f, { 363.8f, 1558.7f, 2823.7f }, { 0.00f, -16.90f, -24.25f }, { 0.00f, 0.76f, 0.50f }, { 22.43f, 8.93f, 3.14f } },
-              /* E */ { 397, 390.98f, { 249.0f, 2083.1f, 2905.6f }, { 0.00f, -25.63f, -26.53f }, { 0.00f, 1.00f, 0.63f }, { 25.54f, 10.74f, 3.87f } },
-              /* O */ { 190, 329.15f, { 554.8f, 1059.4f, 2955.3f }, { 0.00f, -9.31f, -27.86f }, { 0.00f, 0.27f, 0.54f }, { 21.67f, 9.04f, 3.38f } }
+              /* A */ { 126, 284.97f, { 706.4f, 1074.8f, 2529.5f }, { 0.00f, -4.97f, -18.05f }, { 0.00f, 0.29f, 0.99f }, { 20.79f, 9.04f, 5.96f } },
+              /* I */ { 75, 329.08f, { 655.8f, 2199.7f, 2864.1f }, { 0.00f, -13.96f, -13.96f }, { 0.00f, 0.79f, 0.47f }, { 16.24f, 4.77f, 3.00f } },
+              /* U */ { 279, 337.07f, { 803.3f, 1250.2f, 2619.1f }, { 0.00f, -6.76f, -18.68f }, { 0.00f, 0.45f, 0.56f }, { 17.12f, 8.48f, 3.48f } },
+              /* E */ { 251, 327.73f, { 831.7f, 1617.8f, 2731.7f }, { 0.00f, -10.33f, -17.04f }, { 0.04f, 0.86f, 0.34f }, { 17.27f, 6.49f, 2.20f } },
+              /* O */ { 135, 287.49f, { 982.4f, 1163.6f, 2580.7f }, { 0.00f, -0.23f, -16.19f }, { 0.43f, 0.59f, 0.30f }, { 17.70f, 5.24f, 1.99f } }
             } }
         },
         { "soshi", "Soshi", "そし",
-          { /* f0     */ 258.46f,
-            /* spread */ 4.52f,
-            /* F      */ { 601.4f, 1702.3f, 2877.9f },
-            /* L      */ { 0.00f, -8.58f, -14.33f },
-            /* tilt   */ 19.06f,
-            /* frames */ 1442,
-            /* rel    */ { 0.00f, 1.00f, 0.30f },
-            /* hnr    */ { 18.05f, 6.74f, 1.52f },
-            /* hfDb   */ -28.06f,
-            /* tract  */ 1.060f,
+          { /* f0     */ 252.04f,
+            /* spread */ 4.25f,
+            /* F      */ { 871.8f, 1642.9f, 2832.9f },
+            /* L      */ { 0.00f, -5.60f, -12.01f },
+            /* tilt   */ 19.08f,
+            /* frames */ 1235,
+            /* rel    */ { 0.45f, 0.97f, 0.30f },
+            /* hnr    */ { 17.11f, 6.45f, 1.44f },
+            /* hfDb   */ -27.43f,
+            /* tract  */ 1.046f,
             /* vow    */ {
-              /* A */ { 501, 243.50f, { 873.2f, 1422.5f, 2990.2f }, { 0.00f, -0.39f, -9.63f }, { 0.59f, 0.95f, 0.30f }, { 16.16f, 6.17f, 1.50f } },
-              /* I */ { 35, 285.31f, { 233.4f, 2760.8f, 3176.3f }, { 0.00f, -17.64f, -16.15f }, { 0.00f, 1.00f, 0.38f }, { 27.00f, 8.66f, 2.43f } },
-              /* U */ { 332, 279.67f, { 416.3f, 1684.6f, 2963.5f }, { 0.00f, -19.17f, -26.49f }, { 0.00f, 1.00f, 0.30f }, { 19.33f, 7.29f, 1.75f } },
-              /* E */ { 356, 271.13f, { 462.1f, 2257.1f, 2747.6f }, { 0.00f, -18.05f, -18.49f }, { 0.00f, 1.00f, 0.30f }, { 18.29f, 6.03f, 1.20f } },
-              /* O */ { 218, 236.64f, { 719.9f, 1356.0f, 2873.6f }, { 0.00f, -6.91f, -16.58f }, { 0.37f, 0.91f, 0.30f }, { 18.07f, 7.93f, 1.72f } }
+              /* A */ { 120, 289.09f, { 764.8f, 1360.6f, 3296.8f }, { 0.00f, -13.12f, -27.57f }, { 0.07f, 1.00f, 0.39f }, { 20.48f, 10.83f, 2.50f } },
+              /* I */ { 35, 252.97f, { 722.4f, 2622.5f, 3003.5f }, { 0.00f, -2.39f, -1.48f }, { 0.04f, 0.42f, 0.30f }, { 15.22f, 2.67f, 0.59f } },
+              /* U */ { 352, 256.72f, { 709.2f, 1619.5f, 2863.9f }, { 0.00f, -15.23f, -22.71f }, { 0.12f, 1.00f, 0.30f }, { 18.27f, 7.52f, 1.53f } },
+              /* E */ { 408, 250.67f, { 871.8f, 2077.3f, 2773.2f }, { 0.00f, -3.95f, -5.13f }, { 0.40f, 0.86f, 0.30f }, { 15.70f, 5.20f, 1.04f } },
+              /* O */ { 320, 238.32f, { 948.3f, 1254.4f, 2750.2f }, { -0.04f, 0.00f, -11.20f }, { 0.83f, 0.85f, 0.30f }, { 16.17f, 6.35f, 1.75f } }
             } }
         },
     };
