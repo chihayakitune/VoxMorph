@@ -1095,6 +1095,63 @@ int main()
             if (! ok) ++mFail;
         }
 
+        // (g3) AIR must survive a noisy source (v0.40.0).
+        //
+        //      The old rule was air ~ (source HNR - target HNR), which asks
+        //      whether the target is breathier than the source. Band HNR
+        //      conflates the voice with the recording's noise floor, mic and
+        //      codec, and the one pairing that is never comparable is "my
+        //      microphone" against "a character sample" -- so a user on a
+        //      slightly noisy mic read as breathier than every target and got
+        //      air = 0 from a formula that was really reporting their room.
+        //
+        //      Air now takes its floor from the TARGET's own breathiness,
+        //      which is the property that decides how breathy the result
+        //      should sound. This checks the case that was broken: a source
+        //      far noisier than the target must still get air.
+        {
+            int nCat = 0;
+            const auto* cat = getSampleTargets (nCat);
+            bool ok = nCat > 0;
+            float lo = 9.9f, hi = -9.9f;
+            for (int i = 0; i < nCat; ++i)
+            {
+                VoiceProfile me{};
+                me.f0Hz = 120.0f; me.voicedFrames = 300; me.f0SpreadSt = 2.0f;
+                me.F[0]=650; me.F[1]=1450; me.F[2]=2600;
+                me.rel[0]=me.rel[1]=me.rel[2]=1.0f;
+                // a noisy take: HNR well BELOW every character's
+                me.hnr[0] = 6.0f; me.hnr[1] = 1.2f; me.hnr[2] = 0.8f;
+                me.hfDb = -26.0f;                    // and brighter than most
+                const auto r = MatchingEngine::autoSet (me, cat[i].profile);
+                if (! r.airApplied || ! (r.air > 0.10f)) ok = false;
+                lo = std::min (lo, r.air); hi = std::max (hi, r.air);
+            }
+            std::printf ("air from a NOISIER-than-target source: %.2f..%.2f over %d "
+                         "characters (all > 0.10)  %s\n", lo, hi, nCat, ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+        }
+
+        // (g4) ...but a target with NO texture measured must still be left
+        //      alone. hnr = 0 means "not measured", and 0 dB is also a real
+        //      value meaning "pure noise", so deriving breathiness from an
+        //      absent measurement would read as maximum air.
+        {
+            VoiceProfile me{}, tgt{};
+            me.f0Hz = 120.0f; me.voicedFrames = 300;
+            me.F[0]=650; me.F[1]=1450; me.F[2]=2600;
+            me.rel[0]=me.rel[1]=me.rel[2]=1.0f;
+            me.hnr[0]=12.0f; me.hnr[1]=10.0f; me.hnr[2]=8.0f;
+            tgt = me; tgt.f0Hz = 240.0f;
+            tgt.hnr[0]=tgt.hnr[1]=tgt.hnr[2]=0.0f;      // pre-v0.40.0 profile
+            const auto r = MatchingEngine::autoSet (me, tgt);
+            bool ok = ! r.airApplied;
+            for (int i = 0; i < r.count; ++i)
+                if (std::string (r.changes[i].id) == "air") ok = false;
+            std::printf ("untextured target writes no air at all: %s\n", ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+        }
+
         // (h) degenerate inputs must not produce non-finite parameters
         {
             VoiceProfile a{}, b{};

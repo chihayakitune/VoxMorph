@@ -1574,6 +1574,16 @@ inline std::unique_ptr<juce::XmlElement> profileToXml (const VoiceProfile& p)
         x->setAttribute ("l" + juce::String (i + 1), p.L[i]);
         x->setAttribute ("r" + juce::String (i + 1), p.rel[i]);
     }
+    // v0.40.0 TEXTURE. These were measured all along and simply never
+    // written, so every .vmprofile silently lost them -- and Auto-Set gates
+    // its Air / Air Shine stage on "did the target carry texture", which no
+    // saved profile ever did. A NEW CHARACTER profile in particular is
+    // supposed to describe a voice; a voice with no breathiness recorded is
+    // not one. hnr = harmonic-to-noise per band, hfDb = energy above 6 kHz.
+    for (int i = 0; i < 3; ++i)
+        x->setAttribute ("h" + juce::String (i + 1), p.hnr[i]);
+    x->setAttribute ("hf", p.hfDb);
+    x->setAttribute ("tract", p.tractScale);
     // v0.29.0 per-vowel table. Written as child elements so a profile saved
     // by an older build (which simply has none) still loads — Matching then
     // takes its global path instead of the vowel-matched one.
@@ -1612,7 +1622,16 @@ inline bool profileFromXml (const juce::XmlElement& x, VoiceProfile& p)
         // old code implicitly did).
         p.rel[i] = x.hasAttribute ("r" + juce::String (i + 1))
                  ? (float) x.getDoubleAttribute ("r" + juce::String (i + 1)) : 1.0f;
+        // Absent (every profile written before v0.40.0) stays 0, which is
+        // exactly what MatchingEngine reads as "no texture measured" and is
+        // why it leaves Air alone rather than deriving one from nothing.
+        // Do NOT default these to a plausible number: 0 dB HNR is a real
+        // value meaning "pure noise", so a fabricated default would read as
+        // maximum breathiness.
+        p.hnr[i] = (float) x.getDoubleAttribute ("h" + juce::String (i + 1), 0.0);
     }
+    p.hfDb       = (float) x.getDoubleAttribute ("hf",    -30.0);
+    p.tractScale = (float) x.getDoubleAttribute ("tract",   1.0);
     static const char* vw[5] = { "a", "i", "u", "e", "o" };
     for (auto* e : x.getChildWithTagNameIterator ("VOWEL"))
     {

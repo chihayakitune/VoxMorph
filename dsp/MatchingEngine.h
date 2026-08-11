@@ -154,6 +154,12 @@ public:
     static constexpr float kAirMax     = 0.60f;
     static constexpr float kShinePerDb = 0.35f;   // per dB of extra >6 kHz
     static constexpr float kShineMax   = 3.0f;
+    // Band-HNR ramp for reading breathiness off the TARGET alone (v0.40.0).
+    // 0 dB is pure noise by construction and ordinary speech runs +7..+19,
+    // so "clean" sits at the bottom of the speech range and "breathy" where
+    // the built-in characters actually land (3.2-9.4 dB over bands 2-3).
+    static constexpr float kAirHnrClean   = 12.0f;
+    static constexpr float kAirHnrBreathy =  3.0f;
 
     // A band only contributes when both sides could LOCATE it this well.
     static constexpr float kMinRel = 0.25f;
@@ -422,16 +428,67 @@ MatchingEngine::autoSet (const VoiceProfile& p1, const VoiceProfile& p2)
     {
         const bool tgtMeasured = (p2.hnr[0] != 0.0f || p2.hnr[1] != 0.0f || p2.hnr[2] != 0.0f);
         const bool srcMeasured = (p1.hnr[0] != 0.0f || p1.hnr[1] != 0.0f || p1.hnr[2] != 0.0f);
-        if (tgtMeasured && srcMeasured)
+        if (tgtMeasured)
         {
-            float acc = 0.0f; int n = 0;
+            // ---- (a) how breathy the TARGET is, on its own ---------------
+            // v0.40.0. The difference term below used to be the whole story,
+            // and it asks the wrong question. Band HNR conflates the
+            // speaker's breathiness with the recording's noise floor, mic and
+            // codec, so a cross-recording SUBTRACTION is only meaningful when
+            // both takes were made under comparable conditions -- and the one
+            // pairing that never is, is "my microphone" against "a character
+            // sample". A user on a slightly noisy mic reads as breathier than
+            // every target and gets air = 0 from a formula that is really
+            // reporting their room.
+            //
+            // What Air actually does is preserve the breath that IS in the
+            // source through the pitch shift, instead of letting grain
+            // relocation stamp the new period onto it. You want that in
+            // proportion to how breathy the RESULT should sound -- a property
+            // of the target alone. So the target's own upper-band HNR sets a
+            // floor, and the difference can still ask for more on top.
+            //
+            // Scale, from VoiceAnalyzer's own measurements: a band that is
+            // pure noise sits at 0 dB by construction, ordinary speech runs
+            // +7..+19 dB. The seven built-in characters land between 3.2 and
+            // 9.4 dB averaged over bands 2-3, so the ramp spans that range
+            // and gives them 0.17 (Funi, the least breathy) to 0.59 (Yuni and
+            // Maki, the most).
+            //
+            // This is an ESTIMATE of how breathy the recording sounds, not a
+            // pure property of the voice -- a noisy sample reads as breathy.
+            // It is deliberately preferred over reporting nothing, because
+            // Air at 0 is audibly wrong on these voices and "no opinion" is
+            // not a neutral answer for a parameter whose default is off.
+            float tAcc = 0.0f; int tN = 0;
             for (int b = 1; b < 3; ++b)
-                if (p1.hnr[b] > 1.0f || p2.hnr[b] > 1.0f)
-                { acc += p1.hnr[b] - p2.hnr[b]; ++n; }
-            r.air      = n > 0 ? cl (kAirPerDb * (acc / (float) n), 0.0f, kAirMax) : 0.0f;
-            r.airshine = cl (kShinePerDb * (p2.hfDb - p1.hfDb), 0.0f, kShineMax);
+                if (p2.hnr[b] != 0.0f) { tAcc += p2.hnr[b]; ++tN; }
+            const float tgtHnr = tN > 0 ? tAcc / (float) tN : kAirHnrClean;
+            const float breathy = std::clamp ((kAirHnrClean - tgtHnr)
+                                              / (kAirHnrClean - kAirHnrBreathy), 0.0f, 1.0f);
+            const float airFromTarget = kAirMax * breathy;
+
+            // ---- (b) the source-vs-target difference, as before ----------
+            float airFromDiff = 0.0f;
+            if (srcMeasured)
+            {
+                float acc = 0.0f; int n = 0;
+                for (int b = 1; b < 3; ++b)
+                    if (p1.hnr[b] > 1.0f || p2.hnr[b] > 1.0f)
+                    { acc += p1.hnr[b] - p2.hnr[b]; ++n; }
+                if (n > 0) airFromDiff = kAirPerDb * (acc / (float) n);
+            }
+
+            r.air = cl (std::max (airFromTarget, airFromDiff), 0.0f, kAirMax);
+            // Shine stays a DIFFERENCE: hfDb is a ratio taken within one
+            // recording (energy above 6 kHz against the speech band), so it
+            // survives a change of level and gain in a way absolute HNR does
+            // not, and comparing two of them is fair. It still needs both
+            // sides, and is left alone when the source carries no texture.
+            r.airshine = srcMeasured ? cl (kShinePerDb * (p2.hfDb - p1.hfDb), 0.0f, kShineMax)
+                                     : 0.0f;
             r.push ("air",      r.air);
-            r.push ("airshine", r.airshine);
+            if (srcMeasured) r.push ("airshine", r.airshine);
             r.airApplied = true;
         }
     }
@@ -537,6 +594,21 @@ MatchingEngine::predictEstimated (const VoiceProfile& p1, ParamGetter get)
     const float rangeRatio = std::max (0.01f, get ("range") * 0.01f);
     e.f0SpreadSt = cl (p1.f0SpreadSt * rangeRatio, 0.0f, 24.0f);
     e.tiltDb     = cl (p1.tiltDb + get ("tilt"),   -12.0f, 12.0f);
+
+    // ---- texture (v0.40.0) ----------------------------------------------
+    // hnr is INHERITED rather than modelled. Natural Air preserves the
+    // source's own breath through the pitch shift instead of synthesizing
+    // new noise, so the converted voice's harmonic-to-noise ratio is
+    // essentially the source's; inventing a shift here would be a guess
+    // dressed as a measurement.
+    //
+    // hfDb IS adjusted, because Air Shine is a plain gain on the >6 kHz
+    // noise component and its effect was measured: +6 dB of Shine moved the
+    // 6-16 kHz band ratio 0.0176 -> 0.0291, i.e. +2.2 dB, so about 0.37 dB
+    // of band ratio per dB of Shine. Without this a character saved with
+    // Shine applied would read back darker than it sounds, and matching to
+    // it later would under-ask for Shine by the same amount.
+    e.hfDb = cl (p1.hfDb + 0.37f * get ("airshine"), -60.0f, 0.0f);
 
     // v0.39.0: carry the per-vowel table through the same transform.
     //

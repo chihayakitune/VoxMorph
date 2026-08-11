@@ -224,6 +224,63 @@ int main (int argc, char** argv)
         shoot (*ed, outDir.getChildFile ("matching_" + tag + ".png"));
     }
 
+    // ---- .vmprofile round-trip, including the v0.40.0 texture fields ----
+    // profileToXml / profileFromXml live in PluginEditor.h and need JUCE, so
+    // offline_test cannot reach them; this is the only place they get tested.
+    {
+        std::printf ("\n== .vmprofile round-trip ==\n");
+        VoiceProfile a{};
+        a.f0Hz = 291.9f; a.f0SpreadSt = 4.08f; a.tiltDb = 20.45f; a.voicedFrames = 3018;
+        a.F[0]=879.9f; a.F[1]=2027.4f; a.F[2]=3875.6f;
+        a.L[0]=0.0f;   a.L[1]=-13.31f; a.L[2]=-21.38f;
+        a.rel[0]=0.25f; a.rel[1]=1.0f; a.rel[2]=0.66f;
+        a.hnr[0]=22.18f; a.hnr[1]=9.54f; a.hnr[2]=4.06f;
+        a.hfDb = -28.68f; a.tractScale = 1.21f;
+        a.vow[0].frames = 1539; a.vow[0].f0Hz = 281.0f;
+        a.vow[0].F[0]=934.1f; a.vow[0].F[1]=1887.6f; a.vow[0].F[2]=3835.9f;
+        a.vow[0].rel[0]=0.54f; a.vow[0].rel[1]=1.0f; a.vow[0].rel[2]=0.60f;
+
+        auto xml = profileToXml (a);
+        VoiceProfile b{};
+        check (xml != nullptr && profileFromXml (*xml, b), "profile parses back");
+        auto near = [] (float x, float y) { return std::abs (x - y) < 0.01f; };
+        check (near (a.f0Hz, b.f0Hz) && near (a.tiltDb, b.tiltDb), "scalars survive");
+        for (int i = 0; i < 3; ++i)
+        {
+            check (near (a.F[i],   b.F[i]),   "F"   + juce::String (i+1) + " survives");
+            check (near (a.rel[i], b.rel[i]), "rel" + juce::String (i+1) + " survives");
+            check (near (a.hnr[i], b.hnr[i]), "hnr" + juce::String (i+1) + " survives");
+        }
+        check (near (a.hfDb, b.hfDb),             "hfDb survives");
+        check (near (a.tractScale, b.tractScale), "tractScale survives");
+        check (b.vow[0].frames == a.vow[0].frames
+               && near (b.vow[0].F[1], a.vow[0].F[1]), "vowel table survives");
+        std::printf ("  hnr %.2f/%.2f/%.2f  hfDb %.2f  tract %.3f\n",
+                     b.hnr[0], b.hnr[1], b.hnr[2], b.hfDb, b.tractScale);
+
+        // the point of persisting them: a saved profile can now drive Air
+        VoiceProfile me{};
+        me.f0Hz = 120.0f; me.voicedFrames = 300;
+        me.F[0]=650; me.F[1]=1450; me.F[2]=2600;
+        me.rel[0]=me.rel[1]=me.rel[2]=1.0f;
+        me.hnr[0]=6.0f; me.hnr[1]=1.2f; me.hnr[2]=0.8f;
+        const auto prop = MatchingEngine::autoSet (me, b);
+        check (prop.airApplied && prop.air > 0.10f,
+               "a round-tripped profile drives Air (this is what NEW CHARACTER needs)");
+        std::printf ("  air from the reloaded profile: %.2f\n", prop.air);
+
+        // a profile written before v0.40.0 has no texture and must stay silent
+        auto old = profileToXml (a);
+        for (int i = 0; i < 3; ++i) old->removeAttribute ("h" + juce::String (i + 1));
+        old->removeAttribute ("hf");
+        VoiceProfile c{};
+        check (profileFromXml (*old, c), "pre-v0.40.0 profile still parses");
+        check (c.hnr[0] == 0.0f && c.hnr[1] == 0.0f && c.hnr[2] == 0.0f,
+               "missing texture stays 0 rather than being invented");
+        check (! MatchingEngine::autoSet (me, c).airApplied,
+               "and therefore writes no Air");
+    }
+
     ed->removeFromDesktop();
     std::printf ("\n%s (%d failure%s)\n", g_fail == 0 ? "ALL PASS" : "FAILURES",
                  g_fail, g_fail == 1 ? "" : "s");
