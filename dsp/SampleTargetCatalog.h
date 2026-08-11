@@ -20,12 +20,13 @@
 // put fabricated numbers into the AEIOU map -- so matching against a generic
 // target takes MatchingEngine's global fallback path by design.
 //
-// v0.37.0: four MEASURED character entries (Uru / Kura / Sara / Soshi). These
-// are the opposite case in every respect, and the distinction matters when
-// reading the numbers below:
+// v0.37.0: MEASURED character entries -- Uru / Kura / Sara / Soshi, joined in
+// v0.38.0 by Funi / Maki / Yuni. These are the opposite case to the generic
+// five in every respect, and the distinction matters when reading the
+// numbers below:
 //
 //   * Every field is a measurement, produced by running VoiceAnalyzer over
-//     the whole of a real recording (84-165 s, 1442-3820 voiced frames) with
+//     the whole of a real recording (76-227 s, 866-3018 voiced frames) with
 //     test/profile_dump.cpp --cxx. Nothing here was chosen to make Auto-Set
 //     behave; if a value looks odd it is because the voice is like that.
 //   * They carry a full per-vowel table, so matching against them takes the
@@ -51,11 +52,13 @@
 //     where the others asked +4.19 and +4.98 -- the symptom that started
 //     this. She now asks +6.81, in line with the rest.
 //   * rel[0] still varies a lot between them, and that is the honest signal,
-//     not a defect: Soshi (f0 252 Hz) reaches 0.45, Sara (f0 318 Hz) only
-//     0.02. The higher the voice, the fewer frames put F1 far enough above
-//     f0 to place it. Below MatchingEngine::kMinRel the band simply does not
-//     vote and F1 moves with the global formant, which is the right answer
-//     for a uniformly scaled vocal tract.
+//     not a defect. Sorted by pitch it is close to monotone: Soshi (f0 252 Hz)
+//     0.45, Maki (303) 0.21, Yuni (312) 0.14, Sara (318) 0.02, Funi (342)
+//     0.00. The higher the voice, the fewer frames put F1 far enough above f0
+//     to place it -- exactly the law density() encodes, falling out of seven
+//     independent recordings that were never fitted to it. Below
+//     MatchingEngine::kMinRel the band does not vote and F1 moves with the
+//     global formant, which is the right answer for a uniformly scaled tract.
 //   * Nothing here is clamped, substituted or "fixed up". A plausible-looking
 //     F1 written in by hand would be believed by everything downstream that
 //     does not check rel, and would be a fabricated measurement.
@@ -134,14 +137,20 @@ inline const SampleTargetEntry* getSampleTargets (int& count)
         // header for how far to trust each band. Regenerate, never hand-edit:
         //   profile_dump <recording>.wav --cxx <id> <En> <Jp>
         //
-        // The four differ in ways Auto-Set reacts to: Soshi is 3.8 st lower
-        // than Sara and the only one whose F1 is solidly measurable
-        // (rel 0.45 against Sara's 0.02); Kura carries the widest intonation
-        // (5.63 st against Soshi's 4.25); Sara is the brightest (hfDb -24.86,
-        // i.e. ~5.7 dB more above 6 kHz than Kura) and has the least
-        // low-frequency weight (tilt 14.72 against Uru's 20.45). Their F2/F3
-        // now agree within about 0.3 / 1.4 st, which is what four voices of
-        // this type should look like.
+        // Where they differ, in the terms Auto-Set reacts to: Soshi sits
+        // lowest (f0 252) and Funi highest (342); Kura carries much the
+        // widest intonation (5.63 st) and Yuni much the narrowest (2.80);
+        // Sara has the most energy above 6 kHz (hfDb -24.86) and Maki the
+        // least (-31.64); Funi is the brightest in tilt (13.16) and Yuni the
+        // darkest (23.26).
+        //
+        // Their F2 (1972-2224 Hz) and F3 (3586-3876) sit close together, and
+        // that is a sanity check passing rather than a suspicious
+        // coincidence: seven voices of the same type and roughly the same
+        // size SHOULD land near one another. Under the pre-v0.37.2 band
+        // assignment the first four spread over F2 1284-1643 and the odd one
+        // out asked for a formant shift of +0.48 st against +4.19 for a voice
+        // of nearly identical size.
         { "uru", "Uru", "うる",
           { /* f0     */ 291.93f,
             /* spread */ 4.08f,
@@ -216,6 +225,63 @@ inline const SampleTargetEntry* getSampleTargets (int& count)
               /* U */ { 329, 268.95f, { 714.5f, 2083.2f, 3470.0f }, { 0.00f, -18.86f, -25.68f }, { 0.05f, 1.00f, 0.30f }, { 18.27f, 7.09f, 1.65f } },
               /* E */ { 177, 238.04f, { 804.9f, 2537.1f, 3618.8f }, { 0.00f, -6.74f, -9.11f }, { 0.39f, 0.78f, 0.30f }, { 16.31f, 4.76f, 0.53f } },
               /* O */ { 67, 257.06f, { 808.1f, 1535.6f, 4073.6f }, { 0.00f, -11.53f, -29.90f }, { 0.25f, 1.00f, 0.48f }, { 21.25f, 11.81f, 3.02f } }
+            } }
+        },
+        { "funi", "Funi", "ふに",
+          { /* f0     */ 342.14f,
+            /* spread */ 4.50f,
+            /* F      */ { 893.2f, 2041.4f, 3686.4f },
+            /* L      */ { 0.00f, -11.28f, -22.31f },
+            /* tilt   */ 13.16f,
+            /* frames */ 1135,
+            /* rel    */ { 0.00f, 1.00f, 0.97f },
+            /* hnr    */ { 21.60f, 12.94f, 5.90f },
+            /* hfDb   */ -28.93f,
+            /* tract  */ 1.195f,
+            /* vow    */ {
+              /* A */ { 505, 309.93f, { 928.2f, 1844.8f, 3675.0f }, { 0.00f, -8.28f, -22.37f }, { 0.28f, 1.00f, 0.72f }, { 18.98f, 10.42f, 4.39f } },
+              /* I */ { 21, 359.74f, { 781.3f, 2842.5f, 3634.5f }, { 0.00f, -18.34f, -12.30f }, { 0.00f, 1.00f, 0.97f }, { 28.83f, 17.41f, 5.83f } },
+              /* U */ { 447, 374.39f, { 863.2f, 2217.5f, 3670.5f }, { 0.00f, -13.30f, -23.72f }, { 0.00f, 1.00f, 1.00f }, { 25.54f, 17.15f, 8.62f } },
+              /* E */ { 141, 362.30f, { 864.6f, 2629.7f, 3743.1f }, { 0.00f, -12.10f, -19.70f }, { 0.00f, 1.00f, 0.98f }, { 21.53f, 12.00f, 6.16f } },
+              /* O */ { 21, 316.29f, { 875.3f, 1614.5f, 4086.6f }, { 0.00f, -12.00f, -32.04f }, { 0.00f, 1.00f, 0.51f }, { 19.30f, 10.07f, 3.21f } }
+            } }
+        },
+        { "maki", "Maki", "まき",
+          { /* f0     */ 303.36f,
+            /* spread */ 3.52f,
+            /* F      */ { 948.0f, 2224.0f, 3673.5f },
+            /* L      */ { 0.00f, -8.88f, -15.78f },
+            /* tilt   */ 21.47f,
+            /* frames */ 2553,
+            /* rel    */ { 0.21f, 0.78f, 0.30f },
+            /* hnr    */ { 15.87f, 4.76f, 1.59f },
+            /* hfDb   */ -31.64f,
+            /* tract  */ 1.224f,
+            /* vow    */ {
+              /* A */ { 986, 287.45f, { 977.0f, 1997.1f, 3698.0f }, { 0.00f, -6.78f, -16.42f }, { 0.56f, 0.71f, 0.30f }, { 12.87f, 4.40f, 1.24f } },
+              /* I */ { 97, 297.16f, { 967.8f, 2960.2f, 3807.5f }, { 0.00f, -9.37f, -12.38f }, { 0.02f, 0.67f, 0.30f }, { 19.57f, 4.11f, 1.91f } },
+              /* U */ { 886, 327.74f, { 882.8f, 2173.2f, 3594.2f }, { 0.00f, -19.77f, -26.03f }, { 0.00f, 0.93f, 0.30f }, { 18.58f, 5.63f, 1.97f } },
+              /* E */ { 551, 303.99f, { 916.3f, 2635.5f, 3703.9f }, { 0.00f, -9.84f, -12.98f }, { 0.09f, 0.74f, 0.30f }, { 17.27f, 4.52f, 1.74f } },
+              /* O */ { 33, 229.38f, { 600.1f, 1487.4f, 3952.4f }, { 0.00f, -6.84f, -29.67f }, { 0.18f, 0.65f, 0.30f }, { 9.37f, 4.01f, 1.83f } }
+            } }
+        },
+        { "yuni", "Yuni", "ゆに",
+          { /* f0     */ 312.23f,
+            /* spread */ 2.80f,
+            /* F      */ { 850.7f, 2027.8f, 3752.8f },
+            /* L      */ { 0.00f, -12.96f, -20.37f },
+            /* tilt   */ 23.26f,
+            /* frames */ 2318,
+            /* rel    */ { 0.14f, 0.83f, 0.30f },
+            /* hnr    */ { 15.53f, 5.16f, 1.24f },
+            /* hfDb   */ -27.29f,
+            /* tract  */ 1.198f,
+            /* vow    */ {
+              /* A */ { 1178, 305.28f, { 859.8f, 1868.7f, 3733.6f }, { 0.00f, -11.75f, -22.15f }, { 0.25f, 0.87f, 0.30f }, { 14.78f, 5.40f, 1.28f } },
+              /* I */ { 33, 304.80f, { 834.9f, 2991.2f, 3771.8f }, { 0.00f, -3.93f, -2.99f }, { 0.02f, 0.51f, 0.30f }, { 12.42f, 3.21f, 0.01f } },
+              /* U */ { 835, 322.40f, { 832.8f, 2245.5f, 3746.0f }, { 0.00f, -16.21f, -20.25f }, { 0.03f, 0.83f, 0.30f }, { 16.62f, 5.12f, 1.34f } },
+              /* E */ { 193, 314.13f, { 853.7f, 2641.7f, 3764.8f }, { 0.00f, -8.96f, -8.52f }, { 0.11f, 0.76f, 0.30f }, { 15.94f, 4.65f, 0.49f } },
+              /* O */ { 79, 296.63f, { 809.5f, 1579.6f, 4029.3f }, { 0.00f, -8.77f, -25.18f }, { 0.23f, 0.72f, 0.30f }, { 14.57f, 4.42f, 0.70f } }
             } }
         },
     };
