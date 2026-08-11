@@ -729,6 +729,104 @@ int main()
             if (! ok) ++mFail;
         }
 
+        // (a2b) Two bands must never resolve to the SAME peak. The search
+        //       ranges overlap (F1's 700-1200 is inside F2's 700-3400), and
+        //       before v0.37.2 each band took its own maximum independently,
+        //       so on a voice where F1 and F2 merge into one envelope hump
+        //       both selected it and a minimum-spacing line pushed them
+        //       150 Hz apart. 30-46 % of frames on the shipped character
+        //       recordings did this. The give-away is the RATIO: two real
+        //       formants of the same speaker do not sit at the repair
+        //       distance.
+        {
+            bool ok = true;
+            for (double f0 : { 150.0, 240.0, 320.0, 400.0 })
+                for (int v = 0; v < 5; ++v)
+                {
+                    auto s2 = vowel (VFF[v], f0, 1.0, 2.0, (unsigned) (v*11+5));
+                    const auto p = VoiceAnalyzer::analyze (s2.data(), (int) s2.size(), FS);
+                    if (! p.valid()) continue;
+                    // only bands the profile actually reports
+                    const bool have12 = p.F[0] > 0.0f && p.F[1] > 0.0f;
+                    const bool have23 = p.F[1] > 0.0f && p.F[2] > 0.0f;
+                    if (have12 && ! (p.F[1] > p.F[0])) ok = false;
+                    if (have23 && ! (p.F[2] > p.F[1])) ok = false;
+                    // the old repair produced F2 == F1 + 150 exactly
+                    if (have12 && std::abs ((p.F[1] - p.F[0]) - 150.0f) < 0.5f) ok = false;
+                    if (have23 && std::abs ((p.F[2] - p.F[1]) - 200.0f) < 0.5f) ok = false;
+                }
+            std::printf ("formants stay distinct and ordered (no spacing repair): %s\n",
+                         ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+        }
+
+        // (a2c) Does a vowel BUCKET actually contain that vowel?
+        //
+        //       The per-vowel table is what MatchingEngine compares, so the
+        //       question that matters is not "how evenly are frames spread"
+        //       (an evenly wrong split scores well on that) but "does bucket
+        //       /a/ hold /a/". Checked the only way that means anything:
+        //       synthesize an utterance of all five vowels with KNOWN
+        //       formants, then ask how far each bucket's own F2 lands from
+        //       the true F2 of the vowel whose name it carries.
+        //
+        //       F2 is the discriminator -- it swings ~16 st across the vowel
+        //       space, so a bucket holding the wrong vowel misses by a lot
+        //       and there is no way to score well by accident.
+        {
+            std::vector<double> err;
+            int buckets = 0;
+            for (int tbl = 0; tbl < 2; ++tbl)
+                for (double f0 : { 130.0, 200.0, 260.0, 320.0, 400.0 })
+                    for (double sc : { 0.92, 1.0, 1.12 })
+                    {
+                        const double (*T)[3] = tbl ? VFF : VF;
+                        std::vector<float> x;
+                        for (int rep = 0; rep < 2; ++rep)
+                            for (int v = 0; v < 5; ++v)
+                            {
+                                auto seg = vowel (T[v], f0, sc, 1.2, (unsigned)(v*7+rep*31+11));
+                                x.insert (x.end(), seg.begin(), seg.end());
+                                x.insert (x.end(), (size_t)(0.12*FS), 0.0f);
+                            }
+                        const auto p = VoiceAnalyzer::analyze (x.data(), (int) x.size(), FS, 1.0e9);
+                        if (! p.valid()) continue;
+                        for (int v = 0; v < 5; ++v)
+                        {
+                            const auto& q = p.vow[v];
+                            if (! q.valid() || ! (q.F[1] > 0.0f)) continue;
+                            ++buckets;
+                            err.push_back (std::abs (12.0 * std::log2 (q.F[1] / (T[v][1] * sc))));
+                        }
+                    }
+            std::sort (err.begin(), err.end());
+            const double med2 = err.empty() ? 99.0 : err[err.size()/2];
+            const double p90  = err.empty() ? 99.0 : err[(size_t)(err.size()*0.9)];
+            // Measured over the same runs, median / p90 in st:
+            //
+            //   v0.37.1, both old                    1.32 / 7.84
+            //   distinct-peak assignment only        1.45 / 8.04
+            //   F3-normalized classifier only        1.57 / 6.83
+            //   v0.37.2, both                        0.94 / 3.78
+            //
+            // Worth reading twice: NEITHER change helps on its own, and each
+            // looks like a small regression alone. Correcting the assignment
+            // moves the F2 distribution, and the old classifier normalized by
+            // the median of that distribution, so it was partly compensating
+            // for the very error being fixed. Only removing both couplings
+            // improves anything -- which is also why the two ship together.
+            //
+            // A regression guard, not a certificate: 0.94 st is still not
+            // good, and the residue is /e/ vs /i/, which differ almost
+            // entirely in F1 and so cannot be told apart on a voice too high
+            // for F1 to be located (see classifyVowels).
+            const bool ok = ! err.empty() && med2 < 3.0;
+            std::printf ("vowel buckets hold their own vowel: F2 err median %.2f  p90 %.2f st"
+                         " over %d buckets (median < 3.0)  %s\n",
+                         med2, p90, buckets, ok ? "PASS" : "FAIL");
+            if (! ok) ++mFail;
+        }
+
         // (a3) A band that was never located must not drive a level trim.
         //      L = 0 means "as loud as the strongest formant", so an ungated
         //      f*gain read a missing band as maximally loud and asked for
@@ -1046,11 +1144,22 @@ int main()
                 const double want   = t.f0Hz * std::pow (2.0, -MatchingEngine::kPitchBias/12.0);
                 if (std::abs (12.0*std::log2 (landed/want)) > 0.05) eOk = false;
 
-                // A male source against any of these -- all of them are
-                // higher and smaller-tract than he is -- must ask for a
-                // POSITIVE formant shift. A negative one is the signature of
-                // the failure mode this whole path was rewritten for.
-                if (! (r.formant > 0.0f)) eOk = false;
+                // A male source against a target that is clearly higher and
+                // smaller-tract must ask for a POSITIVE formant shift; a
+                // negative one is the signature of the failure this path was
+                // rewritten for.
+                //
+                // "Androgynous" is deliberately NOT such a target -- it sits
+                // at f0 175 Hz against this source's 150, and a neutral vocal
+                // tract is not necessarily shorter than a particular male's,
+                // so its honest answer is near zero and may fall either side
+                // of it. Requiring a positive sign there would be asserting
+                // something the entry never claimed. It still has to stay
+                // small: a neutral target asking for a large shift in either
+                // direction would be a real fault.
+                const bool higherVoice = t.f0Hz > 1.25f * me.f0Hz;
+                if (higherVoice) { if (! (r.formant > 0.0f)) eOk = false; }
+                else             { if (std::abs (r.formant) > 3.0f) eOk = false; }
 
                 const bool measured = t.vowelsMeasured() > 0;
                 if (r.fellBack == measured) eOk = false;

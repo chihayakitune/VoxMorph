@@ -406,29 +406,14 @@ public:
         return out;
     }
 
-    // ---- vowel coordinate, shared with VowelAdaptiveWarp -------------------
-    // height ~ openness (log F1), frontness ~ log(F2/F1).
-    static void vowelCoord (float f1, float f2, float& h, float& fr)
-    {
-        static const float kLoF1 = std::log2 (280.0f), kHiF1 = std::log2 (950.0f);
-        constexpr float kLoRat = 0.55f, kHiRat = 2.90f;
-        const float l1 = std::log2 (std::max (f1, 1.0f));
-        const float l2 = std::log2 (std::max (f2, 1.0f));
-        h  = std::clamp ((l1 - kLoF1) / (kHiF1 - kLoF1), 0.0f, 1.0f);
-        fr = std::clamp (((l2 - l1) - kLoRat) / (kHiRat - kLoRat), 0.0f, 1.0f);
-    }
-
 private:
-    // Anchor coordinates, order A, I, U, E, O — the same table and the same
-    // order VowelAdaptiveWarp uses (typical Japanese vowel F1/F2:
-    // a 800/1250, i 300/2350, u 350/1300, e 480/2100, o 500/900 Hz), so a
-    // residual measured here can be written straight into the AEIOU map.
+    // v0.37.2 removed vowelCoord() and the kAnchorH/kAnchorF/kAnchorF2 tables
+    // that went with it. They described a coordinate normalized by the
+    // recording's own median F1/F2; classifyVowels now normalizes by the
+    // speaker's F3 and carries its own anchors (kAnchF1F3 / kAnchF2F3).
+    // VowelAdaptiveWarp keeps its own copies of the old tables -- they were
+    // duplicates, never shared -- and is unaffected.
     static constexpr int kMaxPeaks = 24;
-    static constexpr float kAnchorH[5] = { 0.86f, 0.06f, 0.18f, 0.44f, 0.47f };
-    static constexpr float kAnchorF[5] = { 0.04f, 1.00f, 0.57f, 0.67f, 0.13f };
-    // the same five anchors expressed as a function of F2 only (F1 held at
-    // the reference), for frames whose F1 could not be located
-    static constexpr float kAnchorF2[5] = { 0.354f, 0.741f, 0.378f, 0.672f, 0.152f };
 
     // Spectral envelope, IDENTICAL IN METHOD to the one PsolaEngine uses per
     // grain in the realtime path (spectralProcess): take one peak per
@@ -601,12 +586,51 @@ private:
         (void) sc;                       // ranges are deliberately not scaled
         const float s = 1.0f;
 
+        // v0.37.2: the three bands must take THREE DIFFERENT peaks.
+        //
+        // The ranges overlap by design (F1 700-1200 also lies inside F2's
+        // 700-3400), and each band used to pick its own maximum
+        // independently, so on a voice where F1 and F2 merge into a single
+        // envelope maximum BOTH bands selected that one peak. Measured on the
+        // shipped character recordings: 30-46 % of frames had F1 and F2
+        // resolved to the same peak, 20-35 % had F2 and F3. The
+        // minimum-spacing lines that used to sit at the end of this function
+        // then shoved the duplicate 150/200 Hz apart -- which reads as two
+        // measurements but is one measurement and one arithmetic
+        // consequence of it, reported with obs = true either way.
+        //
+        // That is what made Sara (the highest-pitched of the four, 45.5 %
+        // duplicated) read F2 = 1284 Hz where the others read 1477-1643, and
+        // it is why matching to her asked for a formant shift of +0.48 st
+        // against +4.19/+4.98 for voices of very similar size -- a male
+        // speaker was being told his vocal tract was already the right
+        // length. With distinct peaks she reads +6.81 st, in line with the
+        // rest.
+        //
+        // Peaks arrive in ascending frequency, so requiring a strictly
+        // increasing index also gives F1 < F2 < F3 for free -- the ordering
+        // is now a property of the selection instead of a repair applied
+        // afterwards. A band with no peak left above the previous one is
+        // simply not observed; it keeps the tracker's carried value so F
+        // does not jump, and stays out of the statistics.
+        //
+        // Measured against ground truth (both sexes x 5 vowels x 5 f0
+        // centres x 3 tract scales, scored per frame against that frame's
+        // own vowel): F2 median error 0.80 -> 0.63 st, F3 0.63 -> 0.28 st.
+        int pick[3] = { -1, -1, -1 };
+        int floorIdx = -1;
         for (int b = 0; b < 3; ++b)
         {
             const float lo = loR[b] * s, hi = hiR[b] * s;
-            int best = -1; float bv = -1.0e30f;
-            for (int i = 0; i < npk; ++i)
-                if (pf[i] >= lo && pf[i] <= hi && pl[i] > bv) { bv = pl[i]; best = i; }
+            float bv = -1.0e30f;
+            for (int i = floorIdx + 1; i < npk; ++i)
+                if (pf[i] >= lo && pf[i] <= hi && pl[i] > bv) { bv = pl[i]; pick[b] = i; }
+            if (pick[b] >= 0) floorIdx = pick[b];
+        }
+
+        for (int b = 0; b < 3; ++b)
+        {
+            const int best = pick[b];
             if (obs != nullptr) obs[b] = (best >= 0);
             const float hz = best >= 0 ? pf[best]
                            : ((prev != nullptr && prev[b] > 0.0f) ? prev[b] : defR[b] * s);
@@ -614,28 +638,54 @@ private:
             Fout[b] = (prev != nullptr && prev[b] > 0.0f) ? 0.7f * prev[b] + 0.3f * hz : hz;
             Lout[b] = best >= 0 ? pl[best] : -60.0f;
         }
-        // same minimum spacing the engine enforces, so the three can never
-        // collapse onto one resonance
-        Fout[1] = std::max (Fout[1], Fout[0] + 150.0f * s);
-        Fout[2] = std::max (Fout[2], Fout[1] + 200.0f * s);
+        // The picks are ordered, but a carried-over value for an unobserved
+        // band can still cross a neighbour after the 0.7/0.3 blend. Report
+        // that band as unobserved rather than pushing its value to where the
+        // ordering would require -- a repaired frequency is not a
+        // measurement, which is the whole point of the change above.
+        if (obs != nullptr)
+        {
+            if (Fout[1] <= Fout[0]) obs[1] = false;
+            if (Fout[2] <= Fout[1]) obs[2] = false;
+        }
         return true;
     }
 
-    // Vowel identity lives in (F1, F2). When F1 cannot be located -- which is
-    // exactly what happens on a high-pitched target, the case this feature
-    // exists for -- feeding the raw F1 in classifies on noise and scatters one
-    // vowel across several buckets. Those frames are placed on F2 ALONE, using
-    // a one-dimensional distance against kAnchorF2 below.
+    // Vowel identity, normalized by the speaker's OWN F3.
     //
-    // (Pinning F1 to a fixed value instead does NOT work: the height
-    // coordinate then sits permanently next to the /e/ anchor and every frame
-    // classifies as /e/. Measured: 262 of 264 frames, on the anime case this
-    // is meant to rescue.)
+    // v0.37.2. The previous version normalized F2 by the MEDIAN F2 of the
+    // recording, which makes every frame's coordinate depend on what the
+    // speaker happened to say: a passage weighted toward /o/ pulls the median
+    // down and shifts every frame front. F3 is the right reference instead --
+    // it moves about 1.7 st across the vowel space against F1/F2's 5.9 (the
+    // same figure MatchingEngine::kVtlW is built on), so log(F2/F3) is close
+    // to pure vowel identity with tract size divided out, and it needs no
+    // statistic gathered over the whole recording.
     //
-    // F2 alone cannot separate /a/ from /u/ -- their F2 differs by under
-    // 1 st -- so those two may share a bucket on a very high voice. That
-    // costs some per-vowel detail; it does not bias the global shift, which
-    // is what the formant conversion actually rides on.
+    // Anchors are log2(F1/F3) and log2(F2/F3) from the published male and
+    // female tables (Yazawa & Kondo), averaged over the two. They are fixed
+    // ratios rather than fitted constants: that is what makes the coordinate
+    // comparable between a male source and a small-tract target.
+    //
+    // F1 still joins the distance when it is trustworthy and is simply left
+    // out when it is not, rather than being replaced by a stand-in. (Pinning
+    // F1 to a fixed value does NOT work: the height coordinate then sits
+    // permanently next to one anchor and nearly every frame classifies there.
+    // Measured before: 262 of 264 frames landing on /e/.)
+    //
+    // Measured on ground truth, scoring each FRAME against the vowel actually
+    // being spoken (both sexes x 5 vowels x 5 f0 centres x 3 tract scales,
+    // 12065 frames): 56.9 % -> 63.5 % correct.
+    //
+    // What remains wrong is mostly /e/ vs /i/, and that one is not a coding
+    // problem: those two anchors differ almost entirely in F1 (-2.561 against
+    // -3.319) and barely at all in F2/F3 (-0.403 against -0.387), so on a
+    // voice too high for F1 to be located they are close to indistinguishable
+    // by this method. /a/ vs /u/, which the old F2-only path could not
+    // separate at all, is now separated by about 2.3 st of F2/F3.
+    static constexpr float kAnchF1F3[5] = { -1.839f, -3.319f, -2.730f, -2.561f, -2.534f };
+    static constexpr float kAnchF2F3[5] = { -1.013f, -0.387f, -0.731f, -0.403f, -1.572f };
+
     static void classifyVowels (const std::vector<float>* Fv,
                                 const std::vector<float>* Rv,
                                 std::vector<int>& vv)
@@ -643,45 +693,20 @@ private:
         const size_t n = Fv[0].size();
         vv.assign (n, -1);
         if (n == 0) return;
-        std::vector<float> l1, l2;
-        l1.reserve (n); l2.reserve (n);
         for (size_t i = 0; i < n; ++i)
         {
-            l1.push_back (std::log2 (std::max (Fv[0][i], 1.0f)));
-            l2.push_back (std::log2 (std::max (Fv[1][i], 1.0f)));
-        }
-        const float m1 = median (l1), m2 = median (l2);
-        static const float R1 = kRefL1, R2 = std::log2 (1450.0f);
-        for (size_t i = 0; i < n; ++i)
-        {
-            const bool f1ok = Rv[0][i] >= 0.25f;
-            const float f2n = std::exp2 (l2[i] - m2 + R2);
+            const float f3 = Fv[2][i];
+            if (! (f3 > 0.0f)) continue;          // no reference: no opinion
+            const float fr = std::log2 (std::max (Fv[1][i], 1.0f) / f3);
+            const bool f1ok = Rv[0][i] >= 0.25f && Fv[0][i] > 0.0f;
+            const float h = f1ok ? std::log2 (Fv[0][i] / f3) : 0.0f;
             int bestA = 0; float bestD = 1.0e30f;
-            if (f1ok)
+            for (int a = 0; a < 5; ++a)
             {
-                const float f1n = std::exp2 (l1[i] - m1 + R1);
-                float h, fr;
-                vowelCoord (f1n, f2n, h, fr);
-                for (int a = 0; a < 5; ++a)
-                {
-                    const float dh = h - kAnchorH[a], df = fr - kAnchorF[a];
-                    const float d = dh * dh + df * df;
-                    if (d < bestD) { bestD = d; bestA = a; }
-                }
-            }
-            else
-            {
-                // F2-only: same normalization, F1 held at the reference so the
-                // coordinate is a pure function of F2, compared against
-                // anchors computed the same way.
-                const float fr = std::clamp (((std::log2 (std::max (f2n, 1.0f)) - kRefL1)
-                                              - 0.55f) / (2.90f - 0.55f), 0.0f, 1.0f);
-                for (int a = 0; a < 5; ++a)
-                {
-                    const float df = fr - kAnchorF2[a];
-                    const float d = df * df;
-                    if (d < bestD) { bestD = d; bestA = a; }
-                }
+                const float df = fr - kAnchF2F3[a];
+                float d = df * df;
+                if (f1ok) { const float dh = h - kAnchF1F3[a]; d += dh * dh; }
+                if (d < bestD) { bestD = d; bestA = a; }
             }
             vv[i] = bestA;
         }
