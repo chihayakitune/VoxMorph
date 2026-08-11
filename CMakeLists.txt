@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(VoxMorph VERSION 0.38.0)
+project(VoxMorph VERSION 0.39.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,3 +61,23 @@ target_link_libraries(VoxMorph
             juce::juce_recommended_lto_flags
             juce::juce_recommended_warning_flags
 )
+
+# ---- UI verification harness (developer tool, OFF by default) ------------
+# Renders the editor offscreen WITH a desktop peer and audits the layout
+# numerically. See test/ui_shot.cpp for why the peer matters.
+#   cmake -B build -G Ninja -DVOXMORPH_UI_HARNESS=ON
+#   cmake --build build --target VoxMorphUiShot
+option(VOXMORPH_UI_HARNESS "Build the offscreen UI screenshot/audit tool" OFF)
+if (VOXMORPH_UI_HARNESS)
+    juce_add_console_app(VoxMorphUiShot PRODUCT_NAME "VoxMorphUiShot")
+    target_sources(VoxMorphUiShot PRIVATE test/ui_shot.cpp src/PluginProcessor.cpp)
+    target_include_directories(VoxMorphUiShot PRIVATE dsp src)
+    target_compile_definitions(VoxMorphUiShot PUBLIC
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0
+        JUCE_PLUGINHOST_VST3=1
+        JUCE_STANDALONE_APPLICATION=1
+        JUCE_MODAL_LOOPS_PERMITTED=1)
+    target_link_libraries(VoxMorphUiShot
+        PRIVATE juce::juce_audio_utils AnokoeAssets
+        PUBLIC  juce::juce_recommended_config_flags)
+endif()

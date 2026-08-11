@@ -1,73 +1,57 @@
-// SampleTargetCatalog.h — built-in Target voice profiles for Matching
-// (v0.28.0). Lets Matching work out of the box, without the user having
-// to find an audio file first (spec 2.3 / 2.4). These are static
-// summary profiles only — no bundled audio, no license concerns.
+// SampleTargetCatalog.h — built-in Target voice profiles for Matching.
+// Lets Matching work out of the box, without the user having to find an
+// audio file first (spec 2.3 / 2.4). Summary profiles only — no bundled
+// audio, no license concerns.
 //
-// Values are typical female / neutral / bright-child voice statistics
-// (F0, F1..F3, level ratios, tilt, spread), chosen so Auto-Set produces
-// distinct, sensible starting points per target. They ARE approximations
-// of a class of voices, not any specific person.
+// Stable ids are exposed so preset metadata can point at the selected
+// target without depending on display strings.
 //
-// Stable ids are exposed so preset metadata (Phase 4) can point at the
-// selected target without depending on display strings.
+// v0.39.0: the five GENERIC entries that shipped from v0.28.0 (Feminine
+// Standard / Bright / Warm, Youthful, Androgynous) are REMOVED at the
+// user's request -- they read as low quality next to the measured ones,
+// which is not surprising: they were idealized statistics for a CLASS of
+// voice, written by hand, with rel forced to {1,1,1} and no per-vowel
+// table at all, so matching against them could only ever take the global
+// fallback path and could never write an AEIOU map. Every remaining entry
+// is a measurement of one specific voice.
 //
-// v0.29.0: the five GENERIC entries carry rel = {1,1,1}. Those are idealized
-// statistics rather than measurements, and every F sits well above 2 x f0 (the
-// point below which a formant stops being observable), so the Matching stage
-// is told to trust all three bands. Leaving rel at its zero default would make
-// the reliability weighting discard them entirely. They carry NO per-vowel
-// table -- there is no recording to measure one from, and inventing one would
-// put fabricated numbers into the AEIOU map -- so matching against a generic
-// target takes MatchingEngine's global fallback path by design.
+// (MatchingEngine's no-vowel-table fallback is NOT dead code now that the
+// catalog no longer exercises it: any .vmprofile saved before v0.29.0, and
+// any profile whose recording was too short to fill vowel buckets, still
+// goes down that path. offline_test covers it directly.)
 //
-// v0.37.0: MEASURED character entries -- Uru / Kura / Sara / Soshi, joined in
-// v0.38.0 by Funi / Maki / Yuni. These are the opposite case to the generic
-// five in every respect, and the distinction matters when reading the
-// numbers below:
+// The entries are MEASURED, and what that means in practice:
 //
-//   * Every field is a measurement, produced by running VoiceAnalyzer over
-//     the whole of a real recording (76-227 s, 866-3018 voiced frames) with
-//     test/profile_dump.cpp --cxx. Nothing here was chosen to make Auto-Set
+//   * Every field comes from running VoiceAnalyzer over the whole of a real
+//     recording (76-227 s, 866-3018 voiced frames) via
+//     test/profile_dump.cpp --cxx. Nothing was chosen to make Auto-Set
 //     behave; if a value looks odd it is because the voice is like that.
-//   * They carry a full per-vowel table, so matching against them takes the
-//     vowel-matched path and writes a real AEIOU map -- which is the whole
-//     point of measuring a specific character rather than a voice class.
-//   * REMEASURED TWICE since v0.37.0, so do not compare any two of these
-//     vintages as if they described the same thing. v0.37.1 fixed F1: the
-//     original cut reported 342-601 Hz with rel = 0.00 throughout, several
-//     BELOW the speaker's own fundamental, which was not an uncertain
-//     estimate but the flat extrapolation under the first harmonic being
-//     reported as a resonance; F1 is now 774-880 Hz, ordinary open-vowel
-//     values for a small tract. v0.37.2 fixed F2 and F3: the three bands
-//     used to be allowed to pick the SAME envelope peak, which on these
-//     voices happened in 30-46 % of frames, and the reported F2 was then
-//     partly F1. F2 was 1284-1643 Hz and is now 1972-2033; F3 was 2658-3251
-//     and is now 3586-3876.
-//   * That the four now agree closely on F2 (1972-2033 Hz) and F3
-//     (3586-3876) is a sanity check passing, not a suspicious coincidence:
-//     they are four voices of very similar type and size, so they SHOULD
-//     land near one another. Under the old assignment they spread over
-//     1284-1643 Hz, and the odd one out (Sara, the highest-pitched, whose
-//     frames duplicated most often) asked for a formant shift of +0.48 st
-//     where the others asked +4.19 and +4.98 -- the symptom that started
-//     this. She now asks +6.81, in line with the rest.
-//   * rel[0] still varies a lot between them, and that is the honest signal,
-//     not a defect. Sorted by pitch it is close to monotone: Soshi (f0 252 Hz)
+//   * They carry a full per-vowel table, so matching takes the vowel-matched
+//     path and writes a real AEIOU map -- the whole point of measuring a
+//     specific character rather than a voice class.
+//   * REMEASURED TWICE since v0.37.0, so do not compare two vintages as if
+//     both described the same thing. v0.37.1 fixed F1: the original cut
+//     reported 342-601 Hz with rel = 0.00 throughout, several BELOW the
+//     speaker's own fundamental -- not an uncertain estimate but the flat
+//     extrapolation under the first harmonic being reported as a resonance.
+//     v0.37.2 fixed F2/F3: the three bands could pick the SAME envelope
+//     peak, which happened in 30-46 % of frames on these voices, so the
+//     reported F2 was partly F1.
+//   * rel[0] varies a lot between them, and that is the honest signal, not a
+//     defect. Sorted by pitch it is close to monotone: Soshi (f0 252 Hz)
 //     0.45, Maki (303) 0.21, Yuni (312) 0.14, Sara (318) 0.02, Funi (342)
-//     0.00. The higher the voice, the fewer frames put F1 far enough above f0
-//     to place it -- exactly the law density() encodes, falling out of seven
-//     independent recordings that were never fitted to it. Below
+//     0.00. The higher the voice, the fewer frames put F1 far enough above
+//     f0 to place it -- exactly the law density() encodes, falling out of
+//     seven independent recordings that were never fitted to it. Below
 //     MatchingEngine::kMinRel the band does not vote and F1 moves with the
-//     global formant, which is the right answer for a uniformly scaled tract.
-//   * Nothing here is clamped, substituted or "fixed up". A plausible-looking
-//     F1 written in by hand would be believed by everything downstream that
+//     global formant, which is right for a uniformly scaled tract.
+//   * Nothing is clamped, substituted or "fixed up". A plausible-looking F1
+//     written in by hand would be believed by everything downstream that
 //     does not check rel, and would be a fabricated measurement.
-//   * hnr / hfDb are populated, so Auto-Set's Air and Air Shine stage runs
-//     against these targets (it self-disables against the generic five,
-//     whose zeroed texture fields would read as "infinitely breathy").
+//   * hnr / hfDb are populated, so Auto-Set's Air and Air Shine stage runs.
 //
-// Still no bundled audio: these are summary statistics, a few hundred bytes
-// per character, from which the source recording cannot be reconstructed.
+// Still no bundled audio: a few hundred bytes of statistics per character,
+// from which the source recording cannot be reconstructed.
 #pragma once
 #include <string_view>
 #include "VoiceAnalyzer.h"
@@ -75,64 +59,23 @@
 struct SampleTargetEntry
 {
     const char*  id;        // stable, for metadata / logs
-    const char*  displayEn; // "Feminine Standard"
-    const char*  displayJp; // "自然な女性声"
+    const char*  displayEn; // "Uru"
+    const char*  displayJp; // "うる"
     VoiceProfile profile;
 };
 
 inline const SampleTargetEntry* getSampleTargets (int& count)
 {
-    // The voicedFrames field only has to pass VoiceProfile::valid()
-    // (>= 15 frames + F0 > 40 Hz). Values below are typical mid-range
-    // adult female (Standard), softer/lower (Warm), and a bright/young
-    // profile (Bright); they cover the space Auto-Set actually reacts to.
-    //
     // NOTE on tiltDb: VoiceAnalyzer defines it as
     //     10 * log10(energy 60-1000 Hz / energy 2000-8000 Hz)
-    // which is strongly POSITIVE for speech (~+8 on a synthetic vowel,
-    // higher on real voices) -- it is not a small +-3 dB "slope". The
-    // v0.28.0 values here were written on that wrong scale, so Auto-Set's
-    // 0.25 * (target - mine) always railed against its -4 dB clamp and
-    // pushed the voice to maximum brightness no matter which target was
-    // picked. These are on the measured scale, and only their RELATIVE
-    // order matters to matching.
+    // which is strongly POSITIVE for speech -- it is not a small +-3 dB
+    // "slope". The removed v0.28.0 entries were written on the wrong scale
+    // and railed Auto-Set's brightness for two releases before anyone
+    // noticed; measured values cannot drift that way, which is part of why
+    // the hand-written ones are gone.
     static const SampleTargetEntry list[] =
     {
-        { "feminine_standard", "Feminine Standard", "自然な女性声",
-          { /* f0     */ 215.0f,
-            /* spread */ 2.4f,
-            /* F      */ { 700.0f, 2050.0f, 2800.0f },
-            /* L      */ {  0.0f,   -3.5f,   -6.0f },
-            /* tilt   */ 13.0f,
-            /* frames */ 240,
-            /* rel    */ { 1.0f, 1.0f, 1.0f } }
-        },
-        { "feminine_bright", "Feminine Bright", "明るい女性声",
-          { 240.0f, 3.0f,
-            { 730.0f, 2200.0f, 3000.0f },
-            {  0.0f,  -2.5f,   -5.0f  },
-            10.0f, 240, { 1.0f, 1.0f, 1.0f } }
-        },
-        { "feminine_warm", "Feminine Warm", "柔らかい女性声",
-          { 195.0f, 1.9f,
-            { 680.0f, 1900.0f, 2650.0f },
-            {  0.0f,  -4.0f,   -7.0f  },
-            17.0f, 240, { 1.0f, 1.0f, 1.0f } }
-        },
-        { "youthful", "Youthful", "幼めの声",
-          { 260.0f, 3.2f,
-            { 760.0f, 2350.0f, 3150.0f },
-            {  0.0f,  -2.0f,   -4.5f  },
-             9.0f, 240, { 1.0f, 1.0f, 1.0f } }
-        },
-        { "androgynous", "Androgynous", "中性的な声",
-          { 175.0f, 2.1f,
-            { 620.0f, 1750.0f, 2550.0f },
-            {  0.0f,  -3.0f,   -6.5f  },
-            15.0f, 240, { 1.0f, 1.0f, 1.0f } }
-        },
-
-        // ---- measured character targets (v0.37.0, remeasured v0.37.2) ------
+        // ---- measured character targets (v0.37.0/v0.38.0, values v0.37.2) --
         // Generated verbatim by test/profile_dump.cpp --cxx; see the file
         // header for how far to trust each band. Regenerate, never hand-edit:
         //   profile_dump <recording>.wav --cxx <id> <En> <Jp>

@@ -257,6 +257,8 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     capLen = 0;  capTarget = 0;  capturing = false;
     prevBuf.assign ((size_t) (sampleRate * 60.0), 0.0f);
     prevLen = 0;  prevPos = -1;
+    myBuf.assign ((size_t) (sampleRate * 60.0), 0.0f);
+    myLen = 0;  myPos = -1;
 
     // reset the per-run smoothing states so a device restart (or host
     // transport re-prepare) never resumes from a stale mute/gate fade
@@ -840,7 +842,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         if (c >= room) capturing.store (false);
     }
 
-    const int pp = prevPos.load();     // ANALYZE tab: target-file preview
+    const int pp = prevPos.load();     // Matching tab: target-file preview
     if (pp >= 0)
     {
         const int pl = prevLen.load();
@@ -851,6 +853,19 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             for (int i = 0; i < c; ++i) d[i] += 0.9f * prevBuf[(size_t) (pp + i)];
         }
         prevPos.store (pp + n >= pl ? -1 : pp + n);
+    }
+
+    const int mp = myPos.load();       // Matching tab: MyVoice-file preview
+    if (mp >= 0)
+    {
+        const int ml = myLen.load();
+        const int c  = std::min (n, ml - mp);
+        for (int c2 = 0; c2 < ch; ++c2)
+        {
+            float* d = buffer.getWritePointer (c2);
+            for (int i = 0; i < c; ++i) d[i] += 0.9f * myBuf[(size_t) (mp + i)];
+        }
+        myPos.store (mp + n >= ml ? -1 : mp + n);
     }
 
     // OUTPUT meters: measured on the finished buffer, so they show exactly

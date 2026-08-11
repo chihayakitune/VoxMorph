@@ -2023,18 +2023,19 @@ public:
 
         addAndMakeVisible (recBtn);
         addAndMakeVisible (myVoiceFileBtn);
-        for (auto* b : { &playBtn, &saveTargetProfBtn, &saveMyVoiceProfBtn,
-                         &resetAllBtn, &matchBtn, &savePresetBtn,
+        for (auto* b : { &matchBtn, &savePresetBtn, &newCharBtn,
                          &savePresetOkBtn, &savePresetCancelBtn })
             addAndMakeVisible (*b);
         recBtn.setTooltip (juce::String::fromUTF8 (
             "Records your microphone input for the CURRENT profile.\n"
             "マイク入力を録音してMyVoiceプロファイルにします。"));
         myVoiceFileBtn.setTooltip (juce::String::fromUTF8 (
-            "Load an audio file or .vmprofile as MyVoice (does not touch "
-            "the Target selection).\n音声ファイルまたは.vmprofileを"
-            "MyVoiceとして読み込みます(Target選択は変更されません)。"));
-        myVoiceFileBtn.onClick = [this] { loadMyVoiceFile(); };
+            "Opens a menu: load an audio file or .vmprofile as MyVoice, play "
+            "the loaded audio back, or save the measured profile. Loading "
+            "does not touch the Target selection.\n"
+            "メニューが開きます: 音声ファイル/.vmprofileの読み込み、読み込んだ"
+            "音声の再生、測定したプロファイルの保存。Target選択は変更されません。"));
+        myVoiceFileBtn.onClick = [this] { showMyVoiceMenu(); };
         recPlayChk.setTooltip (juce::String::fromUTF8 (
             "When checked, the target file plays while you record.\n"
             "チェックすると録音と同時にターゲットを再生します。"));
@@ -2090,8 +2091,13 @@ public:
             {
                 if (targetFileButton == nullptr || ! targetFileButton->getToggleState())
                     return;                       // being switched off, not chosen
+                // v0.39.0: the tile opens a menu rather than going straight to
+                // a chooser, so Play and Save Profile can live here instead of
+                // as separate buttons. The selection is restored first for the
+                // same reason it always was -- dismissing the menu must leave
+                // the UI where it was.
                 restoreTargetSelectionUi();
-                loadTargetFile();
+                showTargetFileMenu();
             };
             addAndMakeVisible (*btn);
             targetButtons.push_back (std::move (btn));
@@ -2127,25 +2133,6 @@ public:
         };
         addAndMakeVisible (graph);
 
-        playBtn.setButtonText ("Play");
-        playBtn.setTooltip (juce::String::fromUTF8 (
-            "Preview the loaded target audio through the plugin output.\n"
-            "読み込んだファイルを出力から再生します。"));
-        saveTargetProfBtn.setButtonText ("Save Profile...");
-        saveTargetProfBtn.setTooltip (juce::String::fromUTF8 (
-            "Save the currently selected target as a .vmprofile (audio-less).\n"
-            "現在のターゲットを.vmprofile(音声なし)として保存します。"));
-        saveMyVoiceProfBtn.setButtonText ("Save Profile...");
-        saveMyVoiceProfBtn.setTooltip (juce::String::fromUTF8 (
-            "Save your last analysed MyVoice as a .vmprofile.\n"
-            "直前に測定/読込したMyVoiceを.vmprofileとして保存します。"));
-        resetAllBtn.setButtonText ("Reset All to Defaults");
-        resetAllBtn.setTooltip (juce::String::fromUTF8 (
-            "Resets every conversion parameter to its default, exactly like the "
-            "button on the PRESETS tab. Locked parameters keep their values and "
-            "it is one Undo step.\n"
-            "全ての変換パラメータを初期値に戻します(PRESETSタブの同名ボタンと同じ動作)。"
-            "ロック中の項目は保持され、Undoで元に戻せます。"));
         matchBtn.setButtonText ("MATCH");
         matchBtn.setTooltip (juce::String::fromUTF8 (
             "Auto-Set: derive parameters from the Current -> Target difference. "
@@ -2157,6 +2144,18 @@ public:
             "Save the current parameter set as a normal preset (.vmpreset). "
             "Available from the PRESETS tab too.\n現在の設定を通常のプリセット"
             "(.vmpreset)として保存します。PRESETSタブでも読めます。"));
+        newCharBtn.setButtonText ("NEW CHARACTER");
+        newCharBtn.setTooltip (juce::String::fromUTF8 (
+            "Saves the voice these settings would PRODUCE from your own -- not "
+            "the settings themselves -- as a .vmprofile you can then pick as a "
+            "Target. Needs MyVoice, because the predicted voice is your "
+            "measured voice with the current parameters applied to it; it is a "
+            "prediction, not a recording of the result.\n"
+            "今の設定があなたの声から作り出す「声そのもの」を.vmprofileとして"
+            "保存します(設定ではありません)。保存したものは以後Targetとして"
+            "選べます。MyVoiceが必要です — 予測はMyVoiceの測定値に現在の"
+            "パラメータを適用して計算するためで、変換結果の録音ではありません。"));
+        newCharBtn.onClick = [this] { saveNewCharacter(); };
         savePresetOkBtn.setButtonText ("Save");
         savePresetCancelBtn.setButtonText ("Cancel");
         saveNameEdit.setTextToShowWhenEmpty ("preset name", juce::Colours::grey);
@@ -2172,14 +2171,6 @@ public:
             proc.capFromOutput = false;
             startCapture (recBtn, waitingCapture);
         };
-        playBtn.onClick  = [this]
-        {
-            if (proc.prevPos.load() >= 0) proc.prevPos = -1;
-            else if (proc.prevLen.load() > 0) proc.prevPos = 0;
-        };
-        saveTargetProfBtn.onClick   = [this] { saveTargetProfile(); };
-        saveMyVoiceProfBtn.onClick  = [this] { saveMyVoiceProfile(); };
-        resetAllBtn.onClick         = [this] { resetAllParameters(); };
         matchBtn.onClick      = [this] { doMatch(); };
         savePresetBtn.onClick = [this] { showSavePreset (true); };
         savePresetOkBtn.onClick     = [this] { savePreset(); };
@@ -2235,9 +2226,6 @@ public:
             }
         }
         r.removeFromTop (4);
-        auto arow = r.removeFromTop (28);
-        playBtn.setBounds     (arow.removeFromLeft (72).withHeight (26));
-        saveTargetProfBtn.setBounds (arow.removeFromLeft (140).withHeight (26).translated (8, 0));
         p2Lbl.setBounds (r.removeFromTop (32).withTrimmedLeft (2));
 
         r.removeFromTop (6);
@@ -2255,11 +2243,6 @@ public:
         durBox.setBounds (vopts.removeFromLeft (72).withHeight (26));
         vopts.removeFromLeft (8);
         recPlayChk.setBounds (vopts.removeFromLeft (140).withHeight (26));
-        vopts.removeFromLeft (10);
-        saveMyVoiceProfBtn.setBounds (vopts.removeFromLeft (
-            std::min (130, std::max (90, vopts.getWidth() / 2))).withHeight (26));
-        vopts.removeFromLeft (8);
-        resetAllBtn.setBounds (vopts.withHeight (26));   // takes what's left
         p1Lbl.setBounds (r.removeFromTop (32).withTrimmedLeft (2));
 
         r.removeFromTop (6);
@@ -2272,6 +2255,8 @@ public:
             auto actionRow = r.removeFromTop (44);
             matchBtn.setBounds      (actionRow.removeFromLeft (140).withHeight (36));
             savePresetBtn.setBounds (actionRow.removeFromRight (150).withHeight (36));
+            actionRow.removeFromRight (8);
+            newCharBtn.setBounds    (actionRow.removeFromRight (160).withHeight (36));
             matchStatus.setBounds   (actionRow.reduced (10, 6));
         }
         r.removeFromTop (4);
@@ -2344,8 +2329,8 @@ private:
                 status (juce::String::fromUTF8 (
                     "録音の解析に失敗しました(有声区間が不足)。もう一度お試しください。"));
         }
-        playBtn.setButtonText (proc.prevPos.load() >= 0 ? "Stop" : "Play");
-        playBtn.setEnabled (proc.prevLen.load() > 0);
+        // The tiles carry no play state of their own; the menus read
+        // prevPos / myPos when they open, so there is nothing to poll here.
     }
 
     // ── target loading ───────────────────────────────────────────────────
@@ -2499,6 +2484,105 @@ private:
         updateMatchStatus();
     }
 
+    // ── tile menus (v0.39.0) ─────────────────────────────────────────────
+    // TargetFile and MyVoiceFile each open a menu instead of a file chooser.
+    // Load / Play / Save Profile were three separate widgets before; folding
+    // them into the tile they belong to removes two buttons per section and
+    // keeps every action about "the target file" in one place.
+    //
+    // Play state is read when the menu OPENS rather than polled, which is why
+    // the panel timer no longer touches these at all.
+    void stopAllPreview()
+    {
+        proc.prevPos = -1;
+        proc.myPos   = -1;
+    }
+
+    void showTargetFileMenu()
+    {
+        const bool playing = proc.prevPos.load() >= 0;
+        const bool hasAudio = proc.prevLen.load() > 0;
+        juce::PopupMenu m;
+        m.addItem (1, juce::String::fromUTF8 (
+            "音声/プロファイルを読み込み... / Load audio or profile..."));
+        m.addSeparator();
+        m.addItem (2, playing ? juce::String::fromUTF8 ("停止 / Stop")
+                              : juce::String::fromUTF8 ("再生 / Play"),
+                   hasAudio);
+        m.addItem (3, juce::String::fromUTF8 (
+            "プロファイルとして保存... / Save as profile..."), prof2.valid());
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (targetFileButton),
+            [this, playing] (int r)
+            {
+                if (r == 1) loadTargetFile();
+                else if (r == 2)
+                {
+                    if (playing) proc.prevPos = -1;
+                    else { stopAllPreview(); proc.prevPos = 0; }
+                }
+                else if (r == 3) saveTargetProfile();
+            });
+    }
+
+    void showMyVoiceMenu()
+    {
+        const bool playing  = proc.myPos.load() >= 0;
+        const bool hasAudio = proc.myLen.load() > 0;
+        juce::PopupMenu m;
+        m.addItem (1, juce::String::fromUTF8 (
+            "音声/プロファイルを読み込み... / Load audio or profile..."));
+        m.addSeparator();
+        // A .vmprofile MyVoice carries no audio, and neither does a recording
+        // made with Record (that path analyses and discards), so Play is only
+        // offered when an audio FILE was loaded here.
+        m.addItem (2, playing ? juce::String::fromUTF8 ("停止 / Stop")
+                              : juce::String::fromUTF8 ("再生 / Play"),
+                   hasAudio);
+        m.addItem (3, juce::String::fromUTF8 (
+            "プロファイルとして保存... / Save as profile..."), prof1.valid());
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&myVoiceFileBtn),
+            [this, playing] (int r)
+            {
+                if (r == 1) loadMyVoiceFile();
+                else if (r == 2)
+                {
+                    if (playing) proc.myPos = -1;
+                    else { stopAllPreview(); proc.myPos = 0; }
+                }
+                else if (r == 3) saveMyVoiceProfile();
+            });
+    }
+
+    // ── NEW CHARACTER (v0.39.0) ──────────────────────────────────────────
+    // Saves the voice the current parameters would PRODUCE from MyVoice, as a
+    // .vmprofile that can then be chosen as a Target. Not a .vmpreset: a
+    // preset is a set of knob positions, and what is wanted here is the
+    // resulting VOICE, which is a different kind of object and is what the
+    // Target side consumes.
+    //
+    // It is a PREDICTION -- MyVoice's measurement with the parameters applied
+    // arithmetically (MatchingEngine::predictEstimated) -- not a measurement
+    // of the converted output. Recording the real output and analysing that
+    // is what Record + capFromOutput already does, and it needs the user to
+    // actually speak; this deliberately does not.
+    void saveNewCharacter()
+    {
+        if (! prof1.valid())
+        {
+            status (juce::String::fromUTF8 (
+                "MyVoiceが必要です。RecordかMyVoiceFileで先に測定してください。"));
+            return;
+        }
+        refreshEstimated();                 // parameters may have moved since MATCH
+        if (! profE.valid())
+        {
+            status (juce::String::fromUTF8 ("推定プロファイルを計算できませんでした。"));
+            return;
+        }
+        saveProfileImpl (profE, "New Character",
+                         juce::String::fromUTF8 ("キャラクター(変換後の推定音声)"));
+    }
+
     void loadTargetFile()
     {
         targetChooser = std::make_unique<juce::FileChooser> (
@@ -2591,8 +2675,12 @@ private:
                 VoiceProfile p;
                 if (auto xml = juce::XmlDocument::parse (file); xml != nullptr
                     && profileFromXml (*xml, p) && p.valid())
+                {
+                    proc.myPos = -1;
+                    proc.myLen = 0;          // profile-only MyVoice has no audio
                     applyMyVoiceProfile (p, file.getFileNameWithoutExtension()
                                               + " (.vmprofile)");
+                }
                 else
                     status (juce::String::fromUTF8 (
                         "MyVoiceプロファイルを読み込めませんでした: ") + file.getFileName());
@@ -2610,10 +2698,20 @@ private:
                                                     (int) decoded.samples.size(), sr);
             if (! analysed.valid())
             {
+                // do NOT overwrite proc.myBuf on analysis failure, for the
+                // same reason the Target path does not touch prevBuf: a
+                // failed load must leave the previous state playable.
                 status (juce::String::fromUTF8 (
                     "MyVoiceの解析に失敗しました(有声区間が不足): ") + file.getFileName());
                 return;
             }
+            // keep the audio so the tile menu can play it back. Written only
+            // while stopped, which is what makes the lock-free handoff safe.
+            proc.myPos = -1;
+            const int copyN = std::min ((int) decoded.samples.size(),
+                                        (int) proc.myBuf.size());
+            std::copy_n (decoded.samples.data(), copyN, proc.myBuf.data());
+            proc.myLen = copyN;
             applyMyVoiceProfile (analysed, file.getFileName());
         });
     }
@@ -2651,36 +2749,6 @@ private:
             else
                 status (juce::String::fromUTF8 ("保存に失敗しました。"));
         });
-    }
-
-    // Same behaviour as the PRESETS tab's "Reset All to Defaults": every
-    // parameter back to its default in ONE undo step, locked parameters
-    // untouched. Kept here (rather than shared) so this stays a plain UI
-    // action -- PresetStore extraction is a Phase 2+ item.
-    void resetAllParameters()
-    {
-        int kept = 0;
-        proc.history.group ([&]
-        {
-            for (auto* p : proc.getParameters())
-                if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
-                {
-                    if (proc.isParamLocked (rp->paramID)) { ++kept; continue; }
-                    rp->beginChangeGesture();
-                    rp->setValueNotifyingHost (rp->getDefaultValue());
-                    rp->endChangeGesture();
-                }
-        });
-        auto msg = juce::String::fromUTF8 ("全パラメータを初期値に戻しました");
-        if (kept > 0)
-            msg += juce::String::fromUTF8 ("(") + juce::String (kept)
-                 + juce::String::fromUTF8 ("項目はロック保持)");
-        status (msg + juce::String::fromUTF8 ("。Undoで戻せます。"));
-        // the match result no longer describes the current parameters
-        nSet = nLocked = 0;
-        refreshEstimated();
-        graph.repaint();
-        updateMatchStatus();
     }
 
     void saveTargetProfile()
@@ -2882,8 +2950,9 @@ private:
     {
         const bool canMatch = prof1.valid() && prof2.valid();
         matchBtn.setEnabled (canMatch);
-        saveTargetProfBtn.setEnabled  (prof2.valid());
-        saveMyVoiceProfBtn.setEnabled (prof1.valid());
+        // NEW CHARACTER predicts what the CURRENT parameters would make of
+        // MyVoice, so MyVoice is the hard requirement; a Target is not.
+        newCharBtn.setEnabled (prof1.valid());
         // Only surface an APPLIED/LOCKED count from the LAST match; if
         // there hasn't been one (or a Target / MyVoice change wiped the
         // counters), stay silent -- the enabled/disabled MATCH button is
@@ -2922,11 +2991,13 @@ private:
 
     VoiceTileButton recBtn         { "record_my_voice", "Record",       TileIconKind::record, /*clickingToggles*/ false };
     VoiceTileButton myVoiceFileBtn { "my_voice_file",   "MyVoiceFile",  TileIconKind::file,   /*clickingToggles*/ false };
-    juce::TextButton playBtn { "Play" },
-                     saveTargetProfBtn  { "Save Profile..." },
-                     saveMyVoiceProfBtn { "Save Profile..." },
-                     resetAllBtn { "Reset All to Defaults" },
-                     matchBtn { "MATCH" }, savePresetBtn { "SAVE PRESET" },
+    // v0.39.0: Play / Save Profile / Reset All are gone as separate buttons.
+    // The first two moved into the TargetFile and MyVoiceFile tile menus (a
+    // tile now opens a menu instead of going straight to a file chooser), and
+    // Reset All moved to the preset dropdown in the header, where it is
+    // reachable from every tab instead of only this one.
+    juce::TextButton matchBtn { "MATCH" }, savePresetBtn { "SAVE PRESET" },
+                     newCharBtn { "NEW CHARACTER" },
                      savePresetOkBtn { "Save" }, savePresetCancelBtn { "Cancel" };
     juce::TextEditor saveNameEdit;
 
@@ -3405,6 +3476,17 @@ private:
                  ? files.getReference (idx).getFileNameWithoutExtension() : juce::String();
     }
 
+    // v0.39.0: "Reset All to Defaults" lives here now, at the end of the
+    // preset list. It used to be a button on the MATCHING tab only, which is
+    // an odd home for something that resets every parameter in the plugin --
+    // this dropdown is in the header and reachable from every tab.
+    //
+    // An ACTION inside a selection list needs care: picking it must not leave
+    // it looking like the selected preset, so applySelected() restores the
+    // previous selection before running it. The id is far above any preset
+    // index so the two can never collide.
+    static constexpr int kResetId = 90001;
+
     void refreshList (const juce::String& select = {})
     {
         const juce::ScopedValueSetter<bool> guard (updating, true);
@@ -3417,12 +3499,51 @@ private:
             if (f.getFileNameWithoutExtension() == select) selId = id;
             ++id;
         }
+        if (! files.isEmpty()) box.addSeparator();
+        box.addItem (juce::String::fromUTF8 ("Reset All to Defaults / 全項目を初期値へ"),
+                     kResetId);
         box.setSelectedId (selId, juce::dontSendNotification);
+    }
+
+    // Every parameter back to its default in ONE undo step, locked
+    // parameters untouched -- the same contract the PRESETS tab's button has.
+    void resetAllParameters()
+    {
+        int kept = 0;
+        proc.history.group ([&]
+        {
+            for (auto* p : proc.getParameters())
+                if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
+                {
+                    if (proc.isParamLocked (rp->paramID)) { ++kept; continue; }
+                    rp->beginChangeGesture();
+                    rp->setValueNotifyingHost (rp->getDefaultValue());
+                    rp->endChangeGesture();
+                }
+        });
+        auto msg = juce::String::fromUTF8 ("全パラメータを初期値に戻しました");
+        if (kept > 0)
+            msg += juce::String::fromUTF8 ("(") + juce::String (kept)
+                 + juce::String::fromUTF8 ("項目はロック保持)");
+        report (msg + juce::String::fromUTF8 ("。Undoで戻せます。"));
     }
 
     void applySelected()
     {
         if (updating) return;                     // list rebuild, not a user pick
+        if (box.getSelectedId() == kResetId)
+        {
+            // put the box back where it was FIRST -- the reset is an action,
+            // not a selection, and leaving it showing would misdescribe the
+            // state. The guard stops this write re-entering applySelected().
+            {
+                const juce::ScopedValueSetter<bool> guard (updating, true);
+                box.setSelectedId (lastPresetId, juce::dontSendNotification);
+            }
+            resetAllParameters();
+            return;
+        }
+        lastPresetId = box.getSelectedId();
         const int idx = box.getSelectedId() - 1;
         if (! juce::isPositiveAndBelow (idx, files.size())) return;
 
@@ -3581,6 +3702,7 @@ private:
     std::unique_ptr<juce::AlertWindow> nameWin;
     juce::LookAndFeel_V4 alertLnf { juce::LookAndFeel_V4::getLightColourScheme() };
     bool updating = false, dark = false;
+    int  lastPresetId = 0;          // restored after the Reset All action
 };
 
 // ASMR tab: pseudo-3D positioning. A sonar-style circular pad with a

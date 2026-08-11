@@ -302,6 +302,15 @@ public:
     std::vector<float> prevBuf;
     std::atomic<int>   prevLen { 0 };
     std::atomic<int>   prevPos { -1 };                 // -1 = stopped
+    // v0.39.0: the same thing for MyVoice, so the MyVoiceFile menu can play
+    // back what it just loaded. It has to be a SECOND buffer rather than a
+    // reuse of prevBuf: the Target preview must survive a MyVoice load
+    // untouched (spec 5.6), and "With target play" plays the target while
+    // recording, so both can be armed in the same session. Only one is ever
+    // started at a time -- the UI stops the other first.
+    std::vector<float> myBuf;
+    std::atomic<int>   myLen { 0 };
+    std::atomic<int>   myPos { -1 };                   // -1 = stopped
 
     // latest measured profiles (message thread only; the PRESETS tab saves
     // these to .vmprofile files, ANALYZE can load such files as targets)

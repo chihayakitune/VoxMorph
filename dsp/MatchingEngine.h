@@ -537,5 +537,41 @@ MatchingEngine::predictEstimated (const VoiceProfile& p1, ParamGetter get)
     const float rangeRatio = std::max (0.01f, get ("range") * 0.01f);
     e.f0SpreadSt = cl (p1.f0SpreadSt * rangeRatio, 0.0f, 24.0f);
     e.tiltDb     = cl (p1.tiltDb + get ("tilt"),   -12.0f, 12.0f);
+
+    // v0.39.0: carry the per-vowel table through the same transform.
+    //
+    // The graph only ever read the global fields, so this was left alone --
+    // but NEW CHARACTER saves this profile to disk, and a profile whose
+    // global F has moved while vow[].F has not is internally inconsistent:
+    // load it back as a Target and the vowel-matched path (which reads
+    // vow[]) would compare against untransformed formants and disagree with
+    // the global figures by exactly the shift being applied.
+    //
+    // The AEIOU map is included because it is part of what the parameters do
+    // to each vowel. vamount scales it, and vadapt gates it, the same way
+    // VowelAdaptiveWarp applies it in the engine.
+    static const char* vsid[5][3] = {
+        { "va_a_f1", "va_a_f2", "va_a_f3" }, { "va_i_f1", "va_i_f2", "va_i_f3" },
+        { "va_u_f1", "va_u_f2", "va_u_f3" }, { "va_e_f1", "va_e_f2", "va_e_f3" },
+        { "va_o_f1", "va_o_f2", "va_o_f3" } };
+    static const char* vgid[5][3] = {
+        { "va_a_g1", "va_a_g2", "va_a_g3" }, { "va_i_g1", "va_i_g2", "va_i_g3" },
+        { "va_u_g1", "va_u_g2", "va_u_g3" }, { "va_e_g1", "va_e_g2", "va_e_g3" },
+        { "va_o_g1", "va_o_g2", "va_o_g3" } };
+    const float vaOn  = get ("vadapt") > 0.5f ? 1.0f : 0.0f;
+    const float vaAmt = vaOn * std::max (0.0f, get ("vamount")) * 0.01f;
+    for (int v = 0; v < 5; ++v)
+    {
+        auto& q = e.vow[v];
+        if (! q.valid()) continue;
+        q.f0Hz = cl (q.f0Hz * std::pow (2.0f, pitchDelta / 12.0f), 40.0f, 800.0f);
+        for (int b = 0; b < 3; ++b)
+        {
+            if (! (q.F[b] > 0.0f)) continue;
+            const float st12 = fmtDelta + get (sid[b]) + vaAmt * get (vsid[v][b]);
+            q.F[b] = cl (q.F[b] * std::pow (2.0f, st12 / 12.0f), 80.0f, 6000.0f);
+            q.L[b] = cl (q.L[b] + get (gid[b]) + vaAmt * get (vgid[v][b]), -60.0f, 12.0f);
+        }
+    }
     return e;
 }
