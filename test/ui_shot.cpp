@@ -151,13 +151,24 @@ int main (int argc, char** argv)
         if (page == nullptr) return 1;
 
         check (findButton (page, "NEW CHARACTER") != nullptr, "NEW CHARACTER exists");
-        check (findButton (page, "SAVE PRESET")   != nullptr, "SAVE PRESET exists");
+        check (countButtons (page, "SAVE PRESET") == 0,
+               "SAVE PRESET is gone (the header dropdown saves presets)");
         check (countButtons (page, "Play") == 0,            "no stray Play button");
         check (countButtons (page, "Save Profile...") == 0, "no Save Profile buttons");
         check (countButtons (page, "Reset All to Defaults") == 0,
                "Reset All is gone from MATCHING (the PRESETS tab keeps its own)");
         check (findButton (page, "TargetFile")  != nullptr, "TargetFile tile exists");
         check (findButton (page, "MyVoiceFile") != nullptr, "MyVoiceFile tile exists");
+        check (findButton (page, "RECORD")     != nullptr, "RECORD button exists");
+        // the per-profile readouts were removed in v0.41.0
+        int readouts = 0;
+        walk (page, [&] (juce::Component* c)
+        {
+            if (auto* l = dynamic_cast<juce::Label*> (c))
+                if (l->getText().startsWith ("Target:") || l->getText().startsWith ("MyVoice:"))
+                    ++readouts;
+        });
+        check (readouts == 0, "no Target:/MyVoice: profile readout labels");
 
         // NEW CHARACTER must start disabled: no MyVoice has been measured.
         if (auto* nc = findButton (page, "NEW CHARACTER"))

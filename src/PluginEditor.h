@@ -1999,9 +1999,214 @@ public:
     }
 };
 
-// Old name kept as an alias so the TargetCharacterButton member/vector
-// types in MatchingPanel don't have to change in this commit.
-using TargetCharacterButton = VoiceTileButton;
+
+// ===========================================================================
+// DnaFlow (v0.41.0) — the double helix between MY VOICE and AUTO MATCHING,
+// plus the bracket that ties the two sections together.
+//
+// Drawn rather than shipped as art so it scales with the window and stays on
+// the palette. It carries no state and no data -- it is a diagram of what the
+// page DOES (your voice goes in, the match comes out), in the same 1 px
+// ak::treeLine idiom the MAIN tab uses for its group brackets, so the two
+// pages read as the same product.
+class DnaFlow : public juce::Component
+{
+public:
+    DnaFlow() { setInterceptsMouseClicks (false, false); }
+
+    // y positions (local) the bracket should meet, so the line actually lands
+    // on the headings instead of floating near them
+    void setAnchors (int topY, int bottomY) { yTop = topY; yBot = bottomY; repaint(); }
+
+    // Where the helix sits, in PARENT coordinates, so the page can run its
+    // heading rules up to it and stop -- the rule, the helix and the bracket
+    // are one line interrupted by the diagram, not three separate marks.
+    float helixCentreX() const { return (float) getX() + (float) getWidth() * 0.32f; }
+    float helixHalfW()   const { return juce::jmin (17.0f, (float) getWidth() * 0.16f) + 13.0f; }
+
+    void paint (juce::Graphics& g) override
+    {
+        const float w = (float) getWidth(), h = (float) getHeight();
+        if (w < 24.0f || h < 40.0f) return;
+
+        const float cx    = w * 0.32f;          // helix column
+        const float top   = juce::jmax (6.0f, (float) yTop);
+        const float bot   = juce::jmin (h - 6.0f, (float) yBot);
+        if (bot - top < 30.0f) return;
+
+        g.setColour (ak::treeLine);
+
+        // ---- bracket: MY VOICE ---> down the right ---> AUTO MATCHING ----
+        // Rounded corners, because every other line on the page is rounded
+        // and a square elbow here looked like a table border.
+        // hugs the helix: a wide bracket becomes an empty rounded box
+        const float rx = juce::jmin (cx + amp0() + 150.0f, w - 8.0f);
+        const float r  = 12.0f;
+        const float x0 = cx + amp0() + 13.0f;      // clear of the strands
+        juce::Path br;
+        br.startNewSubPath (x0, top);
+        br.lineTo (rx - r, top);
+        br.quadraticTo (rx, top, rx, top + r);
+        br.lineTo (rx, bot - r);
+        br.quadraticTo (rx, bot, rx - r, bot);
+        br.lineTo (x0, bot);
+        g.strokePath (br, juce::PathStrokeType (1.0f, juce::PathStrokeType::curved,
+                                                      juce::PathStrokeType::rounded));
+
+        // ---- the helix ------------------------------------------------
+        // Two sine strands in antiphase with rungs where they cross-fade.
+        // 2.6 turns over the span reads as DNA without turning into moire
+        // when the window is short.
+        const float hTop = top + 10.0f, hBot = bot - 10.0f;
+        const float span = hBot - hTop;
+        if (span < 24.0f) return;
+        const float amp   = amp0();
+        const float turns = 2.6f;
+        const int   steps = juce::jmax (24, (int) (span / 3.0f));
+
+        juce::Path s1, s2;
+        for (int i = 0; i <= steps; ++i)
+        {
+            const float t  = (float) i / (float) steps;
+            const float y  = hTop + t * span;
+            const float ph = t * turns * juce::MathConstants<float>::twoPi;
+            const float x1 = cx + amp * std::sin (ph);
+            const float x2 = cx + amp * std::sin (ph + juce::MathConstants<float>::pi);
+            if (i == 0) { s1.startNewSubPath (x1, y); s2.startNewSubPath (x2, y); }
+            else        { s1.lineTo (x1, y);          s2.lineTo (x2, y); }
+        }
+        const juce::PathStrokeType stroke (1.3f, juce::PathStrokeType::curved,
+                                                 juce::PathStrokeType::rounded);
+        g.strokePath (s1, stroke);
+        g.strokePath (s2, stroke);
+
+        // Rungs fade out near the crossings: at a crossing the two strands
+        // are the same point, and a rung drawn there is a dot of ink that
+        // reads as a defect.
+        const int rungs = 13;
+        for (int i = 1; i < rungs; ++i)
+        {
+            const float t  = (float) i / (float) rungs;
+            const float y  = hTop + t * span;
+            const float ph = t * turns * juce::MathConstants<float>::twoPi;
+            const float x1 = cx + amp * std::sin (ph);
+            const float x2 = cx + amp * std::sin (ph + juce::MathConstants<float>::pi);
+            const float sep = std::abs (x1 - x2) / (2.0f * amp);      // 0..1
+            if (sep < 0.18f) continue;
+            g.setColour (ak::treeLine.withAlpha (0.30f + 0.55f * sep));
+            g.drawLine (x1, y, x2, y, 1.0f);
+        }
+    }
+
+private:
+    float amp0() const { return juce::jmin (17.0f, (float) getWidth() * 0.16f); }
+    int yTop = 0, yBot = 0;
+};
+
+// A MATCH-sized action button that can carry a leading dot (RECORD). The dot
+// is drawn here rather than baked into the label so it can turn red while a
+// capture is running without rebuilding the text.
+class PillButton : public juce::TextButton
+{
+public:
+    using juce::TextButton::TextButton;
+    void setDot (juce::Colour c) { dot = c; repaint(); }
+
+    void paintButton (juce::Graphics& g, bool hover, bool down) override
+    {
+        juce::TextButton::paintButton (g, hover, down);
+        if (dot.isTransparent()) return;
+        const float d = 9.0f;
+        g.setColour (dot);
+        g.fillEllipse (14.0f, ((float) getHeight() - d) * 0.5f, d, d);
+    }
+
+private:
+    juce::Colour dot { juce::Colours::transparentBlack };
+};
+
+// ===========================================================================
+// CharacterCard (v0.41.0) — a target character as a PORTRAIT card.
+//
+// Replaces the square icon tile for the TARGET CHARACTER row. The art is the
+// point: seven voices whose numbers differ by fractions of a semitone are not
+// told apart by reading "Uru" against "Kura", and the previous row of
+// identical wifi-looking glyphs said nothing at all about who they were.
+//
+// Cards sit on the dark strip the Matching page paints behind them, so the
+// card itself is the light surface -- the reverse of every other control on
+// the page, and the reason it draws its own background rather than using the
+// shared card helper.
+//
+// A character with no art yet draws the same frame with a soft placeholder
+// ring. That is a normal state, not an error: art arrives one character at a
+// time, and an entry without it still matches perfectly well.
+class CharacterCard : public juce::Button
+{
+public:
+    CharacterCard (const juce::String& stableId, const juce::String& label,
+                   const char* binaryImage)
+        : juce::Button (stableId), targetId (stableId)
+    {
+        // the caption lives in the Button's own text, not a private copy:
+        // it is what accessibility and the UI audit read, and it lets the
+        // label change later without touching this class
+        setButtonText (label);
+        setClickingTogglesState (true);
+        if (binaryImage != nullptr && *binaryImage != 0)
+            art = ak::image (binaryImage);
+    }
+
+    const juce::String targetId;
+
+    void paintButton (juce::Graphics& g, bool hover, bool /*down*/) override
+    {
+        const auto b   = getLocalBounds().toFloat().reduced (1.5f);
+        const bool sel = getToggleState();
+        const float rad = 12.0f;
+
+        g.setColour (juce::Colours::white.withAlpha (sel ? 1.0f : 0.94f));
+        g.fillRoundedRectangle (b, rad);
+        // Selection reads as a heavier, bluer frame. On a dark strip a glow
+        // would bloom into the neighbouring cards, so it stays a border.
+        g.setColour (sel ? ak::sidebarSel : (hover ? ak::treeLine : ak::line));
+        g.drawRoundedRectangle (b, rad, sel ? 2.4f : 1.0f);
+
+        auto inner = b.reduced (7.0f);
+        auto textR = inner.removeFromBottom (18.0f);
+        auto artR  = inner.withTrimmedBottom (2.0f);
+        const float d = std::min (artR.getWidth(), artR.getHeight());
+        auto circle = juce::Rectangle<float> (d, d).withCentre (artR.getCentre());
+
+        if (art.isValid())
+        {
+            juce::Path clip;
+            clip.addEllipse (circle);
+            juce::Graphics::ScopedSaveState ss (g);
+            g.reduceClipRegion (clip);
+            // fillDestination so any aspect ratio lands in the circle without
+            // distortion -- the same rule the header badge uses.
+            g.drawImage (art, circle, juce::RectanglePlacement::fillDestination);
+        }
+        else
+        {
+            g.setColour (ak::line);
+            g.drawEllipse (circle.reduced (1.0f), 1.2f);
+            g.setColour (ak::treeLine);
+            g.setFont (ak::font (11.0f, false));
+            g.drawText ("?", circle, juce::Justification::centred);
+        }
+
+        g.setColour (sel ? ak::sidebarSel : ak::ctrlInk);
+        g.setFont (ak::font (12.0f, true));
+        g.drawFittedText (getButtonText(), textR.toNearestInt(),
+                          juce::Justification::centred, 1);
+    }
+
+private:
+    juce::Image art;
+};
+
 
 // MATCHING tab (v0.28.x). Sections top to bottom:
 //   1) TargetCharacter -- pick a built-in target voice profile, or load a
@@ -2040,10 +2245,20 @@ public:
         initHeading (hMyVoice,         "MY VOICE");
         initHeading (hAutoMatching,    "AUTO MATCHING");
 
+        descLbl.setText (juce::String::fromUTF8 (
+            "プロファイルとあなたの差分を測定し自動設定するシステムです。\n"
+            "AI変換を使わない、あなた自身の声のコーディネートです。"),
+            juce::dontSendNotification);
+        descLbl.setJustificationType (juce::Justification::topLeft);
+        descLbl.setColour (juce::Label::textColourId, ak::ctrlInk);
+        descLbl.setFont (ak::font (12.5f, false));
+        addAndMakeVisible (descLbl);
+        addAndMakeVisible (dna);
+
         addAndMakeVisible (recBtn);
         addAndMakeVisible (myVoiceFileBtn);
-        for (auto* b : { &matchBtn, &savePresetBtn, &newCharBtn,
-                         &savePresetOkBtn, &savePresetCancelBtn })
+        recBtn.setDot (ak::headPink);
+        for (auto* b : { &matchBtn, &newCharBtn })
             addAndMakeVisible (*b);
         recBtn.setTooltip (juce::String::fromUTF8 (
             "Records your microphone input for the CURRENT profile.\n"
@@ -2068,9 +2283,9 @@ public:
         const auto* samples = getSampleTargets (nSamples);
         for (int i = 0; i < nSamples; ++i)
         {
-            auto btn = std::make_unique<VoiceTileButton> (
+            auto btn = std::make_unique<CharacterCard> (
                 juce::String (samples[i].id), juce::String (samples[i].displayEn),
-                TileIconKind::character, /*clickingToggles*/ true);
+                samples[i].image);
             btn->setRadioGroupId (kTargetRadioGroup, juce::dontSendNotification);
             btn->setTooltip (juce::String::fromUTF8 (samples[i].displayJp));
             // Only act when this button is being turned ON. A shared radio
@@ -2087,9 +2302,8 @@ public:
             targetButtons.push_back (std::move (btn));
         }
         {
-            auto btn = std::make_unique<VoiceTileButton> (
-                juce::String ("target_file"), juce::String ("TargetFile"),
-                TileIconKind::file, /*clickingToggles*/ true);
+            auto btn = std::make_unique<CharacterCard> (
+                juce::String ("target_file"), juce::String ("TargetFile"), nullptr);
             targetFileButton = btn.get();
             btn->setRadioGroupId (kTargetRadioGroup, juce::dontSendNotification);
             btn->setTooltip (juce::String::fromUTF8 (
@@ -2131,7 +2345,7 @@ public:
             "録音時間。長いほど分析フレームが増え、プロファイルが安定します。"));
         addAndMakeVisible (durBox);
 
-        for (auto* l : { &p1Lbl, &p2Lbl, &outLbl, &matchStatus, &saveHint })
+        for (auto* l : { &outLbl, &matchStatus })
         {
             l->setJustificationType (juce::Justification::topLeft);
             l->setFont (juce::Font (juce::FontOptions (12.0f)));
@@ -2158,27 +2372,6 @@ public:
             "One Undo step; locked parameters keep their values.\n"
             "CurrentとTargetの差からパラメータを算出して書き込みます。1 Undo、"
             "ロック項目は保持。"));
-        savePresetBtn.setButtonText ("SAVE PRESET");
-        savePresetBtn.setTooltip (juce::String::fromUTF8 (
-            "Save the current parameter set as a normal preset (.vmpreset). "
-            "Available from the PRESETS tab too.\n現在の設定を通常のプリセット"
-            "(.vmpreset)として保存します。PRESETSタブでも読めます。"));
-        newCharBtn.setButtonText ("NEW CHARACTER");
-        newCharBtn.setTooltip (juce::String::fromUTF8 (
-            "Saves the voice these settings would PRODUCE from your own -- not "
-            "the settings themselves -- as a .vmprofile you can then pick as a "
-            "Target. Needs MyVoice, because the predicted voice is your "
-            "measured voice with the current parameters applied to it; it is a "
-            "prediction, not a recording of the result.\n"
-            "今の設定があなたの声から作り出す「声そのもの」を.vmprofileとして"
-            "保存します(設定ではありません)。保存したものは以後Targetとして"
-            "選べます。MyVoiceが必要です — 予測はMyVoiceの測定値に現在の"
-            "パラメータを適用して計算するためで、変換結果の録音ではありません。"));
-        newCharBtn.onClick = [this] { saveNewCharacter(); };
-        savePresetOkBtn.setButtonText ("Save");
-        savePresetCancelBtn.setButtonText ("Cancel");
-        saveNameEdit.setTextToShowWhenEmpty ("preset name", juce::Colours::grey);
-        addAndMakeVisible (saveNameEdit);
 
         recBtn.onClick = [this]
         {
@@ -2191,9 +2384,6 @@ public:
             startCapture (recBtn, waitingCapture);
         };
         matchBtn.onClick      = [this] { doMatch(); };
-        savePresetBtn.onClick = [this] { showSavePreset (true); };
-        savePresetOkBtn.onClick     = [this] { savePreset(); };
-        savePresetCancelBtn.onClick = [this] { showSavePreset (false); };
 
         // Start with NO target selected -- the user picks a Character
         // tile or loads a TargetFile first, then MATCH becomes available.
@@ -2203,104 +2393,160 @@ public:
         prof2                = VoiceProfile{};
         proc.lastTarget      = VoiceProfile{};
         currentTargetName    .clear();
-        p2Lbl.setText ("Target: --", juce::dontSendNotification);
         proc.prevPos = -1;
         proc.prevLen = 0;
-        showSavePreset (false); // hide the name editor
         updateMatchStatus();
         startTimerHz (10);
     }
 
-    // v0.31.2: sits on the ANOKOE page gradient, so it draws its own card
+    // v0.41.0 layout. Three bands top to bottom -- who you want to sound
+    // like, what you sound like, and the match between them -- with the
+    // helix drawn between the last two because that is where the comparison
+    // happens.
     void paint (juce::Graphics& g) override
     {
-        // no panel: the page sits on the same flat body tone as MAIN
-        juce::ignoreUnused (g);
+        // description card, top left. Pastel so it reads as a note rather
+        // than a control, and it is the first thing on the page because the
+        // one question this tab has to answer is "what IS this".
+        if (! descArea.isEmpty())
+        {
+            juce::ColourGradient grad (juce::Colour (0xffece8fb), descArea.getTopLeft().toFloat(),
+                                       juce::Colour (0xfff6ecf6), descArea.getBottomRight().toFloat(),
+                                       false);
+            g.setGradientFill (grad);
+            g.fillRoundedRectangle (descArea.toFloat(), 10.0f);
+        }
+
+        // The character strip is DARK: the portraits are pale line art on
+        // near-white, so on the page's own light grey they would have no
+        // edge at all. It also borrows the hero band's colour, which ties
+        // the row to the character badge at the top of the window.
+        if (! stripArea.isEmpty())
+        {
+            g.setGradientFill (juce::ColourGradient (
+                ak::bandTop, stripArea.getTopLeft().toFloat(),
+                ak::bandTop.brighter (0.06f), stripArea.getBottomRight().toFloat(), false));
+            g.fillRect (stripArea);
+        }
+
+        // Heading rules. Same 1 px ak::treeLine the MAIN tab groups rows
+        // with, so "these belong together" means the same thing on both
+        // pages. They stop short of the helix and the bracket picks the line
+        // back up on its far side.
+        const float stopX = dna.helixCentreX() - dna.helixHalfW();
+        for (auto* h : { &hMyVoice, &hAutoMatching })
+        {
+            const auto hb = h->getBounds();
+            const float x0 = (float) (hb.getX() + textWidthOf (*h) + 14);
+            const float y  = (float) hb.getCentreY();
+            if (stopX - x0 < 20.0f) continue;
+            g.setColour (ak::treeLine);
+            g.drawLine (x0, y, stopX, y, 1.0f);
+        }
+    }
+
+    // width of a heading's own text, so the rule starts after it rather than
+    // through it (the Label is laid out full-width for centring reasons)
+    static int textWidthOf (const juce::Label& l)
+    {
+        return (int) std::ceil (juce::GlyphArrangement::getStringWidth (
+                                    l.getFont(), l.getText()));
     }
 
     void resized() override
     {
-        auto r = getLocalBounds().reduced (16, 10);
+        auto full = getLocalBounds();
+        auto r = full.reduced (16, 10);
 
-        // shared tile size for both TargetCharacter and MyVoice rows so
-        // Record / MyVoiceFile match the Target tiles pixel-for-pixel.
-        const int tileGap  = 8;
-        const int cols     = getWidth() >= 650 ? (int) targetButtons.size() : 3;
-        const int tileSize = std::clamp ((r.getWidth() - tileGap * (cols - 1)) / cols,
-                                         72, 96);
+        // ── description ──
+        descArea = r.removeFromTop (52).removeFromLeft (juce::jmin (560, r.getWidth() / 2));
+        descLbl.setBounds (descArea.reduced (14, 8));
+        r.removeFromTop (10);
 
-        // ── TargetCharacter (top) ──
+        // ── TARGET CHARACTER: heading, then a full-bleed dark strip ──
         hTargetCharacter.setBounds (r.removeFromTop (20));
+        r.removeFromTop (4);
         {
             const int nb   = (int) targetButtons.size();
-            const int rows = (nb + cols - 1) / cols;
-            auto grid = r.removeFromTop (rows * tileSize + (rows - 1) * tileGap);
+            const int gap  = 10;
+            // Portrait proportions, sized to the strip we can afford, then
+            // capped so a short window does not turn them into stamps.
+            const int cardH = juce::jlimit (96, 150, r.getHeight() / 4);
+            const int cardW = juce::jlimit (72, 116, (int) std::round (cardH * 0.72f));
+            auto strip = r.removeFromTop (cardH + 24);
+            stripArea  = strip.withX (full.getX()).withWidth (full.getWidth());
+
+            const int rowW = nb * cardW + (nb - 1) * gap;
+            int x = strip.getX() + (strip.getWidth() - rowW) / 2;   // CENTRED
+            const int y = strip.getY() + (strip.getHeight() - cardH) / 2;
             for (int i = 0; i < nb; ++i)
             {
-                const int col = i % cols;
-                const int row = i / cols;
-                targetButtons[(size_t) i]->setBounds (grid.getX() + col * (tileSize + tileGap),
-                                                      grid.getY() + row * (tileSize + tileGap),
-                                                      tileSize, tileSize);
+                targetButtons[(size_t) i]->setBounds (x, y, cardW, cardH);
+                x += cardW + gap;
             }
         }
-        r.removeFromTop (4);
-        p2Lbl.setBounds (r.removeFromTop (32).withTrimmedLeft (2));
+        r.removeFromTop (14);
 
-        r.removeFromTop (6);
+        // The controls keep the left column; the helix is positioned after
+        // both headings exist, because it has to START on one and END on the
+        // other -- a line that only nearly touches what it connects reads as
+        // decoration rather than as a relationship.
+        auto body = r;
 
-        // ── MyVoice (middle): Record + MyVoiceFile as square tiles ──
-        hMyVoice.setBounds (r.removeFromTop (20));
+        // ── MY VOICE ──
+        hMyVoice.setBounds (body.removeFromTop (20));
+        const int yMyVoice = hMyVoice.getBounds().getCentreY();
+        body.removeFromTop (8);
         {
-            auto tiles = r.removeFromTop (tileSize);
-            recBtn.setBounds (tiles.removeFromLeft (tileSize));
-            tiles.removeFromLeft (tileGap);
-            myVoiceFileBtn.setBounds (tiles.removeFromLeft (tileSize));
+            auto row = body.removeFromTop (36);
+            recBtn.setBounds         (row.removeFromLeft (kActionW));
+            row.removeFromLeft (10);
+            myVoiceFileBtn.setBounds (row.removeFromLeft (kActionW));
         }
-        r.removeFromTop (4);
-        auto vopts = r.removeFromTop (28);
-        durBox.setBounds (vopts.removeFromLeft (72).withHeight (26));
-        vopts.removeFromLeft (8);
-        recPlayChk.setBounds (vopts.removeFromLeft (140).withHeight (26));
-        p1Lbl.setBounds (r.removeFromTop (32).withTrimmedLeft (2));
+        body.removeFromTop (8);
+        {
+            auto vopts = body.removeFromTop (28);
+            durBox.setBounds (vopts.removeFromLeft (72).withHeight (26));
+            vopts.removeFromLeft (8);
+            recPlayChk.setBounds (vopts.removeFromLeft (150).withHeight (26));
+        }
+        // Deliberate air between the two sections: this gap is where the
+        // helix lives, and a cramped one turns it into a squiggle.
+        body.removeFromTop (juce::jlimit (40, 110, body.getHeight() / 5));
 
-        r.removeFromTop (6);
-
-        // ── AutoMatching (bottom): heading, action row, optional save
-        //    editor, THEN the comparison graph, THEN status line ──
-        hAutoMatching.setBounds (r.removeFromTop (20));
+        // ── AUTO MATCHING ──
+        hAutoMatching.setBounds (body.removeFromTop (20));
+        const int yAuto = hAutoMatching.getBounds().getCentreY();
+        body.removeFromTop (8);
+        {
+            auto actionRow = body.removeFromTop (40);
+            matchBtn.setBounds   (actionRow.removeFromLeft (kActionW).withHeight (36));
+            matchStatus.setBounds (actionRow.reduced (12, 4));
+        }
+        // NEW CHARACTER belongs to this section but sits on the far right,
+        // clear of the helix, where SAVE PRESET used to be.
+        newCharBtn.setBounds (full.getRight() - 16 - 170,
+                              hAutoMatching.getBounds().getY() + 26, 170, 36);
 
         {
-            auto actionRow = r.removeFromTop (44);
-            matchBtn.setBounds      (actionRow.removeFromLeft (140).withHeight (36));
-            savePresetBtn.setBounds (actionRow.removeFromRight (150).withHeight (36));
-            actionRow.removeFromRight (8);
-            newCharBtn.setBounds    (actionRow.removeFromRight (160).withHeight (36));
-            matchStatus.setBounds   (actionRow.reduced (10, 6));
-        }
-        r.removeFromTop (4);
-
-        if (savePresetVisible)
-        {
-            auto sr = r.removeFromTop (40);
-            saveHint.setBounds (sr.removeFromTop (16).withTrimmedLeft (2));
-            saveNameEdit.setBounds        (sr.removeFromLeft (240).withHeight (24));
-            savePresetOkBtn.setBounds     (sr.removeFromLeft (80) .withHeight (24).translated (10, 0));
-            savePresetCancelBtn.setBounds (sr.removeFromLeft (80) .withHeight (24).translated (14, 0));
-            r.removeFromTop (4);
+            // Centre-ish column, clear of the widest control (kActionW x2)
+            // and clear of NEW CHARACTER on the far right.
+            const int left  = r.getX() + 2 * kActionW + 40;
+            const int right = juce::jmax (left + 120, newCharBtn.getBounds().getX() - 30);
+            const int pad   = 14;
+            dna.setBounds (left, yMyVoice - pad,
+                           right - left, (yAuto - yMyVoice) + 2 * pad);
+            dna.setAnchors (pad, dna.getHeight() - pad);
         }
 
-        // Status pinned to the very bottom of the AutoMatching block; the
-        // graph fills the rest below the action / save editor. It carries
-        // several lines after a MATCH (values, thresholds, applied count and
-        // the "bands disagree" warning), so give it real room.
-        outLbl.setBounds (r.removeFromBottom (juce::jlimit (24, 76, r.getHeight() / 3))
-                            .withTrimmedLeft (2));
-        r.removeFromBottom (2);
-        graph.setBounds (r.reduced (0, 2));
+        body.removeFromTop (6);
+        outLbl.setBounds (body.removeFromBottom (juce::jlimit (30, 76, body.getHeight() / 3))
+                              .withTrimmedLeft (2));
+        body.removeFromBottom (2);
+        graph.setBounds (full.withTrimmedLeft (16).withTrimmedRight (16)
+                             .withTop (body.getY()).withBottom (outLbl.getBounds().getY() - 4));
     }
 
-private:
     // ── captures ─────────────────────────────────────────────────────────
     void startCapture (juce::TextButton& b, bool& waitFlag)
     {
@@ -2378,7 +2624,7 @@ private:
         }
     }
 
-    void selectOnlyTargetButton (TargetCharacterButton* selected)
+    void selectOnlyTargetButton (CharacterCard* selected)
     {
         for (auto& b : targetButtons)
         {
@@ -2404,8 +2650,7 @@ private:
         proc.prevLen = 0;    // sample targets have no audio to Play
         proc.prevPos = -1;
         currentTargetName = juce::String::fromUTF8 (s.displayJp) + " (built-in)";
-        p2Lbl.setText (juce::String::fromUTF8 ("Target: ") + currentTargetName + "\n" + fmt (prof2),
-                       juce::dontSendNotification);
+        status (juce::String::fromUTF8 ("Target: ") + currentTargetName);
         invalidateForTargetChange();
     }
 
@@ -2495,8 +2740,7 @@ private:
         if (! profile.valid()) return;
         prof1 = profile;
         proc.lastMyVoice = profile;
-        p1Lbl.setText (juce::String::fromUTF8 ("MyVoice: ") + sourceName
-                       + "\n" + fmt (profile), juce::dontSendNotification);
+        status (juce::String::fromUTF8 ("MyVoice: ") + sourceName);
         nSet = nLocked = 0;
         refreshEstimated();
         graph.repaint();
@@ -2629,8 +2873,7 @@ private:
                     proc.prevPos = -1;
                     proc.prevLen = 0;      // profile-only target has no audio
                     currentTargetName = file.getFileNameWithoutExtension() + " (.vmprofile)";
-                    p2Lbl.setText (juce::String::fromUTF8 ("Target: ") + currentTargetName
-                                   + "\n" + fmt (prof2), juce::dontSendNotification);
+                    status (juce::String::fromUTF8 ("Target: ") + currentTargetName);
                     selectTargetFileButton();
                     invalidateForTargetChange();
                 }
@@ -2667,8 +2910,7 @@ private:
             prof2 = analysed;
             proc.lastTarget = prof2;
             currentTargetName = file.getFileName();
-            p2Lbl.setText (juce::String::fromUTF8 ("Target: ") + currentTargetName
-                           + "\n" + fmt (prof2), juce::dontSendNotification);
+            status (juce::String::fromUTF8 ("Target: ") + currentTargetName);
             selectTargetFileButton();
             invalidateForTargetChange();
         });
@@ -2892,66 +3134,10 @@ private:
                     [this] (const char* id) { return graph.param (id); });
     }
 
-    // ── Save Preset (inline; same .vmpreset format as the PRESETS tab) ─
-    static juce::File presetDir()
-    {
-        auto d = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                    .getChildFile ("VoxMorph").getChildFile ("Presets");
-        d.createDirectory();
-        return d;
-    }
-
-    void showSavePreset (bool visible)
-    {
-        savePresetVisible = visible;
-        saveNameEdit       .setVisible (visible);
-        savePresetOkBtn    .setVisible (visible);
-        savePresetCancelBtn.setVisible (visible);
-        saveHint           .setVisible (visible);
-        if (visible)
-        {
-            saveHint.setText (juce::String::fromUTF8 (
-                "Preset name (goes to PRESETS tab). / プリセット名 (PRESETSタブから読めます)"),
-                juce::dontSendNotification);
-            saveNameEdit.grabKeyboardFocus();
-        }
-        resized();
-    }
-
-    void savePreset()
-    {
-        auto name = saveNameEdit.getText().trim();
-        if (name.isEmpty())
-        {
-            status (juce::String::fromUTF8 ("プリセット名を入力してください。"));
-            return;
-        }
-        const auto file = presetDir().getChildFile (juce::File::createLegalFileName (name)
-                                                    + ".vmpreset");
-        if (auto xml = voxMorphPresetXml (proc);
-            xml != nullptr && xml->writeTo (file) && file.existsAsFile())
-        {
-            saveNameEdit.clear();
-            showSavePreset (false);
-            status (juce::String::fromUTF8 ("プリセット保存: ") + name
-                    + juce::String::fromUTF8 (" (PRESETSタブで確認)"));
-        }
-        else
-            status (juce::String::fromUTF8 ("保存に失敗しました。"));
-    }
-
-    // ── formatting / status ─────────────────────────────────────────────
-    static juce::String fmt (const VoiceProfile& pr)
-    {
-        if (! pr.valid())
-            return juce::String::fromUTF8 ("(--) 有声区間が不足しています");
-        return juce::String::formatted ("F0 %.0f Hz  spread %.1f st   "
-                                        "F1/F2/F3 %.0f/%.0f/%.0f Hz   "
-                                        "L %+.0f/%+.0f/%+.0f dB   tilt %+.1f dB",
-                                        pr.f0Hz, pr.f0SpreadSt,
-                                        pr.F[0], pr.F[1], pr.F[2],
-                                        pr.L[0], pr.L[1], pr.L[2], pr.tiltDb);
-    }
+    // ── status ──────────────────────────────────────────────────────────
+    // v0.41.0: fmt() went with the readout labels. Nothing displays a raw
+    // profile any more -- the page shows WHO is selected, and the status
+    // line reports what happened.
 
     juce::String setSummary() const
     {
@@ -2994,31 +3180,42 @@ private:
     juce::String currentTargetName, savedButtonText;
 
     bool waitingCapture = false, playStartedByCapture = false;
-    bool savePresetVisible = false;
 
     juce::Label hTargetCharacter, hMyVoice, hAutoMatching;
-    juce::Label p1Lbl, p2Lbl, outLbl, matchStatus, saveHint;
+    // v0.41.0: the per-profile readouts ("Target: Sara ... F0 318 Hz spread
+    // 4.76") are gone. They were the numbers the estimator happens to hold,
+    // shown to someone choosing a VOICE -- unreadable at a glance and noisy
+    // next to the portraits. Selection is now shown by the card itself, and
+    // anything that needs saying goes to the status line like every other
+    // message on the page.
+    juce::Label descLbl, outLbl, matchStatus;
+    static constexpr int kActionW = 170;      // MATCH / RECORD / MyVoiceFile
+    juce::Rectangle<int> descArea, stripArea;
 
     static constexpr int kTargetRadioGroup = 0x564d01;
-    std::vector<std::unique_ptr<TargetCharacterButton>> targetButtons;
-    TargetCharacterButton* targetFileButton = nullptr;
+    std::vector<std::unique_ptr<CharacterCard>> targetButtons;
+    CharacterCard* targetFileButton = nullptr;
+    DnaFlow dna;
     int  selectedSampleIndex = -1;   // -1 = no built-in target selected
     bool targetFileActive    = false;
 
     juce::ComboBox durBox;
     juce::ToggleButton recPlayChk { "With target play" };
 
-    VoiceTileButton recBtn         { "record_my_voice", "Record",       TileIconKind::record, /*clickingToggles*/ false };
-    VoiceTileButton myVoiceFileBtn { "my_voice_file",   "MyVoiceFile",  TileIconKind::file,   /*clickingToggles*/ false };
+    // Sized like MATCH so the three things you actually press on this page
+    // are the same object at three moments, instead of two square tiles and
+    // a wide button that look like different kinds of control.
+    PillButton recBtn         { "RECORD" };
+    PillButton myVoiceFileBtn { "MyVoiceFile" };
     // v0.39.0: Play / Save Profile / Reset All are gone as separate buttons.
     // The first two moved into the TargetFile and MyVoiceFile tile menus (a
     // tile now opens a menu instead of going straight to a file chooser), and
     // Reset All moved to the preset dropdown in the header, where it is
     // reachable from every tab instead of only this one.
-    juce::TextButton matchBtn { "MATCH" }, savePresetBtn { "SAVE PRESET" },
-                     newCharBtn { "NEW CHARACTER" },
-                     savePresetOkBtn { "Save" }, savePresetCancelBtn { "Cancel" };
-    juce::TextEditor saveNameEdit;
+    // SAVE PRESET removed in v0.41.0: the header carries a preset dropdown
+    // with its own save on every tab, so this was a second door to the same
+    // room. NEW CHARACTER stays -- it saves a different kind of object.
+    juce::TextButton matchBtn { "MATCH" }, newCharBtn { "NEW CHARACTER" };
 
     // one chooser per role -- they never overlap in the same session but
     // keeping them separate makes it obvious which async callback belongs

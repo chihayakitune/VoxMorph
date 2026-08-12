@@ -61,6 +61,11 @@ struct SampleTargetEntry
     const char*  id;        // stable, for metadata / logs
     const char*  displayEn; // "Uru"
     const char*  displayJp; // "うる"
+    // v0.41.0: BinaryData resource name for the portrait shown on the card
+    // (assets/<name>.png, '.' replaced by '_'). Empty means "no art yet" --
+    // the card then draws its placeholder. Art arrives per character, so
+    // this is expected to be empty for some entries rather than exceptional.
+    const char*  image;
     VoiceProfile profile;
 };
 
@@ -95,6 +100,7 @@ inline const SampleTargetEntry* getSampleTargets (int& count)
         // out asked for a formant shift of +0.48 st against +4.19 for a voice
         // of nearly identical size.
         { "uru", "Uru", "うる",
+          "char_uru_png",
           { /* f0     */ 291.93f,
             /* spread */ 4.08f,
             /* F      */ { 879.9f, 2027.4f, 3875.6f },
@@ -114,6 +120,7 @@ inline const SampleTargetEntry* getSampleTargets (int& count)
             } }
         },
         { "kura", "Kura", "くら",
+          "char_kura_png",
           { /* f0     */ 278.47f,
             /* spread */ 5.63f,
             /* F      */ { 774.2f, 1986.3f, 3826.4f },
@@ -133,6 +140,7 @@ inline const SampleTargetEntry* getSampleTargets (int& count)
             } }
         },
         { "sara", "Sara", "さら",
+          "char_sara_png",
           { /* f0     */ 317.59f,
             /* spread */ 4.76f,
             /* F      */ { 845.2f, 1972.5f, 3635.5f },
@@ -152,6 +160,7 @@ inline const SampleTargetEntry* getSampleTargets (int& count)
             } }
         },
         { "soshi", "Soshi", "そし",
+          "char_soshi_png",
           { /* f0     */ 252.04f,
             /* spread */ 4.25f,
             /* F      */ { 871.8f, 2033.4f, 3585.5f },
@@ -171,6 +180,7 @@ inline const SampleTargetEntry* getSampleTargets (int& count)
             } }
         },
         { "funi", "Funi", "ふに",
+          "",
           { /* f0     */ 342.14f,
             /* spread */ 4.50f,
             /* F      */ { 893.2f, 2041.4f, 3686.4f },
@@ -190,6 +200,7 @@ inline const SampleTargetEntry* getSampleTargets (int& count)
             } }
         },
         { "maki", "Maki", "まき",
+          "",
           { /* f0     */ 303.36f,
             /* spread */ 3.52f,
             /* F      */ { 948.0f, 2224.0f, 3673.5f },
@@ -209,6 +220,7 @@ inline const SampleTargetEntry* getSampleTargets (int& count)
             } }
         },
         { "yuni", "Yuni", "ゆに",
+          "",
           { /* f0     */ 312.23f,
             /* spread */ 2.80f,
             /* F      */ { 850.7f, 2027.8f, 3752.8f },
