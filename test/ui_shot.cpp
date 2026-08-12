@@ -210,6 +210,19 @@ int main (int argc, char** argv)
                         { presetBox = cb; return; }
             });
             check (presetBox != nullptr, "preset dropdown carries a Reset All item");
+            // v0.42.0: the two picture items moved here off the SAVE button
+            if (presetBox != nullptr)
+            {
+                bool choose = false, revert = false;
+                for (int i = 0; i < presetBox->getNumItems(); ++i)
+                {
+                    const auto t = presetBox->getItemText (i);
+                    if (t.contains ("Choose character image")) choose = true;
+                    if (t.contains ("Use the default image"))  revert = true;
+                }
+                check (choose, "preset dropdown offers Choose character image");
+                check (revert, "preset dropdown offers Use the default image");
+            }
             if (presetBox != nullptr)
             {
                 auto* pitch = proc.apvts.getParameter ("pitch");
@@ -324,6 +337,41 @@ int main (int argc, char** argv)
                "missing texture stays 0 rather than being invented");
         check (! MatchingEngine::autoSet (me, c).airApplied,
                "and therefore writes no Air");
+    }
+
+    // ---- built-in badge art: the naming contract (v0.42.0) ----
+    // MATCH writes "builtin:<BinaryData name>" into characterImagePath and
+    // the badge resolves it through ak::image. A typo in a catalog `image`
+    // field would leave the badge blank with nothing else going wrong, so the
+    // resolution is checked directly, for every entry that claims art.
+    {
+        std::printf ("\n== built-in badge art ==\n");
+        int nCat = 0;
+        const auto* cat = getSampleTargets (nCat);
+        int withArt = 0;
+        for (int i = 0; i < nCat; ++i)
+        {
+            const juce::String res (cat[i].image != nullptr ? cat[i].image : "");
+            if (res.isEmpty()) continue;
+            ++withArt;
+            const auto img = ak::image (res.toRawUTF8());
+            std::printf ("  %-6s %-16s %s (%d x %d)\n", cat[i].id, res.toRawUTF8(),
+                         img.isValid() ? "ok" : "MISSING", img.getWidth(), img.getHeight());
+            check (img.isValid(), juce::String (cat[i].id) + ": image resource resolves");
+
+            // and the exact string MATCH would store must round-trip
+            proc.characterImagePath = juce::String (kBuiltinImagePrefix) + res;
+            check (proc.characterImagePath.startsWith (kBuiltinImagePrefix),
+                   "stored path carries the builtin prefix");
+            const auto viaPrefix = ak::image (proc.characterImagePath
+                                                  .fromFirstOccurrenceOf (kBuiltinImagePrefix,
+                                                                          false, false)
+                                                  .toRawUTF8());
+            check (viaPrefix.isValid(), "badge resolves the stored builtin path");
+        }
+        std::printf ("  %d of %d catalog entries ship art\n", withArt, nCat);
+        check (withArt > 0, "at least one catalog entry ships art");
+        proc.characterImagePath.clear();
     }
 
     ed->removeFromDesktop();

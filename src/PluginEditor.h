@@ -2000,108 +2000,13 @@ public:
 };
 
 
-// ===========================================================================
-// DnaFlow (v0.41.0) — the double helix between MY VOICE and AUTO MATCHING,
-// plus the bracket that ties the two sections together.
-//
-// Drawn rather than shipped as art so it scales with the window and stays on
-// the palette. It carries no state and no data -- it is a diagram of what the
-// page DOES (your voice goes in, the match comes out), in the same 1 px
-// ak::treeLine idiom the MAIN tab uses for its group brackets, so the two
-// pages read as the same product.
-class DnaFlow : public juce::Component
-{
-public:
-    DnaFlow() { setInterceptsMouseClicks (false, false); }
-
-    // y positions (local) the bracket should meet, so the line actually lands
-    // on the headings instead of floating near them
-    void setAnchors (int topY, int bottomY) { yTop = topY; yBot = bottomY; repaint(); }
-
-    // Where the helix sits, in PARENT coordinates, so the page can run its
-    // heading rules up to it and stop -- the rule, the helix and the bracket
-    // are one line interrupted by the diagram, not three separate marks.
-    float helixCentreX() const { return (float) getX() + (float) getWidth() * 0.32f; }
-    float helixHalfW()   const { return juce::jmin (17.0f, (float) getWidth() * 0.16f) + 13.0f; }
-
-    void paint (juce::Graphics& g) override
-    {
-        const float w = (float) getWidth(), h = (float) getHeight();
-        if (w < 24.0f || h < 40.0f) return;
-
-        const float cx    = w * 0.32f;          // helix column
-        const float top   = juce::jmax (6.0f, (float) yTop);
-        const float bot   = juce::jmin (h - 6.0f, (float) yBot);
-        if (bot - top < 30.0f) return;
-
-        g.setColour (ak::treeLine);
-
-        // ---- bracket: MY VOICE ---> down the right ---> AUTO MATCHING ----
-        // Rounded corners, because every other line on the page is rounded
-        // and a square elbow here looked like a table border.
-        // hugs the helix: a wide bracket becomes an empty rounded box
-        const float rx = juce::jmin (cx + amp0() + 150.0f, w - 8.0f);
-        const float r  = 12.0f;
-        const float x0 = cx + amp0() + 13.0f;      // clear of the strands
-        juce::Path br;
-        br.startNewSubPath (x0, top);
-        br.lineTo (rx - r, top);
-        br.quadraticTo (rx, top, rx, top + r);
-        br.lineTo (rx, bot - r);
-        br.quadraticTo (rx, bot, rx - r, bot);
-        br.lineTo (x0, bot);
-        g.strokePath (br, juce::PathStrokeType (1.0f, juce::PathStrokeType::curved,
-                                                      juce::PathStrokeType::rounded));
-
-        // ---- the helix ------------------------------------------------
-        // Two sine strands in antiphase with rungs where they cross-fade.
-        // 2.6 turns over the span reads as DNA without turning into moire
-        // when the window is short.
-        const float hTop = top + 10.0f, hBot = bot - 10.0f;
-        const float span = hBot - hTop;
-        if (span < 24.0f) return;
-        const float amp   = amp0();
-        const float turns = 2.6f;
-        const int   steps = juce::jmax (24, (int) (span / 3.0f));
-
-        juce::Path s1, s2;
-        for (int i = 0; i <= steps; ++i)
-        {
-            const float t  = (float) i / (float) steps;
-            const float y  = hTop + t * span;
-            const float ph = t * turns * juce::MathConstants<float>::twoPi;
-            const float x1 = cx + amp * std::sin (ph);
-            const float x2 = cx + amp * std::sin (ph + juce::MathConstants<float>::pi);
-            if (i == 0) { s1.startNewSubPath (x1, y); s2.startNewSubPath (x2, y); }
-            else        { s1.lineTo (x1, y);          s2.lineTo (x2, y); }
-        }
-        const juce::PathStrokeType stroke (1.3f, juce::PathStrokeType::curved,
-                                                 juce::PathStrokeType::rounded);
-        g.strokePath (s1, stroke);
-        g.strokePath (s2, stroke);
-
-        // Rungs fade out near the crossings: at a crossing the two strands
-        // are the same point, and a rung drawn there is a dot of ink that
-        // reads as a defect.
-        const int rungs = 13;
-        for (int i = 1; i < rungs; ++i)
-        {
-            const float t  = (float) i / (float) rungs;
-            const float y  = hTop + t * span;
-            const float ph = t * turns * juce::MathConstants<float>::twoPi;
-            const float x1 = cx + amp * std::sin (ph);
-            const float x2 = cx + amp * std::sin (ph + juce::MathConstants<float>::pi);
-            const float sep = std::abs (x1 - x2) / (2.0f * amp);      // 0..1
-            if (sep < 0.18f) continue;
-            g.setColour (ak::treeLine.withAlpha (0.30f + 0.55f * sep));
-            g.drawLine (x1, y, x2, y, 1.0f);
-        }
-    }
-
-private:
-    float amp0() const { return juce::jmin (17.0f, (float) getWidth() * 0.16f); }
-    int yTop = 0, yBot = 0;
-};
+// The character badge's picture is either a FILE the user chose or one of
+// the shipped portraits, in which case the stored string is this prefix plus
+// the BinaryData resource name. One field keeps preset round-trip, state
+// persistence and the badge's change-watching timer all working unchanged,
+// and a built-in picture survives moving between machines where a file path
+// would not.
+inline constexpr const char* kBuiltinImagePrefix = "builtin:";
 
 // A MATCH-sized action button that can carry a leading dot (RECORD). The dot
 // is drawn here rather than baked into the label so it can turn red while a
@@ -2268,7 +2173,19 @@ public:
         descLbl.setColour (juce::Label::textColourId, ak::ctrlInk);
         descLbl.setFont (ak::font (12.0f, false));
         addAndMakeVisible (descLbl);
-        addAndMakeVisible (dna);
+
+        // Right-hand pair: what the page IS on the left, what to DO on the
+        // right, one on each side of the character so the two read as a pair
+        // rather than as one note and some spare space.
+        stepsLbl.setText (juce::String::fromUTF8 (
+            "1 - キャラクターを選びます。\n"
+            "2 - あなたの声を録音します。\n"
+            "3 - オートマッチングを行います。"),
+            juce::dontSendNotification);
+        stepsLbl.setJustificationType (juce::Justification::topLeft);
+        stepsLbl.setColour (juce::Label::textColourId, ak::ctrlInk);
+        stepsLbl.setFont (ak::font (12.0f, false));
+        addAndMakeVisible (stepsLbl);
 
         addAndMakeVisible (recBtn);
         addAndMakeVisible (myVoiceFileBtn);
@@ -2423,14 +2340,14 @@ public:
         // description card, top left. Pastel so it reads as a note rather
         // than a control, and it is the first thing on the page because the
         // one question this tab has to answer is "what IS this".
-        if (! descArea.isEmpty())
-        {
-            juce::ColourGradient grad (juce::Colour (0xffece8fb), descArea.getTopLeft().toFloat(),
-                                       juce::Colour (0xfff6ecf6), descArea.getBottomRight().toFloat(),
-                                       false);
-            g.setGradientFill (grad);
-            g.fillRoundedRectangle (descArea.toFloat(), 10.0f);
-        }
+        for (auto card : { descArea, stepsArea })
+            if (! card.isEmpty())
+            {
+                g.setGradientFill (juce::ColourGradient (
+                    juce::Colour (0xffece8fb), card.getTopLeft().toFloat(),
+                    juce::Colour (0xfff6ecf6), card.getBottomRight().toFloat(), false));
+                g.fillRoundedRectangle (card.toFloat(), 10.0f);
+            }
 
         // The character strip is DARK: the portraits are pale line art on
         // near-white, so on the page's own light grey they would have no edge
@@ -2446,19 +2363,56 @@ public:
             ak::paintBand (g, strip, stripArea);
         }
 
-        // Heading rules. Same 1 px ak::treeLine the MAIN tab groups rows
-        // with, so "these belong together" means the same thing on both
-        // pages. They stop short of the helix and the bracket picks the line
-        // back up on its far side.
-        const float stopX = dna.helixCentreX() - dna.helixHalfW();
-        for (auto* h : { &hMyVoice, &hAutoMatching })
+        // ---- decoration line (v0.42.0) --------------------------------
+        // One route, in the MAIN tab's 1 px ak::treeLine: down from the
+        // character badge, through the strip, to AUTO MATCHING; and a U that
+        // leaves MY VOICE, turns, and comes back into AUTO MATCHING. It says
+        // "she is what you are aiming at, your voice goes round, the match
+        // comes out" without a caption.
+        //
+        // The DNA that used to sit here is gone: it was a picture of nothing
+        // this plugin does.
         {
-            const auto hb = h->getBounds();
-            const float x0 = (float) (hb.getX() + textWidthOf (*h) + 14);
-            const float y  = (float) hb.getCentreY();
-            if (stopX - x0 < 20.0f) continue;
-            g.setColour (ak::treeLine);
-            g.drawLine (x0, y, stopX, y, 1.0f);
+            const float cx    = (float) getWidth() * 0.5f;
+            const float yMy   = (float) hMyVoice.getBounds().getCentreY();
+            const float yAuto = (float) hAutoMatching.getBounds().getCentreY();
+
+            // vertical: badge -> strip -> AUTO MATCHING. Drawn in two colours
+            // because it crosses the dark strip, where treeLine disappears.
+            if (yAuto > 0.0f)
+            {
+                const float top = (float) juce::jmax (0, descArea.getBottom() - 6);
+                g.setColour (ak::treeLine);
+                g.drawLine (cx, top, cx, yAuto, 1.0f);
+                if (! stripArea.isEmpty())
+                {
+                    g.setColour (juce::Colours::white.withAlpha (0.22f));
+                    g.drawLine (cx, (float) stripArea.getY(),
+                                cx, (float) stripArea.getBottom(), 1.0f);
+                }
+            }
+
+            // the U: MY VOICE -> right -> down -> left -> AUTO MATCHING
+            const float r  = juce::jmax (10.0f, (yAuto - yMy) * 0.5f);
+            const float xr = cx - 34.0f;              // right extremity
+            const float xs = xr - r;                  // where the turn starts
+            auto textEnd = [this] (const juce::Label& l)
+            {
+                return (float) (l.getBounds().getX() + textWidthOf (l) + 14);
+            };
+            const float x1 = textEnd (hMyVoice), x2 = textEnd (hAutoMatching);
+            if (xs > juce::jmax (x1, x2) + 20.0f)
+            {
+                juce::Path u;
+                u.startNewSubPath (x1, yMy);
+                u.lineTo (xs, yMy);
+                u.quadraticTo (xr, yMy, xr, yMy + r);
+                u.quadraticTo (xr, yAuto, xs, yAuto);
+                u.lineTo (x2, yAuto);
+                g.setColour (ak::treeLine);
+                g.strokePath (u, juce::PathStrokeType (1.0f, juce::PathStrokeType::curved,
+                                                             juce::PathStrokeType::rounded));
+            }
         }
     }
 
@@ -2505,6 +2459,12 @@ public:
             const int w = juce::jlimit (200, 560, stop - r.getX());
             descArea = juce::Rectangle<int> (r.getX(), y, w, h);
             descLbl.setBounds (descArea.reduced (12, 7));
+
+            const int sx = bulgeR > 0 ? bulgeC.x + half + 14 : r.getRight() - w;
+            const int sw = juce::jmax (180, r.getRight() - sx);
+            stepsArea = juce::Rectangle<int> (sx, y, sw, h);
+            stepsLbl.setBounds (stepsArea.reduced (12, 5));
+
             r.setTop (juce::jmax (descArea.getBottom(), bulgeR > 0 ? bulgeBot : 0) + 10);
         }
 
@@ -2545,7 +2505,6 @@ public:
 
         // ── MY VOICE ──
         hMyVoice.setBounds (body.removeFromTop (20));
-        const int yMyVoice = hMyVoice.getBounds().getCentreY();
         body.removeFromTop (8);
         {
             auto row = body.removeFromTop (36);
@@ -2566,7 +2525,6 @@ public:
 
         // ── AUTO MATCHING ──
         hAutoMatching.setBounds (body.removeFromTop (20));
-        const int yAuto = hAutoMatching.getBounds().getCentreY();
         body.removeFromTop (8);
         {
             auto actionRow = body.removeFromTop (40);
@@ -2578,18 +2536,7 @@ public:
         newCharBtn.setBounds (full.getRight() - kEdge - 170,
                               hAutoMatching.getBounds().getY() + 26, 170, 36);
 
-        {
-            // The HELIX (not the component) sits on the window's centre line:
-            // it is the thing the eye reads as the middle of the page, and
-            // the component is asymmetric because the bracket hangs off its
-            // right side.
-            const int  w   = 320;
-            const int  pad = 14;
-            const int  cx  = full.getCentreX();
-            const int  x   = cx - (int) std::round (w * 0.32f);
-            dna.setBounds (x, yMyVoice - pad, w, (yAuto - yMyVoice) + 2 * pad);
-            dna.setAnchors (pad, dna.getHeight() - pad);
-        }
+
 
         body.removeFromTop (6);
         outLbl.setBounds (body.removeFromBottom (juce::jlimit (30, 76, body.getHeight() / 3))
@@ -2694,6 +2641,9 @@ public:
 
         selectedSampleIndex = index;
         targetFileActive    = false;
+        // remembered, not applied: the badge changes when the user commits to
+        // this character by pressing MATCH, not while they are browsing
+        selectedArt = samples[index].image != nullptr ? samples[index].image : "";
         selectOnlyTargetButton (targetButtons[(size_t) index].get());
 
         const auto& s = samples[index];
@@ -2710,6 +2660,7 @@ public:
     {
         targetFileActive    = true;
         selectedSampleIndex = -1;
+        selectedArt.clear();          // a loaded file brings no portrait
         selectOnlyTargetButton (targetFileButton);
     }
 
@@ -3088,6 +3039,17 @@ public:
         applyProposal (proposal);
         refreshEstimated();
         graph.repaint();
+
+        // The badge follows the character you actually matched to. Doing it
+        // here rather than on selection means the picture tracks what the
+        // plugin is SET to, not what the mouse last touched -- and it lands
+        // in the preset with the parameters that produced it.
+        if (selectedArt.isNotEmpty())
+        {
+            proc.characterImagePath = juce::String (kBuiltinImagePrefix) + selectedArt;
+            // HeroCircle notices on its own 4 Hz timer; no direct call, so
+            // this stays correct when the editor is rebuilt underneath us.
+        }
     }
 
     void applyProposal (const MatchingEngine::Proposal& r)
@@ -3240,7 +3202,7 @@ public:
     // next to the portraits. Selection is now shown by the card itself, and
     // anything that needs saying goes to the status line like every other
     // message on the page.
-    juce::Label descLbl, outLbl, matchStatus;
+    juce::Label descLbl, stepsLbl, outLbl, matchStatus;
     static constexpr int kActionW = 170;      // MATCH / RECORD / MyVoiceFile
     // This page is bounded to the FULL window width, not the inset content
     // area every other page gets, because the character strip has to bleed
@@ -3249,7 +3211,7 @@ public:
     // the content lined up with the other tabs -- change it and the columns
     // stop agreeing across pages.
     static constexpr int kEdge = 28;          // 12 (page inset) + 16 (content)
-    juce::Rectangle<int> descArea, stripArea;
+    juce::Rectangle<int> descArea, stepsArea, stripArea;
     // The hero circle hangs below the band and over the top of this page.
     // The page is given the FULL content area (not the leftovers below the
     // bulge) and tucks the description into the space beside it, so the
@@ -3260,8 +3222,8 @@ public:
     static constexpr int kTargetRadioGroup = 0x564d01;
     std::vector<std::unique_ptr<CharacterCard>> targetButtons;
     CharacterCard* targetFileButton = nullptr;
-    DnaFlow dna;
     int  selectedSampleIndex = -1;   // -1 = no built-in target selected
+    juce::String selectedArt;        // BinaryData name of the chosen portrait
     bool targetFileActive    = false;
 
     juce::ComboBox durBox;
@@ -3675,6 +3637,8 @@ public:
             "the selected preset or to save under a new name.",
             "現在の設定をプリセットとして保存します。押すと「選択中のプリセットに上書き」か"
             "「別名で保存」かを選べます。"));
+        box.setTooltip (box.getTooltip() + juce::String::fromUTF8 (
+            "\nリストの末尾には、全項目のリセットとキャラクター画像の選択もあります。"));
         saveBtn.onClick = [this] { saveMenu(); };
         addAndMakeVisible (saveBtn);
 
@@ -3766,7 +3730,9 @@ private:
     // it looking like the selected preset, so applySelected() restores the
     // previous selection before running it. The id is far above any preset
     // index so the two can never collide.
-    static constexpr int kResetId = 90001;
+    static constexpr int kResetId    = 90001;
+    static constexpr int kChooseImgId = 90002;
+    static constexpr int kDefaultImgId = 90003;
 
     void refreshList (const juce::String& select = {})
     {
@@ -3783,6 +3749,11 @@ private:
         if (! files.isEmpty()) box.addSeparator();
         box.addItem (juce::String::fromUTF8 ("Reset All to Defaults / 全項目を初期値へ"),
                      kResetId);
+        box.addItem (juce::String::fromUTF8 ("キャラクター画像を選択... / Choose character image..."),
+                     kChooseImgId);
+        box.addItem (juce::String::fromUTF8 ("既定の画像に戻す / Use the default image"),
+                     kDefaultImgId);
+        box.setItemEnabled (kDefaultImgId, proc.characterImagePath.isNotEmpty());
         box.setSelectedId (selId, juce::dontSendNotification);
     }
 
@@ -3812,16 +3783,25 @@ private:
     void applySelected()
     {
         if (updating) return;                     // list rebuild, not a user pick
-        if (box.getSelectedId() == kResetId)
+        // Action items. Every one of these puts the box back where it was
+        // FIRST: they are actions, not selections, and leaving one showing
+        // would claim it is the loaded preset. The guard stops the restoring
+        // write from re-entering this function.
+        const int action = box.getSelectedId();
+        if (action == kResetId || action == kChooseImgId || action == kDefaultImgId)
         {
-            // put the box back where it was FIRST -- the reset is an action,
-            // not a selection, and leaving it showing would misdescribe the
-            // state. The guard stops this write re-entering applySelected().
             {
                 const juce::ScopedValueSetter<bool> guard (updating, true);
                 box.setSelectedId (lastPresetId, juce::dontSendNotification);
             }
-            resetAllParameters();
+            if (action == kResetId) resetAllParameters();
+            else if (action == kChooseImgId) chooseCharacterImage();
+            else
+            {
+                proc.characterImagePath.clear();
+                report (juce::String::fromUTF8 ("キャラクター画像を既定に戻しました"
+                                                " (保存するとプリセットにも反映されます)"));
+            }
             return;
         }
         lastPresetId = box.getSelectedId();
@@ -3851,25 +3831,14 @@ private:
                       + (sel.isNotEmpty() ? sel : juce::String::fromUTF8 ("(未選択)")),
                    sel.isNotEmpty());
         m.addItem (2, juce::String::fromUTF8 ("別名で保存 / Save as new..."));
-        // The badge picture is part of the preset, so it belongs on the same
-        // menu. It used to be a click on the badge itself, which got in the
-        // way of just looking at her.
-        m.addSeparator();
-        m.addItem (3, juce::String::fromUTF8 ("キャラクター画像を選択... / Choose character image..."));
-        m.addItem (4, juce::String::fromUTF8 ("既定の画像に戻す / Use the default image"),
-                   proc.characterImagePath.isNotEmpty());
+        // v0.42.0: the two picture items moved to the preset DROPDOWN, next
+        // to Reset All. This button is "save", and choosing a picture is not
+        // saving anything.
         m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&saveBtn),
             [this, sel] (int r)
             {
                 if (r == 1)      writePreset (sel);
                 else if (r == 2) askNewName();
-                else if (r == 3) chooseCharacterImage();
-                else if (r == 4)
-                {
-                    proc.characterImagePath.clear();
-                    report (juce::String::fromUTF8 ("キャラクター画像を既定に戻しました"
-                                                    " (保存するとプリセットにも反映されます)"));
-                }
             });
     }
 
@@ -5350,23 +5319,35 @@ public:
     explicit HeroCircle (VoxMorphProcessor& p) : proc (p)
     {
         setTooltip (vmTip (
-            "The picture is yours to choose: the preset SAVE button's menu has "
-            "\"Choose character image...\". It is stored in the preset, so each "
-            "preset can carry its own picture.",
-            "画像はプリセットのSAVEボタンのメニュー内「キャラクター画像を選択...」から"
-            "変更できます。プリセットに保存されるので、プリセットごとに別の画像を"
-            "持たせられます。"));
+            "MATCH sets this to the character you matched to. You can also "
+            "choose your own from the preset dropdown (\"Choose character "
+            "image...\"). It is stored in the preset, so each preset carries "
+            "its own picture.",
+            "MATCHを実行すると、合わせたキャラクターの画像がここに入ります。"
+            "プリセット選択プルダウンの「キャラクター画像を選択...」から自分で"
+            "選ぶこともできます。プリセットに保存されるので、プリセットごとに"
+            "別の画像を持たせられます。"));
         startTimerHz (4);            // only watches for the picture changing
         reloadImage();
     }
 
     // Re-reads proc.characterImagePath. Called on construction and after the
     // host restores a session, so a saved picture comes back on its own.
+    //
+    // v0.42.0: the string is either a FILE path (chosen by the user) or
+    // "builtin:<BinaryData name>" for one of the shipped character portraits,
+    // which is what MATCH writes. One field rather than two, so persistence,
+    // preset round-trip and the change-watching timer all keep working
+    // unchanged -- and a built-in picture survives being moved between
+    // machines, which a file path deliberately does not.
     void reloadImage()
     {
         custom = juce::Image();
         const auto path = proc.characterImagePath;
-        if (path.isNotEmpty())
+        if (path.startsWith (kBuiltinImagePrefix))
+            custom = ak::image (path.fromFirstOccurrenceOf (kBuiltinImagePrefix, false, false)
+                                    .toRawUTF8());
+        else if (path.isNotEmpty())
         {
             const juce::File f (path);
             if (f.existsAsFile())
