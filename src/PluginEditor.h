@@ -2393,15 +2393,33 @@ public:
                                                      juce::PathStrokeType::rounded);
             g.setColour (ak::treeLine);
 
+            // ONE radius for both turns (v0.42.2). C's comes from the gap
+            // between the two headings, which is the only vertical distance
+            // on this page that has to be respected; B then borrows it, so
+            // the two corners are visibly the same curve rather than one
+            // sweeping bend and one tight elbow.
+            const float yC = yAuto - dy;             // C lands above the pair
+            const float yB = yAuto + dy;             // B below it
+            float r = juce::jmax (10.0f, (yC - yMy) * 0.5f);
+            // B's straight descent has to survive the radius too: a corner
+            // taller than the run would start above the band it comes from.
+            if (! stripArea.isEmpty())
+                r = juce::jmin (r, juce::jmax (10.0f,
+                                               yB - (float) stripArea.getBottom() - 12.0f));
+
+            // The turns are placed so they cannot overlap: B's corner opens
+            // leftward from the centre and ends at xc - r, so C's is put a
+            // clear 40 px further left again.
+            const float xrC = xc - r - 40.0f;        // C's right extremity
+            const float xsC = xrC - r;               // where C's turn begins
+
             // A -- collar down to the band
             if (! stripArea.isEmpty() && stripArea.getY() > bulgeBot)
                 g.drawLine (xc, (float) bulgeBot, xc, (float) stripArea.getY(), 1.0f);
 
             // B -- band down the centre, quarter turn, west to the heading
-            if (! stripArea.isEmpty() && yAuto > (float) stripArea.getBottom())
+            if (! stripArea.isEmpty() && yB - r > (float) stripArea.getBottom())
             {
-                const float yB = yAuto + dy;
-                const float r  = 16.0f;
                 juce::Path b2;
                 b2.startNewSubPath (xc, (float) stripArea.getBottom());
                 b2.lineTo (xc, yB - r);
@@ -2410,19 +2428,15 @@ public:
                 g.strokePath (b2, stroke);
             }
 
-            // C -- the U, unchanged in shape, landing three pixels above B
-            const float yC = yAuto - dy;
-            const float r  = juce::jmax (10.0f, (yC - yMy) * 0.5f);
-            const float xr = xc - 60.0f;               // clear of B's turn
-            const float xs = xr - r;
+            // C -- the U, landing dy above B so the pair reads as two
             const float xEndMy = textEnd (hMyVoice);
-            if (xs > juce::jmax (xEndMy, xEndAuto) + 20.0f)
+            if (xsC > juce::jmax (xEndMy, xEndAuto) + 20.0f)
             {
                 juce::Path u;
                 u.startNewSubPath (xEndMy, yMy);
-                u.lineTo (xs, yMy);
-                u.quadraticTo (xr, yMy, xr, yMy + r);
-                u.quadraticTo (xr, yC, xs, yC);
+                u.lineTo (xsC, yMy);
+                u.quadraticTo (xrC, yMy, xrC, yMy + r);
+                u.quadraticTo (xrC, yC, xsC, yC);
                 u.lineTo (xEndAuto, yC);
                 g.strokePath (u, stroke);
             }
