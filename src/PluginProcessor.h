@@ -360,6 +360,7 @@ private:
     std::atomic<float>* pF1S = nullptr; std::atomic<float>* pF1G = nullptr;
     std::atomic<float>* pF2S = nullptr; std::atomic<float>* pF2G = nullptr;
     std::atomic<float>* pF3S = nullptr; std::atomic<float>* pF3G = nullptr;
+    std::atomic<float>* pReso = nullptr;   // Formant Definition
     std::atomic<float>* pVAdapt  = nullptr;
     std::atomic<float>* pVAmount = nullptr;
     std::atomic<float>* pVChar   = nullptr;

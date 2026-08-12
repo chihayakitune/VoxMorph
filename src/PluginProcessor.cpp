@@ -29,6 +29,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::NormalisableRange<float> (-6.0f, 6.0f, 0.01f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "f3gain", 1 }, "F3 Gain (dB)",
                 juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f));
+    // Formant Definition: peak-to-valley sharpness of the resonance
+    // contour, with the centres left alone. Signed, 0 = legacy behaviour
+    // (the engine starts no spectral path for it), so sessions and presets
+    // that predate the feature load as 0 and sound exactly as before.
+    layout.add (std::make_unique<P> (juce::ParameterID { "resonance", 1 }, "Formant Definition (%)",
+                juce::NormalisableRange<float> (-100.0f, 100.0f, 1.0f), 0.0f));
     // AEIOU Character (v0.26.0; ids "vadapt"/"vamount" kept from the
     // v0.25.0 Beta for session compatibility). vadapt defaults OFF, so old
     // sessions/presets that predate the feature stay bit-identical even
@@ -191,6 +197,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pF2G = apvts.getRawParameterValue ("f2gain");
     pF3S = apvts.getRawParameterValue ("f3shift");
     pF3G = apvts.getRawParameterValue ("f3gain");
+    pReso = apvts.getRawParameterValue ("resonance");
     pVAdapt  = apvts.getRawParameterValue ("vadapt");
     pVAmount = apvts.getRawParameterValue ("vamount");
     pVChar   = apvts.getRawParameterValue ("vcharacter");
@@ -493,6 +500,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.f1Shift = pF1S->load();  p.f1Gain = pF1G->load();
     p.f2Shift = pF2S->load();  p.f2Gain = pF2G->load();
     p.f3Shift = pF3S->load();  p.f3Gain = pF3G->load();
+    p.formantDefinition = pReso->load();
     p.vowelAdapt    = pVAdapt->load() > 0.5f;      // AEIOU Character
     p.vowelAdaptAmt = pVAmount->load() * 0.01f;    // % -> 0..1
     // The 30-float map is only read while the warp is running; at 0 % (or

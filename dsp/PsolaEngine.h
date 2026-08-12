@@ -61,6 +61,19 @@ public:
         float f1Shift = 0.0f, f2Shift = 0.0f, f3Shift = 0.0f;   // semitones
         float f1Gain  = 0.0f, f2Gain  = 0.0f, f3Gain  = 0.0f;   // dB
 
+        // Formant Definition: sharpness of the resonance contour, i.e. the
+        // CONTRAST between the envelope's peaks and the valleys around them,
+        // with the peak positions left where they are. The envelope is
+        // compared against a broad reference (a constant-BANDWIDTH average
+        // of itself) and the difference is scaled in the log domain, so
+        // + deepens the valleys and lifts the peaks (defined, characterful
+        // vowels) while - pulls both toward the reference (round, soft,
+        // distant). Distinct from the three neighbours it sits between:
+        // Tilt moves low against high, F1-F3 Gain move one region's height,
+        // this moves the local peak-to-valley depth everywhere at once.
+        // 0 = exact legacy behaviour (no spectral path is started for it).
+        float formantDefinition = 0.0f;   // -100..+100 %
+
         // Low Latency Mode: halves the lookahead (43 -> ~21 ms). Pitch
         // tracking floor rises to ~90 Hz. Ignored while lowVoice is on.
         bool  lowLatency = false;
@@ -171,7 +184,14 @@ public:
         mag.assign (kFFT/2 + 1, 0.0f);
         env.assign (kFFT/2 + 1, 0.0f);
         envSm.assign (kFFT/2 + 1, 0.0f);
+        baseEnv.assign (kFFT/2 + 1, 0.0f);
         prefix.assign (kFFT/2 + 3, 0.0);
+        // harmonic peak lists: clear()+push_back per grain keeps whatever
+        // capacity it reached, but the first grain of a new spacing still
+        // grew them ON THE AUDIO THREAD. Reserve the worst case (spacing is
+        // floored at 2.5 bins) so the growth happens here instead.
+        pkB.reserve ((size_t) (kFFT / 5 + 4));
+        pkV.reserve ((size_t) (kFFT / 5 + 4));
         trackF[0] = trackF[1] = trackF[2] = -1.0f;
 
         writePos    = 0;
@@ -323,6 +343,14 @@ public:
         perFmt = std::abs (q.f1Shift) > 0.01f || std::abs (q.f2Shift) > 0.01f
               || std::abs (q.f3Shift) > 0.01f || std::abs (q.f1Gain) > 0.05f
               || std::abs (q.f2Gain)  > 0.05f || std::abs (q.f3Gain) > 0.05f;
+
+        // Formant Definition -> contrast exponent. Like the manual F1-F3
+        // knobs this switches at a grain boundary rather than gliding, so
+        // the dead zone below 0.5 % keeps a parked slider from starting the
+        // spectral path (and gamma is exactly 1 there, a true no-op).
+        const float defN = std::clamp (q.formantDefinition, -100.0f, 100.0f) * 0.01f;
+        defOn    = std::abs (defN) > 0.005f;
+        defGamma = defOn ? 1.0f + kDefRange * defN : 1.0f;
 
         const bool lowLat = q.lowLatency && ! q.lowVoice;   // lowVoice wins
         pendingD    = (int) (fs * (lowLat ? 0.0213 : 0.0427));
@@ -1227,7 +1255,7 @@ private:
         // then overlap-add. The spectral path windows the grain itself.
         // vaOn keeps the path (and with it the F1-F3 tracking the vowel
         // estimator depends on) alive even when every manual value is 0.
-        const bool spectral = v && (perFmt || breath > 0.001f || vaOn);
+        const bool spectral = v && (perFmt || breath > 0.001f || vaOn || defOn);
         if (spectral)
             spectralProcess (2 * Hout + 1, f);
 
@@ -1322,6 +1350,64 @@ private:
         auto binOf = [&] (double hz) { return std::clamp ((int) std::lround (hz * N / fs), 1, NB - 2); };
         auto hzOf  = [&] (double bin) { return bin * fs / N; };
 
+        // ---------------- Formant Definition ----------------
+        // Build the contrast-scaled envelope the warp will read FROM. env[]
+        // itself stays untouched: the formant tracker above and the R
+        // denominator below must keep seeing the measured envelope, or the
+        // effect would modulate its own analysis.
+        //
+        // The reference is a box average of log env over a constant
+        // BANDWIDTH (not a constant ratio): formants are spaced roughly
+        // evenly in Hz (~c/4L apart), so a fixed-Hz window sits at the same
+        // place relative to peak and valley at F1 as it does at F3. A
+        // constant-Q window is far too narrow down at F1 -- it rides over
+        // the peak and leaves F1 almost unchanged while F3 gets several dB,
+        // which would just duplicate Tilt. The width tracks f because the
+        // grain content is already resampled by the global ratio. Above
+        // ~5 kHz the window is narrow relative to the envelope's own
+        // structure, so the reference converges onto it and the effect
+        // fades out on its own -- no explicit HF limit needed.
+        float defMakeupDb = 0.0f;
+        if (defOn)
+        {
+            const int r = std::max (2, (int) std::lround (kDefHalfHz * f * N / fs));
+            // log env, kept for the second pass (envSm is free scratch here:
+            // the smoothing loop above leaves its intermediate in it)
+            for (int k = 0; k <= NB; ++k)
+                envSm[(size_t)k] = std::log (env[(size_t)k] + 1.0e-12f);
+            prefix[0] = 0.0;
+            for (int k = 0; k <= NB; ++k)
+                prefix[(size_t)k+1] = prefix[(size_t)k] + (double) envSm[(size_t)k];
+
+            const float ex = defGamma - 1.0f;
+            const int eLo = binOf (100.0 * f), eHi = binOf (8000.0 * f);
+            double e0 = 0.0, e1 = 0.0;
+            for (int k = 0; k <= NB; ++k)
+            {
+                const int a = std::max (0, k - r), b = std::min (NB, k + r);
+                const float mean = (float) ((prefix[(size_t)b+1] - prefix[(size_t)a])
+                                            / (double)(b - a + 1));
+                const float dl = std::clamp (envSm[(size_t)k] - mean, -kDefMaxDelta, kDefMaxDelta);
+                const float e  = env[(size_t)k] * std::exp (ex * dl);
+                baseEnv[(size_t)k] = e;
+                if (k >= eLo && k <= eHi)
+                {
+                    e0 += (double) env[(size_t)k] * env[(size_t)k];
+                    e1 += (double) e * e;
+                }
+            }
+            // Expanding the contrast moves broadband energy even though it
+            // leaves the MEAN LOG level alone (that is what the operation is
+            // defined to preserve, so a log-domain check reads ~0.0 dB and
+            // would miss this entirely). The shift is vowel-dependent -- a
+            // close vowel like /i/ drifts about twice as far as /a/ -- so
+            // without this the character change would arrive with a loudness
+            // wobble riding on it. Measured on the RMS, held to +/-3 dB.
+            if (e0 > 1.0e-20 && e1 > 1.0e-20)
+                defMakeupDb = std::clamp (-10.0f * std::log10 ((float) (e1 / e0)),
+                                          -3.0f, 3.0f);
+        }
+
         // formant peaks in scaled search ranges (grain content is already
         // resampled by the global ratio f, so ranges scale with f)
         const double loR[3] = { 250, 850, 1900 }, hiR[3] = { 1000, 2600, 3800 };
@@ -1392,6 +1478,13 @@ private:
         if (doBreath)
             for (int k = 0; k <= NB; ++k) envMax = std::max (envMax, env[(size_t)k]);
 
+        // the warp samples its TARGET shape from here: the measured envelope
+        // normally, the contrast-scaled one when Definition is on. Reading
+        // it at the source position sp means a shifted formant carries its
+        // own sharpness along, and with Definition alone sp == k, so the
+        // peaks stay exactly where they were and only their depth changes.
+        const float* const srcEnv = defOn ? baseEnv.data() : env.data();
+
         for (int seg = 0; seg < 5; ++seg)
         {
             const int d0 = dstA[seg];
@@ -1406,11 +1499,11 @@ private:
                 const double sp = s0 + (k - d0) * slope;
                 const int    si = std::min ((int) sp, NB - 1);
                 const float  fracb = (float)(sp - si);
-                const float  eSrc = env[(size_t)si] * (1.0f - fracb)
-                                  + env[(size_t)std::min (si + 1, NB)] * fracb;
+                const float  eSrc = srcEnv[(size_t)si] * (1.0f - fracb)
+                                  + srcEnv[(size_t)std::min (si + 1, NB)] * fracb;
                 float R = eSrc / std::max (env[(size_t)k], 1.0e-9f);
 
-                float gDb = vaComp;   // broadband energy make-up (0 when off)
+                float gDb = vaComp + defMakeupDb;   // broadband make-up (0 when off)
                 for (int i = 0; i < 3; ++i)
                 {
                     const float z = (float)(k - dBin[i]) * bwInv[i];
@@ -1589,6 +1682,18 @@ private:
     static constexpr int kHoldMax = 24;   // ~250 ms of pitch hold (detect every ~512 samples)
     static constexpr int kFFT = 4096;     // spectral-layer FFT size
 
+    // Formant Definition tuning. kDefHalfHz is the half-width of the
+    // reference average and kDefRange the contrast reach at +/-100 %
+    // (gamma 0.2 .. 1.8). Both were picked by measuring the engine's own
+    // envelope on synthetic vowels: 400 Hz keeps the effect even across
+    // F1/F2/F3 (spread ~2-5 dB) instead of piling onto F3, and +/-0.8
+    // gives roughly +/-3 dB at the peaks with the valleys moving the other
+    // way -- audible without going metallic. kDefMaxDelta is a guard only;
+    // measured peak deviations reach ~1.2 nats, well inside it.
+    static constexpr float kDefHalfHz   = 400.0f;
+    static constexpr float kDefRange    = 0.8f;
+    static constexpr float kDefMaxDelta = 2.0f;   // nats (~17 dB)
+
     double fs = 48000.0;
     int    D = 2048, pendingD = 2048, maxLag = 800, maxLagLow = 1200, minLag = 96, maxHout = 1200;
     int    holdCount = 0;
@@ -1596,13 +1701,17 @@ private:
     float  capHalfCur = 800.0f, guardFrac = 1.0f;
 
     std::vector<float>  inBuf, harmBuf, noiseBuf, accBuf, normBuf, tmp, tmpD, grainScratch;
-    std::vector<float>  fr, fi, mag, env, envSm, pkV;
+    std::vector<float>  fr, fi, mag, env, envSm, baseEnv, pkV;
     std::vector<int>    pkB;
     std::vector<double> dbuf, prefix;
     float trackF[3] = { -1.0f, -1.0f, -1.0f };
     float fShiftRatio[3] = { 1.0f, 1.0f, 1.0f };
     float fGainDb[3] = { 0.0f, 0.0f, 0.0f };
     bool  perFmt = false;
+
+    // Formant Definition (see Params::formantDefinition)
+    bool  defOn    = false;
+    float defGamma = 1.0f;   // contrast exponent, 1 = untouched
 
     // Vowel-Adaptive Formant Warp (Beta) state
     VowelAdaptiveWarp vaw;

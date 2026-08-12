@@ -157,6 +157,42 @@ int main (int argc, char** argv)
                      (int) proc.uiWantsMeters.load());
         check (ed->isShowing(), "editor reports isShowing() with a peer attached");
 
+        // ---- v0.43.0: Formant Definition ----
+        // The row is what the listening test is run from, so check that the
+        // parameter exists with the intended range and that a control is
+        // actually bound to it -- an APVTS entry with no slider would still
+        // save, automate and reset perfectly while being unreachable.
+        {
+            auto* rp = proc.apvts.getParameter ("resonance");
+            check (rp != nullptr, "resonance parameter exists");
+            if (rp != nullptr)
+            {
+                const auto& rng = dynamic_cast<juce::RangedAudioParameter*> (rp)->getNormalisableRange();
+                check (std::abs (rng.start + 100.0f) < 1.0e-4f
+                    && std::abs (rng.end  - 100.0f) < 1.0e-4f, "resonance range is -100..+100");
+                check (std::abs (rp->getDefaultValue() - 0.5f) < 1.0e-4f,
+                       "resonance defaults to 0 % (centre of a signed range)");
+                // rows are identified by their label text: the sliders do not
+                // carry the parameter id, and the label is what the user reads.
+                // ParamRow splits a trailing "(unit)" off into its own field,
+                // so the label reads "Formant Definition" and the % shows up
+                // beside the value.
+                int rows = 0, sliders = 0;
+                walk (ed.get(), [&] (juce::Component* c)
+                {
+                    if (auto* l = dynamic_cast<juce::Label*> (c))
+                        if (l->getText() == "Formant Definition") ++rows;
+                    if (auto* s = dynamic_cast<juce::Slider*> (c))
+                        if (std::abs (s->getMinimum() + 100.0) < 1.0e-6
+                         && std::abs (s->getMaximum() - 100.0) < 1.0e-6) ++sliders;
+                });
+                std::printf ("  Formant Definition rows=%d  (-100..100 sliders=%d)\n",
+                             rows, sliders);
+                check (rows >= 1, "Formant Definition row is present in the editor");
+                check (sliders >= 1, "a -100..+100 slider exists for it");
+            }
+        }
+
         // ---- v0.39.0 audit: what must and must not be on the page ----
         // Scoped to the MATCHING page, reached via its MATCH button. Searching
         // the whole editor would also see the PRESETS tab, which keeps its own

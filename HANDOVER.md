@@ -1,6 +1,6 @@
 # VoxMorph 開発引き継ぎ書 (AIセッション用)
 
-最終更新: v0.42.2 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+最終更新: v0.43.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
 
 ## プロジェクト概要
 
@@ -34,7 +34,7 @@
 
 ## 主要パラメータ(内部ID)
 
-pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, vadapt/vamount/vcharacter(AEIOU Character, 既定オフ/60%/Natural)+Custom15値(va_{a,i,u,e,o}_f{1,2,3}), range(抑揚)/center, breath2(Beta), air(Natural Air, 0〜1.5・標準経路常時使用), airshine(Air Shine, >6kHz抜け感0〜6dB), 【deprecated no-op: airband/air2/air2low=旧セッション互換のため登録のみ】, gci(GCI同期), hifreq/hipitch/hiformant(High Rangeガード), tilt, jitter, robot/robotHz, lowvoice, lowlat(Legacy Low Latency、BETAウィンドウ), perfmode(Performance Mode), pitchfloor, automute, gate(ノイズゲート), asmrx/asmry(ASMR位置), mix, gain
+pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, resonance(Formant Definition, -100〜+100%・既定0), vadapt/vamount/vcharacter(AEIOU Character, 既定オフ/60%/Natural)+Custom15値(va_{a,i,u,e,o}_f{1,2,3}), range(抑揚)/center, breath2(Beta), air(Natural Air, 0〜1.5・標準経路常時使用), airshine(Air Shine, >6kHz抜け感0〜6dB), 【deprecated no-op: airband/air2/air2low=旧セッション互換のため登録のみ】, gci(GCI同期), hifreq/hipitch/hiformant(High Rangeガード), tilt, jitter, robot/robotHz, lowvoice, lowlat(Legacy Low Latency、BETAウィンドウ), perfmode(Performance Mode), pitchfloor, automute, gate(ノイズゲート), asmrx/asmry(ASMR位置), mix, gain
 
 ## 重要な設計判断・経緯
 
@@ -53,6 +53,19 @@ pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, vadapt/
 - **v0.22.1: グレイン経路A/B実験フック+実験レポート**。低音+12stゴーストの系統実験(詳細=`GRAIN_AB_REPORT.md`)。結論: ①グレイン幅は主因でない(現行適応則がほぼ最適、0.5Pでも+1.5dB/body-13%) ②GCIは無関係(ONでむしろ悪化) ③再利用パターンの乱れとghostが強相関(-0.84) ④**可聴ゴーストの主因は有声/無声判定**: 入力の周期倍加区間(53Hz<通常モード下限60Hz)と減衰テールが無声判定→無声経路はピッチ変換しないため旧ピッチ素通し。**Low Voice Mode ONで解消方向**(+blend/avgで総合-26.9dB)。実験フック(Params: grainHalfP/grainBlend/grainAvg、全て既定オフ=bit-identical、UI非公開)と PSOLA_GRAIN_LOG(コンパイル時計測、プラグイン非影響)を追加。grainBlend=分数位置パルスクロスフェード(全シフトで艶↑・AM半減・middle ghost -48→-51dB)は実声試聴後に既定化を検討
 - **v0.22.0: Natural Air v2 スペクトルクリーンアップ(Phase 2先行)**。ユーザー実録(KITUNE、44.1kHz、+12st)で切り分け: middleレンジはair分離段階のF0周期漏れ(air完全オフ比+4.8dB)、**lowレンジのゴースト(-21.9dB)はair完全オフでも同値=グレイン再合成経路由来(+12stではグレイン幅が入力1周期を超え、奇数次入力倍音が出力倍音の中間に残る)で本件では未解決・別課題**。対策(ユーザー指示の方式2を採用): noiseBufは出力までDサンプル遅延の余裕があるため、1024点FFT/hop512/周期Hann OLA(ユニティ再構成)を**追加レイテンシゼロ**で挿入し(processAirFx)、有声時に入力F0整数倍近傍(6kHz以下のみ、幅±max(1, 2%C)を間隔の35%でキャップ)のビンを倍音間フロア(隣接中点magの小さい方×1.4)へクランプ。>6kHzは不変=**Air Shine完全維持**。f0<~130Hz(倍音間隔<3bin)はクランプ無効(低域はlowCons/クレストガードが担当)。Low Latencyモード(D<窓長)は従来どおり生バイパス+airFxHopは追従のみ。方式1(定常母音でBand0-2に上限)はairband=4000代理で比較→ゴースト低減は同等(-48.0 vs -47.8)だが中低域エアを構造的に失うため**不採用**。実測(KITUNE_middle入力をエンジン通し、+12st): air経路ghost -43.2→**-47.8dB**(air0=-48.0と一致)、6-16k・Shine特性・レベル不変。offline_testに+12st持続母音ゴースト回帰(ghostDb、fftForViz流用)追加。CPUオフライン代理: v2計1.90%(legacy 0.94%、クリーンアップ分+0.12%)。※ユーザー音声ファイルはローカル解析のみ、リポジトリ非収載
 - **v0.21.0: 低音ゴースト修正 + Air Shine**。ユーザー実声評価(v0.20.0): ウィスパー良好・ビブラート/グライドの中域ゴースト大幅改善、ただし**低い「あー」持続で旧ピッチゴースト**、高域の抜けはさらに強化したい。①原因=period doubling/交互周期/軽いフライの倍音漏れは**2Pで相関しPでは弱い**ため非周期と誤認(offline再現: サブハーモニック-15%でb1のkeepが0.99まで上昇)。対策: 漏れ判定の候補ラグを{P, 2P, P/2}に拡張(各±2%、ストライド2+±1精密化、分母エネルギーはprefix和でO(1))。②さらに**クレストファクタガード**: ランダム周期ジッタのパルス残差は「どのラグでも無相関=技術的には非周期」だが旧ピッチに聴こえる。息ノイズ(ガウス的、crest~3.5)に対しパルス残差はcrest≫6で明確分離→crest4.5-7でkeepをフェードアウト(90Hz定常のrel diff 0.042→0.006)。③低F0(<130Hz)ではb0/b1のkeep上昇レートを減速(lowCons)。検証: サブハーモニックb1 keep 0.99→0.14、全既存回帰PASS維持。**Air Shine(airshineパラメータ、0〜6dB、既定0)**: v2専用、最上段バンド(>6kHz)の**noiseBuf再加算ゲインのみ**を持ち上げる(harmBuf側の減算・中低域は不変)。breathy実測: +6dBで6-16k帯域比0.0176→0.0291、1-4k・RMSはほぼ不変。CPUオフライン代理計測: legacy 0.97%→v2 1.78%(+0.8%/コア)
+
+- **v0.43.0: Formant Definition(フォルマント輪郭)を追加**。フォルマントの中心位置を動かさずに、包絡の**山と谷の局所コントラスト**だけを増減する新しい声質軸。パラメータ `resonance`(-100〜+100%、step1、既定0、signed表示、FORMANTカードのF1〜F3 Gainの下・AEIOUの上)。
+  - **方式**: 広く平滑化した基準包絡B(f)に対し、対数領域で差を伸縮する。`logTarget = logB + gamma*(logE - logB)`、`gamma = 1 + 0.8*(値/100)`(-100%→0.2、+100%→1.8)。線形振幅のべき乗は絶対レベルとtiltまで動かすため不採用
+  - **B(f)は定Hz幅(半値幅400Hz×f)の対数領域ボックス平均**。当初案の比例幅(定Q、半径0.10〜0.16×k)を実測で棄却した: **F1がほとんど動かず(/i//u/でdF1 +0.05〜0.19dB)、F3偏重(dF3 +6dB)になりTilt/F3 Gainと区別がつかない**。フォルマントはオクターブではなく**Hz等間隔(≈c/4L)**に並ぶため、定Q窓は低域で狭すぎてF1の山ごと追従してしまうのが原因。400Hzだと3本への効きが揃う(母音別のばらつき1.8〜4.9dB)。高域は窓が相対的に狭くなりBがEに収束するので**効果が自然に消える(5kHz以上で0.03〜0.05dB)= 高域テーパー不要**
+  - **音量補償あり**。当初案は「補償なし」だったが実測で**RMSが+1.0〜+2.8dB動き、しかも母音依存**(あ +1.0 / い +2.8)だった。しかも当初案が提案していた「対数平均差」での検出はこの処理が対数平均を保存する性質上**原理的に0.00〜0.02dBしか出ず検出できない**。目標包絡のRMS比から算出し±3dBでクランプ、既存のvaCompと同じくgDbへ加算。実測の残留レベル差は**±0.46dB**
+  - **適用位置**: 包絡生成・平滑化の直後に「コントラスト適用済み包絡」を`baseEnv[]`へ作り、ワープループはこれを**元位置spで参照**する(`srcEnv = defOn ? baseEnv : env`)。`env[]`自体は不変なので、**F1〜F3追跡・母音推定・Rの分母は従来どおり**(自己変調しない)。Formant Shift併用時は移動先へ輪郭が付いてくる
+  - **0%で完全no-op**: `defOn`がfalseだと`srcEnv`が`env`そのものになり経路が一致。spectral経路の起動条件にも`defOn`を追加(0%では起動しない)。**bitexact PASS(変更前と1バイト差なし)**
+  - **中心位置のずれは原理的に小さく残る**: 目標が`gamma*logE + (1-gamma)*logB`なので、logEが平坦な点でも目標はlogBの傾きを拾い、ピークが`(1-gamma)*傾き/曲率`だけ傾く。実測で**F1 ≤7Hz / F2 ≤24Hz / F3 ≤81Hz**(F3は/あ/の-100%のみ)。いずれもフォルマントJND以下
+  - **既知の限界**: 高F0で近接フォルマントが分離できないと効きが落ちる(f0=330Hzの/あ/はF1-F2間隔360Hz<倍音間隔でdF2 +0.04dB)。Phase 3でrel[]を信頼度重みに使うのと同じ原理的制約
+  - **今回やらないこと**(計画どおり): F1/F2/F3別Definition、FmtCharacterPresetsへの組込み(=Fmt Characterの7項目には含めず、手動操作でCustomにも戻さない)、MatchingEngineの自動設定、VoiceProfile形式変更
+  - **ついでに直した別件のバグ**: `spectralProcess()`の`pkB`/`pkV`が倍音間隔の変わる最初のグレインで**オーディオスレッド上でreallocしていた**(変更前のエンジンでも再現、既存のallocationテストがたまたま別の信号を使っていて素通ししていた)。prepare()で最悪ケースをreserve。bitexactは維持
+  - テスト: bitexact PASS / offline_test の Formant Definition 6項目(方向・中心位置・レベル・0%一致・NaN(-100/-50/+50/+100 × F1〜F3・AEIOU・Breath・大シフト・高低F0)・allocation 0)ALL PASS / 既存の Matching・Natural Air v2・Vowel-Adaptive Warp 全てALL PASS / 実ビルド(Standalone)通過
+  - **ユーザー試聴推奨値**: -100 / -60 / -30 / 0 / +30 / +60 / +100。確認点=①+方向で母音輪郭が本当に明瞭になるか ②F1〜F3 Gainを上げた音・Tiltを明るくした音と違うか ③金属感/ホンク感が出る値 ④-方向でこもり・滑舌低下が出る値 ⑤Anime/Loli/ActiveとSoft/Elegantの差別化に使えるか。効果は**強め(gamma±0.8)に設定してある**ので、強すぎる場合は`PsolaEngine.h`の`kDefRange`だけを下げれば構造を変えずに調整できる
 
 - **v0.42.2: 装飾線Bの90度カーブをCのUターンと同じR角に**。
   - **半径を1つの変数にして両方で共有**するようにした(従来はBが固定16px、Cは見出し間の距離から算出=約85pxで、片方が緩やかな曲線、片方が窮屈な肘になっていた)。**Rの出どころはC** — 2つの見出しの間隔は、このページで唯一「守らなければならない縦距離」なので、そこから決まる値をBが借りる形にした

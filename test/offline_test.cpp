@@ -318,6 +318,99 @@ static bool hasBad (const std::vector<float>& x)
     return false;
 }
 
+// Formant Definition measurement. Builds a harmonic-peak envelope of the
+// OUTPUT and reports the local peak-to-valley contrast plus the formant
+// centres. Deliberately independent of the engine's own reference average:
+// this has to confirm the audible property (peaks stand further above the
+// dips between them) rather than echo the implementation's arithmetic.
+struct DefMetrics { double contrastDb; double f[3]; };
+
+static DefMetrics defMetrics (const std::vector<float>& x, double f0)
+{
+    DefMetrics m { 0.0, { 0.0, 0.0, 0.0 } };
+    const int n = 32768;
+    const size_t a = x.size() / 3;
+    if (x.size() < a + (size_t) n) return m;
+    std::vector<float> re ((size_t) n), im ((size_t) n, 0.0f);
+    for (int i = 0; i < n; ++i)
+    {
+        const float w = 0.5f * (1.0f - std::cos (2.0f * (float) M_PI * (float) i / (float) (n - 1)));
+        re[(size_t) i] = x[a + (size_t) i] * w;
+    }
+    PsolaEngine::fftForViz (re.data(), im.data(), n);
+    const int NB = n / 2;
+    std::vector<double> mag ((size_t) NB + 1);
+    for (int b = 0; b <= NB; ++b)
+        mag[(size_t) b] = std::sqrt ((double) re[(size_t) b] * re[(size_t) b]
+                                   + (double) im[(size_t) b] * im[(size_t) b]);
+
+    // log envelope through the harmonic peaks
+    const double sp = f0 * n / FS;
+    std::vector<int> pb; std::vector<double> pv;
+    for (double cb = sp; cb < (double) (NB - 2); cb += sp)
+    {
+        const int lo = std::max (1, (int) (cb - 0.45 * sp));
+        const int hi = std::min (NB - 1, (int) (cb + 0.45 * sp));
+        int bm = lo; double vm = mag[(size_t) lo];
+        for (int t = lo + 1; t <= hi; ++t) if (mag[(size_t) t] > vm) { vm = mag[(size_t) t]; bm = t; }
+        pb.push_back (bm); pv.push_back (20.0 * std::log10 (vm + 1e-30));
+    }
+    if (pb.size() < 4) return m;
+    std::vector<double> env ((size_t) NB + 1, 0.0);
+    size_t seg = 0;
+    for (int k = 0; k <= NB; ++k)
+    {
+        if (k <= pb.front())      env[(size_t) k] = pv.front();
+        else if (k >= pb.back())  env[(size_t) k] = pv.back();
+        else
+        {
+            while (seg + 1 < pb.size() && pb[seg + 1] < k) ++seg;
+            const double t = (double) (k - pb[seg]) / (double) (pb[seg + 1] - pb[seg]);
+            env[(size_t) k] = pv[seg] * (1.0 - t) + pv[seg + 1] * t;
+        }
+    }
+    auto binOf = [&] (double hz) { return std::clamp ((int) std::lround (hz * n / FS), 1, NB - 2); };
+
+    // peaks in the engine's own search ranges, valleys between them
+    const double loR[3] = { 250, 850, 1900 }, hiR[3] = { 1000, 2600, 3800 };
+    double pk[3];
+    int    pkB[3];
+    for (int i = 0; i < 3; ++i)
+    {
+        const int lo = binOf (loR[i]), hi = binOf (hiR[i]);
+        int bm = lo; double vm = env[(size_t) lo];
+        for (int k = lo + 1; k <= hi; ++k) if (env[(size_t) k] > vm) { vm = env[(size_t) k]; bm = k; }
+        pk[i] = vm; pkB[i] = bm; m.f[i] = bm * FS / n;
+    }
+    double vly = 0.0;
+    for (int i = 0; i < 2; ++i)
+    {
+        double vm = 1e30;
+        for (int k = pkB[i]; k <= pkB[i + 1]; ++k) vm = std::min (vm, env[(size_t) k]);
+        vly += vm;
+    }
+    m.contrastDb = (pk[0] + pk[1] + pk[2]) / 3.0 - vly / 2.0;
+
+    // Centre of each resonance as an energy centroid over a fixed +/-250 Hz
+    // window, NOT the argmax: rounding the contour deliberately flattens the
+    // peak, and on a flat top the argmax hops to the far side of the plateau
+    // and reports a "shift" that no listener would hear. The centroid keeps
+    // measuring where the region actually sits.
+    for (int i = 0; i < 3; ++i)
+    {
+        const int lo = std::max (1, pkB[i] - binOf (250.0));
+        const int hi = std::min (NB - 1, pkB[i] + binOf (250.0));
+        double num = 0.0, den = 0.0;
+        for (int k = lo; k <= hi; ++k)
+        {
+            const double a2 = std::pow (10.0, env[(size_t) k] / 20.0);
+            num += a2 * (k * FS / n); den += a2;
+        }
+        if (den > 0.0) m.f[i] = num / den;
+    }
+    return m;
+}
+
 // energy on the f0in harmonic grid excluding bins shared with the f0out
 // grid ("old-pitch ghost"), via the engine's own FFT. dB re total.
 static double ghostDb (const std::vector<float>& x, double f0in, double f0out)
@@ -1796,9 +1889,120 @@ int main()
     std::printf ("Vowel-Adaptive Warp checks: %s (%d failure(s))\n",
                  vaFail == 0 ? "ALL PASS" : "FAILURES", vaFail);
 
+    // ---------------- Formant Definition ----------------
+    int dfFail = 0;
+    std::puts ("\n-- Formant Definition --");
+    {
+        const double F0 = 120.0;
+        const auto vw = makeVowelF (F0, 730.0, 1090.0, 2440.0, 2.0);
+
+        P p0;                              const auto o0 = run (vw, p0);
+        P pp; pp.formantDefinition =  100; const auto oP = run (vw, pp);
+        P pm; pm.formantDefinition = -100; const auto oM = run (vw, pm);
+
+        const auto m0 = defMetrics (o0, F0);
+        const auto mP = defMetrics (oP, F0);
+        const auto mM = defMetrics (oM, F0);
+
+        // (a) direction: + sharpens, - rounds
+        const bool dirOk = mP.contrastDb > m0.contrastDb + 1.0
+                        && mM.contrastDb < m0.contrastDb - 1.0;
+        std::printf ("contrast  -100%%=%.2f  0%%=%.2f  +100%%=%.2f dB  %s\n",
+                     mM.contrastDb, m0.contrastDb, mP.contrastDb, dirOk ? "PASS" : "FAIL");
+        if (! dirOk) ++dfFail;
+
+        // (b) the formant CENTRES must stay put -- this is what separates
+        // Definition from a shift. A small residual is inherent rather than
+        // a bug: the target is gamma*logEnv + (1-gamma)*logBase, so where
+        // logEnv is flat the target still follows logBase's slope and the
+        // peak leans by (1-gamma)*slope/curvature. Measured in Hz, because
+        // semitones flatter a low F1 (4 Hz at 213 Hz reads as 0.36 st) and
+        // it is the absolute distance that has to stay under the ear's
+        // formant JND -- roughly 15 Hz at F1, 20 at F2, far more at F3.
+        double mv[3] = { 0.0, 0.0, 0.0 };
+        for (int i = 0; i < 3; ++i)
+            mv[i] = std::max (std::abs (mP.f[i] - m0.f[i]), std::abs (mM.f[i] - m0.f[i]));
+        const bool mvOk = mv[0] < 30.0 && mv[1] < 30.0 && mv[2] < 100.0;
+        std::printf ("centre drift  F1=%.1f F2=%.1f F3=%.1f Hz (limit 30/30/100)  %s\n",
+                     mv[0], mv[1], mv[2], mvOk ? "PASS" : "FAIL");
+        if (! mvOk) ++dfFail;
+
+        // (c) loudness: the make-up gain has to keep the level steady, or
+        // the listening test measures loudness instead of character
+        auto rms = [] (const std::vector<float>& x)
+        {
+            double s = 0.0;
+            for (size_t i = x.size() / 3; i < x.size() * 2 / 3; ++i) s += (double) x[i] * x[i];
+            return std::sqrt (s / (double) (x.size() / 3));
+        };
+        const double r0 = rms (o0);
+        const double dP = 20.0 * std::log10 (rms (oP) / (r0 + 1e-30));
+        const double dM = 20.0 * std::log10 (rms (oM) / (r0 + 1e-30));
+        const bool lvOk = std::abs (dP) < 1.5 && std::abs (dM) < 1.5;
+        std::printf ("level shift  +100%%=%+.2f  -100%%=%+.2f dB (limit 1.5)  %s\n",
+                     dP, dM, lvOk ? "PASS" : "FAIL");
+        if (! lvOk) ++dfFail;
+
+        // (d) 0 % must not start the spectral path at all: with every other
+        // spectral feature off, the output has to equal the plain-PSOLA one
+        P pz; pz.formantDefinition = 0.0f;
+        const auto oZ = run (vw, pz);
+        bool same = oZ.size() == o0.size();
+        for (size_t i = 0; same && i < oZ.size(); ++i) same = oZ[i] == o0[i];
+        std::printf ("0%% is a no-op (sample-identical): %s\n", same ? "PASS" : "FAIL");
+        if (! same) ++dfFail;
+
+        // (e) safety across the range and in combination with the other
+        // spectral features, plus a high and a low f0
+        const auto hi = makeVowelF (330.0, 730.0, 1090.0, 2440.0, 1.0);
+        const auto lo = makeVowelF ( 80.0, 730.0, 1090.0, 2440.0, 1.0);
+        int bad = 0;
+        for (float d : { -100.0f, -50.0f, 50.0f, 100.0f })
+        {
+            P a; a.formantDefinition = d;                              bad += hasBad (run (vw, a));
+            P b; b.formantDefinition = d; b.f1Shift = -3; b.f3Gain = 9; bad += hasBad (run (vw, b));
+            P c; c.formantDefinition = d; c.vowelAdapt = true; c.vowelAdaptAmt = 1.0f;
+                                                                       bad += hasBad (run (vw, c));
+            P e; e.formantDefinition = d; e.breath = 0.6f;              bad += hasBad (run (vw, e));
+            P g; g.formantDefinition = d; g.pitchSemi = 9; g.formantSemi = 4;
+                                                                       bad += hasBad (run (vw, g));
+            P h; h.formantDefinition = d;                              bad += hasBad (run (hi, h));
+            P j; j.formantDefinition = d; j.lowVoice = true;            bad += hasBad (run (lo, j));
+        }
+        std::printf ("NaN/Inf over range x (F1-F3, AEIOU, Breath, shift, hi/lo f0): "
+                     "%d bad  %s\n", bad, bad == 0 ? "PASS" : "FAIL");
+        if (bad) ++dfFail;
+
+        // (f) no allocation on the audio path while Definition is running
+        {
+            PsolaEngine eng;
+            eng.prepare (FS);
+            P a; a.formantDefinition = 100.0f; a.pitchSemi = 7.0f;
+            eng.setParams (a);
+            std::vector<float> out (vw.size(), 0.0f);
+            for (size_t i = 0; i < vw.size(); i += 256)       // warm-up
+                eng.process (vw.data() + i, out.data() + i,
+                             (int) std::min ((size_t) 256, vw.size() - i));
+            g_allocCount = 0; g_countAlloc = true;
+            for (size_t i = 0; i < vw.size(); i += 256)
+                eng.process (vw.data() + i, out.data() + i,
+                             (int) std::min ((size_t) 256, vw.size() - i));
+            g_countAlloc = false;
+            std::printf ("allocations with Definition on: %ld  %s\n",
+                         g_allocCount, g_allocCount == 0 ? "PASS" : "FAIL");
+            if (g_allocCount != 0) ++dfFail;
+        }
+
+        writeWav ("out_def_m100.wav", oM);
+        writeWav ("out_def_0.wav",    o0);
+        writeWav ("out_def_p100.wav", oP);
+    }
+    std::printf ("Formant Definition checks: %s (%d failure(s))\n",
+                 dfFail == 0 ? "ALL PASS" : "FAILURES", dfFail);
+
     std::puts ("done");
     // mFail was missing from this sum, so every Matching check -- including
     // the ground-truth formant accuracy ones -- printed FAIL and still exited
     // 0. A check that cannot fail the run is not a check.
-    return (mFail + naFail + vaFail) == 0 ? 0 : 1;
+    return (mFail + naFail + vaFail + dfFail) == 0 ? 0 : 1;
 }

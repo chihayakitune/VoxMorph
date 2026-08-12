@@ -6100,6 +6100,24 @@ private:
         // puts the dropdown back to Custom
         for (auto* r : { &rConst, &rF1S, &rF2S, &rF3S, &rF1G, &rF2G, &rF3G })
             r->onUserEdit = [this] { setFmtCharacterCustom(); };
+
+        // Sits below the bracketed group on purpose: Fmt Character writes
+        // those seven rows, and Definition is not one of its components yet,
+        // so it must neither be written by a preset nor knock the dropdown
+        // back to Custom when the user moves it.
+        cardFormant->addGap (8);
+        auto& rDef = slider (*cardFormant, "resonance", "Formant Definition (%)",
+            tip ("Sharpens or rounds the formant peaks without moving them. + deepens the dips "
+                 "between the resonances so the vowels read as more defined and characterful; "
+                 "- fills them in for a softer, more distant voice. Different from Softness/Tilt "
+                 "(which tips low against high) and from F1-F3 Gain (which move one region). "
+                 "Try +/-20 to 40 first.",
+                 "フォルマントの中心位置は動かさず、山の輪郭だけを調整します。"
+                 "+で共鳴の谷が深くなり母音がくっきり・キャラクター的に、"
+                 "-で丸く柔らかく、距離感のある声になります。"
+                 "Softness/Tilt(低域と高域の傾き)やF1〜F3 Gain(特定帯域の強さ)とは別の軸です。"
+                 "まずは±20〜40程度から。"), ak::Tone::pink);
+        rDef.setSignedValue();
         cardFormant->addGap (14);          // blank line before AEIOU
 
         toggle (*cardFormant, "vadapt", "AEIOU",
