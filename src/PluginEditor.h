@@ -2172,31 +2172,46 @@ public:
         g.setColour (sel ? ak::sidebarSel : (hover ? ak::treeLine : ak::line));
         g.drawRoundedRectangle (b, rad, sel ? 2.4f : 1.0f);
 
-        auto inner = b.reduced (7.0f);
-        auto textR = inner.removeFromBottom (18.0f);
-        auto artR  = inner.withTrimmedBottom (2.0f);
-        const float d = std::min (artR.getWidth(), artR.getHeight());
-        auto circle = juce::Rectangle<float> (d, d).withCentre (artR.getCentre());
+        // The portrait fills the whole card, clipped to the same rounded
+        // rectangle as the frame. A circle inside a rectangle wasted most of
+        // the card and made every character a small distant head; filling it
+        // is what makes the row readable at a glance.
+        auto inner  = b.reduced (3.0f);
+        auto textR  = inner.removeFromBottom (18.0f);
+        auto artR   = inner;
 
         if (art.isValid())
         {
             juce::Path clip;
-            clip.addEllipse (circle);
+            clip.addRoundedRectangle (b.reduced (2.0f), rad - 2.0f);
             juce::Graphics::ScopedSaveState ss (g);
             g.reduceClipRegion (clip);
-            // fillDestination so any aspect ratio lands in the circle without
-            // distortion -- the same rule the header badge uses.
-            g.drawImage (art, circle, juce::RectanglePlacement::fillDestination);
+            g.drawImage (art, artR, juce::RectanglePlacement::fillDestination);
+
+            // Unselected cards are washed toward white so the chosen one is
+            // obviously the chosen one. A veil rather than a desaturate: the
+            // art is already near-monochrome, so removing colour would do
+            // nothing, while lifting it toward the page tone reads instantly.
+            if (! sel)
+            {
+                g.setColour (juce::Colours::white.withAlpha (hover ? 0.34f : 0.52f));
+                g.fillRect (artR);
+            }
         }
         else
         {
+            const float d = std::min (artR.getWidth(), artR.getHeight()) * 0.72f;
+            auto circle = juce::Rectangle<float> (d, d).withCentre (artR.getCentre());
             g.setColour (ak::line);
-            g.drawEllipse (circle.reduced (1.0f), 1.2f);
+            g.drawEllipse (circle, 1.2f);
             g.setColour (ak::treeLine);
             g.setFont (ak::font (11.0f, false));
             g.drawText ("?", circle, juce::Justification::centred);
         }
 
+        // the caption sits ON the art now, so it needs its own backing
+        g.setColour (juce::Colours::white.withAlpha (sel ? 0.86f : 0.70f));
+        g.fillRoundedRectangle (textR.reduced (3.0f, 0.0f), 6.0f);
         g.setColour (sel ? ak::sidebarSel : ak::ctrlInk);
         g.setFont (ak::font (12.0f, true));
         g.drawFittedText (getButtonText(), textR.toNearestInt(),
@@ -2251,7 +2266,7 @@ public:
             juce::dontSendNotification);
         descLbl.setJustificationType (juce::Justification::topLeft);
         descLbl.setColour (juce::Label::textColourId, ak::ctrlInk);
-        descLbl.setFont (ak::font (12.5f, false));
+        descLbl.setFont (ak::font (12.0f, false));
         addAndMakeVisible (descLbl);
         addAndMakeVisible (dna);
 
@@ -2418,15 +2433,17 @@ public:
         }
 
         // The character strip is DARK: the portraits are pale line art on
-        // near-white, so on the page's own light grey they would have no
-        // edge at all. It also borrows the hero band's colour, which ties
-        // the row to the character badge at the top of the window.
+        // near-white, so on the page's own light grey they would have no edge
+        // at all. It is painted with ak::paintBand -- the SAME tiled lattice,
+        // depth gradient and inner shadow as the hero band at the top of the
+        // window -- rather than an approximation of it, so the two can never
+        // drift apart. It runs to both window edges for the same reason the
+        // band does: a dark block with white margins reads as a mistake.
         if (! stripArea.isEmpty())
         {
-            g.setGradientFill (juce::ColourGradient (
-                ak::bandTop, stripArea.getTopLeft().toFloat(),
-                ak::bandTop.brighter (0.06f), stripArea.getBottomRight().toFloat(), false));
-            g.fillRect (stripArea);
+            juce::Path strip;
+            strip.addRectangle (stripArea);
+            ak::paintBand (g, strip, stripArea);
         }
 
         // Heading rules. Same 1 px ak::treeLine the MAIN tab groups rows
@@ -2453,15 +2470,43 @@ public:
                                     l.getFont(), l.getText()));
     }
 
+    // Told by the editor where the character circle intrudes: its CENTRE and
+    // RADIUS in this panel's coordinates, not a bounding box. The overhang is
+    // a circle, so it is at its widest level with the centre (which is up in
+    // the band, off this page) and narrows on the way down -- using the box
+    // would throw away most of the room the description actually has.
+    void setBulge (juce::Point<int> centre, int radius, int bottomY)
+    {
+        if (bulgeC == centre && bulgeR == radius && bulgeBot == bottomY) return;
+        bulgeC = centre; bulgeR = radius; bulgeBot = bottomY;
+        resized();
+    }
+
+    // half-width of the overhang at a given y, 0 once past it
+    int bulgeHalfWidthAt (int y) const
+    {
+        const int dy = std::abs (y - bulgeC.y);
+        if (bulgeR <= 0 || dy >= bulgeR) return 0;
+        return (int) std::round (std::sqrt ((double) bulgeR * bulgeR - (double) dy * dy));
+    }
+
     void resized() override
     {
         auto full = getLocalBounds();
         auto r = full.reduced (16, 10);
 
-        // ── description ──
-        descArea = r.removeFromTop (52).removeFromLeft (juce::jmin (560, r.getWidth() / 2));
-        descLbl.setBounds (descArea.reduced (14, 8));
-        r.removeFromTop (10);
+        // ── description: LEFT of the circle's overhang, on the same rows ──
+        {
+            const int h = 52;
+            const int y = bulgeR > 0 ? juce::jmax (r.getY(), bulgeBot - h - 6) : r.getY();
+            // the narrowest point of the overhang across the card's own rows
+            const int half = bulgeR > 0 ? bulgeHalfWidthAt (y) : 0;
+            const int stop = bulgeR > 0 ? bulgeC.x - half - 14 : r.getRight();
+            const int w = juce::jlimit (200, 560, stop - r.getX());
+            descArea = juce::Rectangle<int> (r.getX(), y, w, h);
+            descLbl.setBounds (descArea.reduced (12, 7));
+            r.setTop (juce::jmax (descArea.getBottom(), bulgeR > 0 ? bulgeBot : 0) + 10);
+        }
 
         // ── TARGET CHARACTER: heading, then a full-bleed dark strip ──
         hTargetCharacter.setBounds (r.removeFromTop (20));
@@ -2473,7 +2518,9 @@ public:
             // capped so a short window does not turn them into stamps.
             const int cardH = juce::jlimit (96, 150, r.getHeight() / 4);
             const int cardW = juce::jlimit (72, 116, (int) std::round (cardH * 0.72f));
-            auto strip = r.removeFromTop (cardH + 24);
+            // 12 px of dark above and below the cards: enough to read as a
+            // band, not so much that the row floats in a void.
+            auto strip = r.removeFromTop (cardH + 12);
             stripArea  = strip.withX (full.getX()).withWidth (full.getWidth());
 
             const int rowW = nb * cardW + (nb - 1) * gap;
@@ -2485,7 +2532,10 @@ public:
                 x += cardW + gap;
             }
         }
-        r.removeFromTop (14);
+        // Air below the strip, so TARGET CHARACTER -> MY VOICE and
+        // MY VOICE -> AUTO MATCHING are spaced alike instead of the first
+        // pair being tight and the second loose.
+        r.removeFromTop (juce::jlimit (18, 54, r.getHeight() / 12));
 
         // The controls keep the left column; the helix is positioned after
         // both headings exist, because it has to START on one and END on the
@@ -2529,13 +2579,15 @@ public:
                               hAutoMatching.getBounds().getY() + 26, 170, 36);
 
         {
-            // Centre-ish column, clear of the widest control (kActionW x2)
-            // and clear of NEW CHARACTER on the far right.
-            const int left  = r.getX() + 2 * kActionW + 40;
-            const int right = juce::jmax (left + 120, newCharBtn.getBounds().getX() - 30);
-            const int pad   = 14;
-            dna.setBounds (left, yMyVoice - pad,
-                           right - left, (yAuto - yMyVoice) + 2 * pad);
+            // The HELIX (not the component) sits on the window's centre line:
+            // it is the thing the eye reads as the middle of the page, and
+            // the component is asymmetric because the bracket hangs off its
+            // right side.
+            const int  w   = 320;
+            const int  pad = 14;
+            const int  cx  = full.getCentreX();
+            const int  x   = cx - (int) std::round (w * 0.32f);
+            dna.setBounds (x, yMyVoice - pad, w, (yAuto - yMyVoice) + 2 * pad);
             dna.setAnchors (pad, dna.getHeight() - pad);
         }
 
@@ -3191,6 +3243,12 @@ public:
     juce::Label descLbl, outLbl, matchStatus;
     static constexpr int kActionW = 170;      // MATCH / RECORD / MyVoiceFile
     juce::Rectangle<int> descArea, stripArea;
+    // The hero circle hangs below the band and over the top of this page.
+    // The page is given the FULL content area (not the leftovers below the
+    // bulge) and tucks the description into the space beside it, so the
+    // window has no dead band across its whole width.
+    juce::Point<int> bulgeC;
+    int bulgeR = 0, bulgeBot = 0;
 
     static constexpr int kTargetRadioGroup = 0x564d01;
     std::vector<std::unique_ptr<CharacterCard>> targetButtons;
@@ -5780,7 +5838,19 @@ public:
         const auto sidePages = pageArea.withTop (
             juce::jmax (pageArea.getY(), bulgeBottom + 12));
         for (auto* pg : pages)
-            pg->setBounds (pg == &mainScroll ? pageArea : sidePages);
+        {
+            // MATCHING is the third case: it gets the FULL content area like
+            // MAIN, but unlike MAIN it is not scrolled, so it is handed the
+            // circle's footprint and tucks its description in beside it.
+            // Starting it below the bulge like the other pages left a dead
+            // band the width of the window.
+            const bool isMatching = (pg == &matchingPanel);
+            pg->setBounds (pg == &mainScroll || isMatching ? pageArea : sidePages);
+        }
+        matchingPanel.setBulge ({ (int) heroC.x - pageArea.getX(),
+                                  (int) heroC.y - pageArea.getY() },
+                                ak::kHeroR + ak::kHeroRim,
+                                bulgeBottom - pageArea.getY() + 10);
         layoutMainPage();
     }
 
