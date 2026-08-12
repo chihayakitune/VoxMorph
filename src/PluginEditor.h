@@ -2363,55 +2363,68 @@ public:
             ak::paintBand (g, strip, stripArea);
         }
 
-        // ---- decoration line (v0.42.0) --------------------------------
-        // One route, in the MAIN tab's 1 px ak::treeLine: down from the
-        // character badge, through the strip, to AUTO MATCHING; and a U that
-        // leaves MY VOICE, turns, and comes back into AUTO MATCHING. It says
-        // "she is what you are aiming at, your voice goes round, the match
-        // comes out" without a caption.
+        // ---- decoration line (v0.42.1) --------------------------------
+        // Three strokes, all in the MAIN tab's 1 px ak::treeLine:
         //
-        // The DNA that used to sit here is gone: it was a picture of nothing
-        // this plugin does.
+        //   A  collar -> top edge of the character band. It STOPS there; the
+        //      band is a solid object and a line crossing it read as a scratch
+        //      on the artwork rather than as a connection.
+        //   B  bottom edge of the band -> straight down the window centre ->
+        //      one clockwise quarter turn -> west, into AUTO MATCHING.
+        //   C  MY VOICE -> east -> U-turn -> west, into AUTO MATCHING.
+        //
+        // B and C arrive along the same run, three pixels apart, which is why
+        // the approach to AUTO MATCHING is a DOUBLE line: two things feed it
+        // (the character you picked, and your own voice) and they stay
+        // legible as two right up to the heading.
         {
-            const float cx    = (float) getWidth() * 0.5f;
+            const float xc    = (float) getWidth() * 0.5f;
             const float yMy   = (float) hMyVoice.getBounds().getCentreY();
             const float yAuto = (float) hAutoMatching.getBounds().getCentreY();
-
-            // vertical: badge -> strip -> AUTO MATCHING. Drawn in two colours
-            // because it crosses the dark strip, where treeLine disappears.
-            if (yAuto > 0.0f)
-            {
-                const float top = (float) juce::jmax (0, descArea.getBottom() - 6);
-                g.setColour (ak::treeLine);
-                g.drawLine (cx, top, cx, yAuto, 1.0f);
-                if (! stripArea.isEmpty())
-                {
-                    g.setColour (juce::Colours::white.withAlpha (0.22f));
-                    g.drawLine (cx, (float) stripArea.getY(),
-                                cx, (float) stripArea.getBottom(), 1.0f);
-                }
-            }
-
-            // the U: MY VOICE -> right -> down -> left -> AUTO MATCHING
-            const float r  = juce::jmax (10.0f, (yAuto - yMy) * 0.5f);
-            const float xr = cx - 34.0f;              // right extremity
-            const float xs = xr - r;                  // where the turn starts
+            // half the pair's spacing. 3 px read as one slightly thick line at
+            // 1 px stroke; 5 reads as two, which is the point of it.
+            const float dy    = 5.0f;
             auto textEnd = [this] (const juce::Label& l)
             {
                 return (float) (l.getBounds().getX() + textWidthOf (l) + 14);
             };
-            const float x1 = textEnd (hMyVoice), x2 = textEnd (hAutoMatching);
-            if (xs > juce::jmax (x1, x2) + 20.0f)
+            const float xEndAuto = textEnd (hAutoMatching);
+            const juce::PathStrokeType stroke (1.0f, juce::PathStrokeType::curved,
+                                                     juce::PathStrokeType::rounded);
+            g.setColour (ak::treeLine);
+
+            // A -- collar down to the band
+            if (! stripArea.isEmpty() && stripArea.getY() > bulgeBot)
+                g.drawLine (xc, (float) bulgeBot, xc, (float) stripArea.getY(), 1.0f);
+
+            // B -- band down the centre, quarter turn, west to the heading
+            if (! stripArea.isEmpty() && yAuto > (float) stripArea.getBottom())
+            {
+                const float yB = yAuto + dy;
+                const float r  = 16.0f;
+                juce::Path b2;
+                b2.startNewSubPath (xc, (float) stripArea.getBottom());
+                b2.lineTo (xc, yB - r);
+                b2.quadraticTo (xc, yB, xc - r, yB);   // clockwise: south -> west
+                b2.lineTo (xEndAuto, yB);
+                g.strokePath (b2, stroke);
+            }
+
+            // C -- the U, unchanged in shape, landing three pixels above B
+            const float yC = yAuto - dy;
+            const float r  = juce::jmax (10.0f, (yC - yMy) * 0.5f);
+            const float xr = xc - 60.0f;               // clear of B's turn
+            const float xs = xr - r;
+            const float xEndMy = textEnd (hMyVoice);
+            if (xs > juce::jmax (xEndMy, xEndAuto) + 20.0f)
             {
                 juce::Path u;
-                u.startNewSubPath (x1, yMy);
+                u.startNewSubPath (xEndMy, yMy);
                 u.lineTo (xs, yMy);
                 u.quadraticTo (xr, yMy, xr, yMy + r);
-                u.quadraticTo (xr, yAuto, xs, yAuto);
-                u.lineTo (x2, yAuto);
-                g.setColour (ak::treeLine);
-                g.strokePath (u, juce::PathStrokeType (1.0f, juce::PathStrokeType::curved,
-                                                             juce::PathStrokeType::rounded));
+                u.quadraticTo (xr, yC, xs, yC);
+                u.lineTo (xEndAuto, yC);
+                g.strokePath (u, stroke);
             }
         }
     }

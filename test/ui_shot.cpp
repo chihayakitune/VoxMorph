@@ -91,6 +91,18 @@ static int auditOverflow (juce::Component* root, const juce::String& label)
     return bad;
 }
 
+static juce::Label* findLabelStartingWith (juce::Component* root, const juce::String& t)
+{
+    juce::Label* hit = nullptr;
+    walk (root, [&] (juce::Component* c)
+    {
+        if (hit != nullptr) return;
+        if (auto* l = dynamic_cast<juce::Label*> (c))
+            if (l->getText().startsWith (t)) hit = l;
+    });
+    return hit;
+}
+
 static juce::Image render (juce::AudioProcessorEditor& ed)
 {
     juce::Image img (juce::Image::ARGB, ed.getWidth(), ed.getHeight(), true);
@@ -273,6 +285,37 @@ int main (int argc, char** argv)
                 check (l.getBrightness()  < 0.35f, "strip reaches the LEFT window edge");
                 check (rr.getBrightness() < 0.35f, "strip reaches the RIGHT window edge");
             }
+        }
+
+        // ---- the approach to AUTO MATCHING is a DOUBLE line ----
+        // Two feeds (the chosen character, and your own voice) arrive along
+        // the same run and must stay legible as two. At a 1 px stroke the
+        // difference between "two lines" and "one thick line" is a few
+        // pixels of gap, which is exactly the kind of thing that looks fine
+        // in a scaled-down screenshot and is wrong on screen -- so it is
+        // counted in the pixels instead.
+        if (auto* h = findLabelStartingWith (page, "AUTO MATCHING"))
+        {
+            const auto img = render (*ed);
+            // NOT getRight(): the heading Label is laid out across the whole
+            // row for alignment, so its right edge is the page edge, not the
+            // end of the word. 260 px in from its left is inside the run at
+            // both window widths.
+            const int x = page->getX() + h->getBounds().getX() + 260;
+            const int y0 = page->getY() + h->getBounds().getCentreY();
+            int runs = 0; bool inRun = false;
+            for (int y = y0 - 20; y <= y0 + 20; ++y)
+            {
+                // 0.97, not the line colour's own 0.91: a 1 px stroke is
+                // ANTIALIASED over the page, so the pure colour never appears
+                // as a pixel -- measured, the strokes land at 0.945 against
+                // the page's 0.984.
+                const bool ink = img.getPixelAt (x, y).getBrightness() < 0.97f;
+                if (ink && ! inRun) ++runs;
+                inRun = ink;
+            }
+            std::printf ("  strokes crossing x=%d near AUTO MATCHING: %d\n", x, runs);
+            check (runs == 2, "AUTO MATCHING is approached by exactly two lines");
         }
 
         const int over = auditOverflow (ed.get(), tag);
