@@ -2493,7 +2493,7 @@ public:
     void resized() override
     {
         auto full = getLocalBounds();
-        auto r = full.reduced (16, 10);
+        auto r = full.reduced (kEdge, 10);
 
         // ── description: LEFT of the circle's overhang, on the same rows ──
         {
@@ -2575,7 +2575,7 @@ public:
         }
         // NEW CHARACTER belongs to this section but sits on the far right,
         // clear of the helix, where SAVE PRESET used to be.
-        newCharBtn.setBounds (full.getRight() - 16 - 170,
+        newCharBtn.setBounds (full.getRight() - kEdge - 170,
                               hAutoMatching.getBounds().getY() + 26, 170, 36);
 
         {
@@ -2595,7 +2595,7 @@ public:
         outLbl.setBounds (body.removeFromBottom (juce::jlimit (30, 76, body.getHeight() / 3))
                               .withTrimmedLeft (2));
         body.removeFromBottom (2);
-        graph.setBounds (full.withTrimmedLeft (16).withTrimmedRight (16)
+        graph.setBounds (full.withTrimmedLeft (kEdge).withTrimmedRight (kEdge)
                              .withTop (body.getY()).withBottom (outLbl.getBounds().getY() - 4));
     }
 
@@ -3242,6 +3242,13 @@ public:
     // message on the page.
     juce::Label descLbl, outLbl, matchStatus;
     static constexpr int kActionW = 170;      // MATCH / RECORD / MyVoiceFile
+    // This page is bounded to the FULL window width, not the inset content
+    // area every other page gets, because the character strip has to bleed
+    // to both edges. The inset the other pages receive from the editor is
+    // therefore applied here instead, and kEdge is the only thing that keeps
+    // the content lined up with the other tabs -- change it and the columns
+    // stop agreeing across pages.
+    static constexpr int kEdge = 28;          // 12 (page inset) + 16 (content)
     juce::Rectangle<int> descArea, stripArea;
     // The hero circle hangs below the band and over the top of this page.
     // The page is given the FULL content area (not the leftovers below the
@@ -5844,13 +5851,19 @@ public:
             // circle's footprint and tucks its description in beside it.
             // Starting it below the bulge like the other pages left a dead
             // band the width of the window.
-            const bool isMatching = (pg == &matchingPanel);
-            pg->setBounds (pg == &mainScroll || isMatching ? pageArea : sidePages);
+            // MATCHING is the third case again, and for a second reason: its
+            // character strip is full-bleed, and a component cannot paint
+            // outside its own bounds, so it is given the WHOLE window width
+            // and re-applies the page inset internally (MatchingPanel::kEdge).
+            if (pg == &matchingPanel)
+                pg->setBounds (pageArea.withX (0).withWidth (getWidth()));
+            else
+                pg->setBounds (pg == &mainScroll ? pageArea : sidePages);
         }
-        matchingPanel.setBulge ({ (int) heroC.x - pageArea.getX(),
-                                  (int) heroC.y - pageArea.getY() },
+        matchingPanel.setBulge ({ (int) heroC.x - matchingPanel.getX(),
+                                  (int) heroC.y - matchingPanel.getY() },
                                 ak::kHeroR + ak::kHeroRim,
-                                bulgeBottom - pageArea.getY() + 10);
+                                bulgeBottom - matchingPanel.getY() + 10);
         layoutMainPage();
     }
 

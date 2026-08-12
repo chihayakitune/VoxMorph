@@ -91,10 +91,16 @@ static int auditOverflow (juce::Component* root, const juce::String& label)
     return bad;
 }
 
-static void shoot (juce::AudioProcessorEditor& ed, const juce::File& out)
+static juce::Image render (juce::AudioProcessorEditor& ed)
 {
     juce::Image img (juce::Image::ARGB, ed.getWidth(), ed.getHeight(), true);
     { juce::Graphics g (img); ed.paintEntireComponent (g, true); }
+    return img;
+}
+
+static void shoot (juce::AudioProcessorEditor& ed, const juce::File& out)
+{
+    const auto img = render (ed);
     juce::PNGImageFormat png;
     if (auto os = std::unique_ptr<juce::FileOutputStream> (out.createOutputStream()))
     { os->setPosition (0); os->truncate(); png.writeImageToStream (img, *os); }
@@ -225,6 +231,34 @@ int main (int argc, char** argv)
                     check (presetBox->getSelectedId() == idBefore,
                            "dropdown selection restored (the action is not left showing)");
                 }
+            }
+        }
+
+        // ---- full-bleed check, on the PIXELS ----
+        // The strip is painted, not a component, so its bounds cannot be
+        // queried -- and bounds would not prove it anyway, since a component
+        // cannot paint outside itself and would simply be clipped. Sampling
+        // the rendered image at both window edges is the only thing that
+        // actually answers "does the dark band reach the edge".
+        {
+            juce::Rectangle<int> cards;
+            for (int i = 0; i < nCat; ++i)
+                if (auto* b = findButton (page, juce::String (cat[i].displayEn)))
+                    cards = cards.getUnion (b->getBounds());
+            check (! cards.isEmpty(), "found the character cards");
+            if (! cards.isEmpty())
+            {
+                const auto img = render (*ed);
+                const int y = page->getY() + cards.getCentreY();
+                const auto l = img.getPixelAt (0, y);
+                const auto rr = img.getPixelAt (img.getWidth() - 1, y);
+                std::printf ("  strip edge pixels at y=%d: left %s  right %s\n", y,
+                             l.toDisplayString (false).toRawUTF8(),
+                             rr.toDisplayString (false).toRawUTF8());
+                // band is 0xff262b45 (brightness ~0.17); the page is
+                // 0xfff3f5fb (~0.96). Anything light means a white margin.
+                check (l.getBrightness()  < 0.35f, "strip reaches the LEFT window edge");
+                check (rr.getBrightness() < 0.35f, "strip reaches the RIGHT window edge");
             }
         }
 
