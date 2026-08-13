@@ -6095,17 +6095,11 @@ private:
             tip ("Boost or cut around the third formant. Boosting adds sheen and 'sparkle' - "
                  "this region carries much of a voice's charm.",
                  "第3フォルマント付近の強さ。上げると艶・張りが出ます。声の「華」が乗る帯域です。"), ak::Tone::pink);
-        bracket ({ &rConst, &rF1S, &rF2S, &rF3S, &rF1G, &rF2G, &rF3G });
-        // picking a character writes these seven; moving any of them by hand
-        // puts the dropdown back to Custom
-        for (auto* r : { &rConst, &rF1S, &rF2S, &rF3S, &rF1G, &rF2G, &rF3G })
-            r->onUserEdit = [this] { setFmtCharacterCustom(); };
-
-        // Sits below the bracketed group on purpose: Fmt Character writes
-        // those seven rows, and Definition is not one of its components yet,
-        // so it must neither be written by a preset nor knock the dropdown
-        // back to Custom when the user moves it.
-        cardFormant->addGap (8);
+        // v0.44.0: Definition became the eighth component of a character, so
+        // it joins the bracket and the back-to-Custom set. Both halves matter
+        // -- a row a preset WRITES but that does not knock the dropdown back
+        // to Custom would let the label keep claiming a character the user
+        // has already edited away from.
         auto& rDef = slider (*cardFormant, "resonance", "Formant Definition (%)",
             tip ("Sharpens or rounds the formant peaks without moving them. + deepens the dips "
                  "between the resonances so the vowels read as more defined and characterful; "
@@ -6118,6 +6112,11 @@ private:
                  "Softness/Tilt(低域と高域の傾き)やF1〜F3 Gain(特定帯域の強さ)とは別の軸です。"
                  "まずは±20〜40程度から。"), ak::Tone::pink);
         rDef.setSignedValue();
+        bracket ({ &rConst, &rF1S, &rF2S, &rF3S, &rF1G, &rF2G, &rF3G, &rDef });
+        // picking a character writes these eight; moving any of them by hand
+        // puts the dropdown back to Custom
+        for (auto* r : { &rConst, &rF1S, &rF2S, &rF3S, &rF1G, &rF2G, &rF3G, &rDef })
+            r->onUserEdit = [this] { setFmtCharacterCustom(); };
         cardFormant->addGap (14);          // blank line before AEIOU
 
         toggle (*cardFormant, "vadapt", "AEIOU",
@@ -6241,18 +6240,20 @@ private:
             r->setTree (++i == n ? ParamRow::Tree::last : ParamRow::Tree::mid);
     }
 
-    // Fmt Character: a preset for the seven global formant rows below it.
+    // Fmt Character: a preset for the eight global formant rows below it.
     // Nothing is hidden or disabled while one is selected — the rows stay
     // live, and touching any of them drops the dropdown back to Custom.
     void addFmtCharacterRow()
     {
         fmtCombo = std::make_unique<ParamRow> (proc, "fcharacter", ParamRow::Kind::combo,
             "Fmt Character",
-            tip ("Presets the seven rows below (Co Shift and F1-F3 shift / gain) in one "
+            tip ("Presets the eight rows below (Co Shift, F1-F3 shift / gain and "
+                 "Formant Definition) in one "
                  "move. The rows stay editable: change any of them and this goes back to "
                  "Custom. Same character names as AEIOU Character, but this shifts the "
                  "whole vocal tract while that one shapes the five vowels apart.",
-                 "下の7項目(Co ShiftとF1〜F3のShift/Gain)をまとめて設定します。"
+                 "下の8項目(Co Shift、F1〜F3のShift/Gain、Formant Definition)を"
+                 "まとめて設定します。"
                  "各項目はそのまま操作でき、どれか1つでも動かすとCustomに戻ります。"
                  "名前はAEIOU Characterと共通ですが、あちらが母音ごとの差を"
                  "作るのに対し、こちらは声道全体を動かします。"),
@@ -6294,6 +6295,7 @@ private:
             put ("f1shift", m.shiftSt[0]);  put ("f1gain", m.gainDb[0]);
             put ("f2shift", m.shiftSt[1]);  put ("f2gain", m.gainDb[1]);
             put ("f3shift", m.shiftSt[2]);  put ("f3gain", m.gainDb[2]);
+            put ("resonance", m.definitionPct);
         });
     }
 

@@ -178,18 +178,74 @@ int main (int argc, char** argv)
                 // so the label reads "Formant Definition" and the % shows up
                 // beside the value.
                 int rows = 0, sliders = 0;
+                juce::Slider* defSlider = nullptr;
                 walk (ed.get(), [&] (juce::Component* c)
                 {
                     if (auto* l = dynamic_cast<juce::Label*> (c))
                         if (l->getText() == "Formant Definition") ++rows;
                     if (auto* s = dynamic_cast<juce::Slider*> (c))
                         if (std::abs (s->getMinimum() + 100.0) < 1.0e-6
-                         && std::abs (s->getMaximum() - 100.0) < 1.0e-6) ++sliders;
+                         && std::abs (s->getMaximum() - 100.0) < 1.0e-6) { ++sliders; defSlider = s; }
                 });
                 std::printf ("  Formant Definition rows=%d  (-100..100 sliders=%d)\n",
                              rows, sliders);
                 check (rows >= 1, "Formant Definition row is present in the editor");
                 check (sliders >= 1, "a -100..+100 slider exists for it");
+
+                // v0.44.0: Definition is the eighth component of a Fmt
+                // Character. Driven end to end -- move the choice parameter,
+                // let the dropdown's onChange run, and read back what landed
+                // in resonance -- because the write happens in the editor's
+                // combo callback, not anywhere a map lookup would reach.
+                if (auto* fc = proc.apvts.getParameter ("fcharacter"))
+                {
+                    int wrong = 0;
+                    for (int ci = 0; ci < kFmtCustom; ++ci)
+                    {
+                        fc->beginChangeGesture();
+                        fc->setValueNotifyingHost (fc->convertTo0to1 ((float) ci));
+                        fc->endChangeGesture();
+                        juce::MessageManager::getInstance()->runDispatchLoopUntil (30);
+                        const float got = rp->convertFrom0to1 (rp->getValue());
+                        const float want = getFmtCharacterMap (ci).definitionPct;
+                        if (std::abs (got - want) > 0.51f)      // step is 1 %
+                        {
+                            std::fprintf (stderr, "  character %d: resonance %.1f, expected %.1f\n",
+                                          ci, got, want);
+                            ++wrong;
+                        }
+                    }
+                    check (wrong == 0, "every Fmt Character writes its Definition value");
+                    // Uni is the one that has to leave the spectral path off
+                    fc->beginChangeGesture();
+                    fc->setValueNotifyingHost (fc->convertTo0to1 ((float) (kFmtCustom - 1)));
+                    fc->endChangeGesture();
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (30);
+                    check (std::abs (rp->convertFrom0to1 (rp->getValue())) < 0.01f,
+                           "Uni leaves Definition at 0 (no spectral path for it)");
+                    // Automation and presets must NOT drop the dropdown to
+                    // Custom -- only a hand edit does, and ParamRow draws that
+                    // line at Slider::onDragStart. So this drives the callback
+                    // the row actually listens to; moving the parameter here
+                    // would test the opposite contract and pass for the wrong
+                    // reason.
+                    fc->beginChangeGesture();
+                    fc->setValueNotifyingHost (fc->convertTo0to1 (0.0f));   // Natural
+                    fc->endChangeGesture();
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (30);
+                    const bool stillChar = fc->convertFrom0to1 (fc->getValue())
+                                            < (float) kFmtCustom - 0.5f;
+                    check (stillChar, "selecting a character does not immediately self-cancel");
+                    if (defSlider != nullptr && defSlider->onDragStart != nullptr)
+                    {
+                        defSlider->onDragStart();
+                        juce::MessageManager::getInstance()->runDispatchLoopUntil (30);
+                        check (fc->convertFrom0to1 (fc->getValue()) > (float) kFmtCustom - 0.5f,
+                               "hand-editing Definition puts Fmt Character back to Custom");
+                    }
+                    else
+                        check (false, "Definition row exposes the hand-edit hook");
+                }
             }
         }
 
