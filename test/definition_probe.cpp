@@ -123,40 +123,70 @@ static void fftRadix2 (float* re, float* im, int n, bool inv)
     if (inv) { const float s = 1.0f / (float) n; for (int i = 0; i < n; ++i) { re[i] *= s; im[i] *= s; } }
 }
 
-// -------------------- pitch (normalised autocorrelation) --------------
-// Enough to gate voiced frames and set the harmonic spacing; the estimator
-// under test is the ENVELOPE, not this.
+// ------------------------------ pitch (YIN) ---------------------------
+// Plain autocorrelation is the wrong tool here and both ways of using it
+// fail: taking the strongest lag lands on a sub-harmonic (every integer
+// multiple of the period correlates just as well), and taking the shortest
+// lag above a ratio of the best lands an octave HIGH on voices with a strong
+// second harmonic -- that read the seven catalog voices 7-27 % sharp.
+// YIN's cumulative mean normalised difference removes the bias by dividing
+// each lag by the running mean of all shorter lags, which suppresses the
+// zero-lag pull that causes both errors. Threshold and dip-following are the
+// standard ones (de Cheveigne & Kawahara 2002).
+//
+// Getting f0 wrong is not a side issue for this probe: f0 sets the harmonic
+// spacing the envelope is built from, so an octave error silently rewrites
+// the very quantity being measured.
 static double detectF0 (const float* x, int n, double fs, double& clarity)
 {
-    const int lagLo = (int) (fs / 500.0), lagHi = std::min (n / 2, (int) (fs / 60.0));
-    double e0 = 0.0;
-    for (int i = 0; i < n; ++i) e0 += (double) x[i] * x[i];
-    if (e0 < 1e-9) { clarity = 0.0; return 0.0; }
-    std::vector<double> r ((size_t) (lagHi + 1), 0.0);
-    double best = 0.0;
-    for (int lag = lagLo; lag <= lagHi; ++lag)
+    const int tauMin = std::max (2, (int) (fs / 500.0));
+    const int tauMax = std::min (n / 2, (int) (fs / 60.0));
+    if (tauMax <= tauMin) { clarity = 0.0; return 0.0; }
+
+    std::vector<double> d ((size_t) tauMax + 1, 0.0), cm ((size_t) tauMax + 1, 1.0);
+    for (int tau = 1; tau <= tauMax; ++tau)
     {
-        double num = 0.0, d1 = 0.0, d2 = 0.0;
-        for (int i = 0; i + lag < n; ++i)
+        double acc = 0.0;
+        for (int i = 0; i + tau < n; ++i)
         {
-            num += (double) x[i] * x[i + lag];
-            d1  += (double) x[i] * x[i];
-            d2  += (double) x[i + lag] * x[i + lag];
+            const double dif = (double) x[i] - x[i + tau];
+            acc += dif * dif;
         }
-        r[(size_t) lag] = num / (std::sqrt (d1 * d2) + 1e-30);
-        best = std::max (best, r[(size_t) lag]);
+        d[(size_t) tau] = acc;
     }
-    // Take the SHORTEST lag that is within 10 % of the best, not the best
-    // itself: every integer multiple of the true period correlates just as
-    // well (perfectly so on a pulse train), and picking the maximum lands on
-    // a sub-harmonic. Getting this wrong halves or thirds the reported f0,
-    // which then sets the wrong harmonic spacing for the envelope and makes
-    // the whole measurement meaningless.
-    int bestLag = 0;
-    for (int lag = lagLo; lag <= lagHi; ++lag)
-        if (r[(size_t) lag] >= 0.90 * best) { bestLag = lag; break; }
-    clarity = bestLag > 0 ? r[(size_t) bestLag] : 0.0;
-    return bestLag > 0 ? fs / bestLag : 0.0;
+    double run = 0.0;
+    for (int tau = 1; tau <= tauMax; ++tau)
+    {
+        run += d[(size_t) tau];
+        cm[(size_t) tau] = run > 1e-30 ? d[(size_t) tau] * tau / run : 1.0;
+    }
+
+    const double thr = 0.15;
+    int tau = -1;
+    for (int t = tauMin; t <= tauMax; ++t)
+        if (cm[(size_t) t] < thr)
+        {
+            while (t + 1 <= tauMax && cm[(size_t) (t + 1)] < cm[(size_t) t]) ++t;  // local dip
+            tau = t; break;
+        }
+    if (tau < 0)   // nothing crossed: take the global minimum, low confidence
+    {
+        double bv = 1e30;
+        for (int t = tauMin; t <= tauMax; ++t)
+            if (cm[(size_t) t] < bv) { bv = cm[(size_t) t]; tau = t; }
+    }
+    if (tau <= 0) { clarity = 0.0; return 0.0; }
+
+    // parabolic refinement on the CMNDF dip
+    double ref = tau;
+    if (tau > 1 && tau < tauMax)
+    {
+        const double a = cm[(size_t) tau - 1], b = cm[(size_t) tau], c = cm[(size_t) tau + 1];
+        const double den = 2.0 * (2.0 * b - a - c);
+        if (std::fabs (den) > 1e-30) ref = tau + (c - a) / den;
+    }
+    clarity = 1.0 - std::min (1.0, cm[(size_t) tau]);
+    return ref > 0.0 ? fs / ref : 0.0;
 }
 
 // ------------- the engine's envelope stage, copied verbatim -----------
@@ -266,7 +296,7 @@ static Result measure (const char* path, const char* name, double halfHz, bool v
         double clarity = 0.0;
         const int probeN = (int) (fs * 0.045);
         const double f0 = detectF0 (x.data() + pos, probeN, fs, clarity);
-        if (f0 < 60.0 || clarity < 0.60) continue;      // voiced frames only
+        if (f0 < 60.0 || clarity < 0.80) continue;      // voiced frames only
 
         const int P = (int) std::lround (fs / f0);
         const int len = 2 * P + 1;
@@ -291,10 +321,16 @@ static Result measure (const char* path, const char* name, double halfHz, bool v
         {
             const int lo = std::clamp ((int) std::lround (loR[i] * N / fs), 1, NB - 2);
             const int hi = std::clamp ((int) std::lround (hiR[i] * N / fs), 1, NB - 2);
-            // a real local maximum, same rule the engine tracks with
+            // Same rule the engine tracks with, INCLUDING the v0.44.1 fix:
+            // start at the first harmonic (below it env[] is extrapolation,
+            // not measurement) and require a strict rise on the left so a
+            // flat run is not mistaken for a peak. Without this the band
+            // reports the plateau under H1 -- that is where the 281 Hz "F1"
+            // on a 318 Hz voice came from.
+            const int loH = std::max (lo, (int) std::floor (f0 * N / fs));
             int pk = -1; float pv = 0.0f;
-            for (int k = lo + 1; k < hi - 1; ++k)
-                if (env[(size_t) k] >= env[(size_t) k - 1] && env[(size_t) k] >= env[(size_t) k + 1]
+            for (int k = loH + 1; k < hi - 1; ++k)
+                if (env[(size_t) k] > env[(size_t) k - 1] && env[(size_t) k] >= env[(size_t) k + 1]
                     && env[(size_t) k] > pv) { pv = env[(size_t) k]; pk = k; }
             if (pk < 0) continue;                        // band not placed
             const int a = std::max (0, pk - r), b = std::min (NB, pk + r);

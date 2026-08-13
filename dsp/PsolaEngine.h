@@ -1413,12 +1413,29 @@ private:
         const double loR[3] = { 250, 850, 1900 }, hiR[3] = { 1000, 2600, 3800 };
         const double defR[3] = { 500, 1500, 2500 };
         int sBin[3];
+        // Below the first harmonic peak env[] is FLAT extrapolation carrying
+        // H1's level (see the envelope builder above), not measurement. On a
+        // high voice that plateau is the tallest thing in the F1 search band,
+        // and with >= on both sides every point of a flat run qualifies as a
+        // maximum -- so the tracker picked the plateau and reported an F1
+        // BELOW the speaker's own fundamental. Worse, it then stuck: when no
+        // peak is found the fallback holds the PREVIOUS value, so one bad
+        // grain pins the band for the rest of the phrase. Measured on
+        // synthetic /i/ (true F1 352 Hz) at f0 400: F1 read 281 Hz and stayed
+        // there, the same number a 318 Hz target recording produced.
+        // Two changes, both the ones VoiceAnalyzer::extractPeaks already
+        // makes: start at the first measured harmonic, and require a strict
+        // rise on the left so a flat run is not a peak. Voices whose F1 band
+        // sits above H1 -- every ordinary male and most female speech -- are
+        // untouched, which is why this stays bit-exact on the usual material.
+        const int firstH = pkB.empty() ? 1 : pkB.front();
         for (int i = 0; i < 3; ++i)
         {
-            const int a = binOf (loR[i] * f), b = binOf (std::min (hiR[i] * f, fs * 0.45));
+            const int a = std::max (binOf (loR[i] * f), firstH);
+            const int b = binOf (std::min (hiR[i] * f, fs * 0.45));
             int    pk = -1; float pv = 0.0f;
             for (int k = a + 1; k < b - 1; ++k)
-                if (env[(size_t)k] >= env[(size_t)k-1] && env[(size_t)k] >= env[(size_t)k+1]
+                if (env[(size_t)k] > env[(size_t)k-1] && env[(size_t)k] >= env[(size_t)k+1]
                     && env[(size_t)k] > pv)
                 { pv = env[(size_t)k]; pk = k; }
             const float hz = pk > 0 ? (float) hzOf (pk)
