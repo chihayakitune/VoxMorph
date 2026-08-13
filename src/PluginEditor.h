@@ -3982,17 +3982,39 @@ private:
     int  lastPresetId = 0;          // restored after the Reset All action
 };
 
-// ASMR tab: pseudo-3D positioning. A sonar-style circular pad with a
-// draggable dot; the dot's X gives constant-power L/R panning and the
-// distance from the centre attenuates the volume ("further away").
-// Centre = exactly unity (no effect). Drives the asmrx/asmry parameters.
-class SonarPad : public juce::Component, private juce::Timer
+// ===========================================================================
+// ASMR tab (v0.45.0) — the spatial page.
+//
+// The pad still drives asmrx / asmry exactly as it did; what changed is that
+// the ASMR output stage behind it is now SpatialEngine (see dsp/
+// SpatialEngine.h) rather than a bare pan, and this page exposes the rest of
+// it: binaural cues, air absorption, a room, width and an auto-orbit.
+//
+// Colours come from the ANOKOE palette only — ak::seriesOut (pink) is the
+// source, ak::seriesIn (mint) is the listener, and the dish is the same
+// gradient and guide-ring tone the VISUALIZER donuts use, so the two pages
+// read as one instrument. The old pad had its own mint-green disc and rings
+// that appear nowhere else in the app.
+// ===========================================================================
+class SonarPad : public juce::Component, public juce::SettableTooltipClient,
+                 private juce::Timer
 {
 public:
     explicit SonarPad (VoxMorphProcessor& p) : proc (p)
     {
         px = proc.apvts.getParameter ("asmrx");
         py = proc.apvts.getParameter ("asmry");
+        setTooltip (vmTip (
+            "Drag the dot to place the voice around your head. Up is in front of you, "
+            "left and right are at your ears, and the further from the centre the further "
+            "away (and quieter) the voice gets. Double-click to bring it back to the "
+            "centre, which is exactly no effect. The left/right half needs a stereo "
+            "output; on a mono bus only the distance applies. While Orbit is running the "
+            "dot shows where the voice actually is, not where you last left it.",
+            "点をドラッグすると、声の位置を頭のまわりに配置できます。上=正面、"
+            "左右=耳元、中心から離れるほど遠く(小さく)なります。ダブルクリックで中央"
+            "(=効果なし)に戻ります。左右方向はステレオ出力時のみ有効です"
+            "(モノラル時は距離のみ)。Orbitが動いている間は、点が実際の現在位置を示します。"));
         startTimerHz (30);
     }
 
@@ -4006,9 +4028,52 @@ private:
 
     juce::Rectangle<float> circleBounds() const
     {
-        auto b = getLocalBounds().toFloat().reduced (14.0f);
+        auto b = getLocalBounds().toFloat().reduced (24.0f);
         const float s = std::min (b.getWidth(), b.getHeight());
         return b.withSizeKeepingCentre (s, s);
+    }
+
+    static float paramValue (juce::RangedAudioParameter* p)
+    {
+        return p != nullptr ? p->convertFrom0to1 (p->getValue()) : 0.0f;
+    }
+    float raw (const char* id, float fallback) const
+    {
+        if (auto* p = proc.apvts.getRawParameterValue (id))
+            return p->load (std::memory_order_relaxed);
+        return fallback;
+    }
+
+    // The head in the middle: this is YOU, so it is drawn as a listener and
+    // not as another source. Mint, to match the "input" side of every graph.
+    static void drawHead (juce::Graphics& g, juce::Point<float> c, float r)
+    {
+        g.setColour (ak::seriesIn.withAlpha (0.16f));
+        g.fillEllipse (juce::Rectangle<float> (r * 2.0f, r * 2.0f).withCentre (c));
+        g.setColour (ak::seriesIn.withAlpha (0.75f));
+        g.drawEllipse (juce::Rectangle<float> (r * 2.0f, r * 2.0f).withCentre (c), 1.4f);
+        // ears, so which way the head is facing is not a matter of opinion
+        const float e = r * 0.34f;
+        for (int s = 0; s < 2; ++s)
+        {
+            const float ex = c.x + (s == 0 ? -r : r);
+            g.fillEllipse (juce::Rectangle<float> (e, e * 1.5f).withCentre ({ ex, c.y }));
+        }
+        // nose: a small notch at the top marks "front"
+        juce::Path nose;
+        nose.startNewSubPath (c.x - r * 0.24f, c.y - r * 0.92f);
+        nose.lineTo (c.x, c.y - r * 1.34f);
+        nose.lineTo (c.x + r * 0.24f, c.y - r * 0.92f);
+        g.strokePath (nose, juce::PathStrokeType (1.4f));
+    }
+
+    static void dashedCircle (juce::Graphics& g, juce::Point<float> c, float r, float thick)
+    {
+        juce::Path p;
+        p.addEllipse (juce::Rectangle<float> (r * 2.0f, r * 2.0f).withCentre (c));
+        const float dashes[] = { 5.0f, 5.0f };
+        juce::PathStrokeType (thick).createDashedStroke (p, p, dashes, 2);
+        g.strokePath (p, juce::PathStrokeType (thick));
     }
 
     void paint (juce::Graphics& g) override
@@ -4016,36 +4081,129 @@ private:
         auto b = getLocalBounds().toFloat().reduced (2.0f);
         ak::paintCard (g, b);
 
-        const auto c = circleBounds();
+        const auto c   = circleBounds();
         const auto ctr = c.getCentre();
-        g.setColour (juce::Colour (0xffeef7f4));
+        const float rad = c.getWidth() * 0.5f;
+        if (rad < 30.0f) return;
+
+        // the dish, same treatment as the VISUALIZER donuts
+        g.setGradientFill (juce::ColourGradient (juce::Colour (0xfffafcfd), ctr.x, ctr.y - rad,
+                                                 juce::Colour (0xffeceff3), ctr.x, ctr.y + rad, false));
         g.fillEllipse (c);
-        g.setColour (juce::Colour (0xff9ed9c9));
-        for (float f : { 1.0f, 2.0f / 3.0f, 1.0f / 3.0f })
+        g.setColour (juce::Colour (0x14000000));
+        g.drawEllipse (c, 1.0f);
+
+        const bool  bin   = raw ("asmrbin", 0.0f) > 0.5f;
+        const float distP = raw ("asmrdist", 100.0f);
+        const float orbit = raw ("asmrorbit", 0.0f);
+
+        // Behind-you shading: while Binaural Cues is on, the lower half is
+        // where the extra HF loss and level dip live. Showing the region is
+        // the only way that cue is discoverable — it is a filter, and a
+        // filter has no control to look at.
+        if (bin)
+        {
+            juce::Path back;
+            back.addPieSegment (c, juce::MathConstants<float>::halfPi,
+                                juce::MathConstants<float>::halfPi * 3.0f, 0.0f);
+            g.setColour (ak::heading.withAlpha (0.07f));
+            g.fillPath (back);
+        }
+
+        // Distance rings, labelled with the attenuation they actually apply,
+        // so "further away" has a number on it. The labels sit on the BACK-
+        // LEFT diagonal: on the vertical axis (the obvious place) the
+        // outermost one lands under the FRONT caption and the two overprint
+        // each other.
+        g.setFont (ak::font (9.5f));
+        for (float f : { 1.0f / 3.0f, 2.0f / 3.0f, 1.0f })
+        {
+            g.setColour (juce::Colour (0x12000000));
             g.drawEllipse (c.withSizeKeepingCentre (c.getWidth() * f, c.getHeight() * f), 1.0f);
-        g.setColour (juce::Colour (0x3354bda1));
+            const float gainAt = 1.0f - 0.6f * (distP * 0.01f) * f;
+            if (gainAt <= 0.0f) continue;
+            const float db = 20.0f * std::log10 (gainAt);
+            if (db > -0.05f) continue;                      // 0 dB needs no label
+            const float k = 0.70710678f;                    // 225 degrees
+            g.setColour (ak::heading.withAlpha (0.6f));
+            g.drawText (juce::String (db, 1) + " dB",
+                        (int) (ctr.x - rad * f * k) - 54, (int) (ctr.y + rad * f * k) - 6,
+                        50, 12, juce::Justification::right, false);
+        }
+
+        g.setColour (ak::treeLine);                          // axes
         g.drawLine (c.getX(), ctr.y, c.getRight(), ctr.y, 1.0f);
         g.drawLine (ctr.x, c.getY(), ctr.x, c.getBottom(), 1.0f);
 
-        g.setColour (juce::Colour (0xff8f9ab5));
-        g.setFont (juce::Font (juce::FontOptions (10.5f)));
-        g.drawText ("FRONT", (int) ctr.x - 24, (int) c.getY() - 13, 48, 12, juce::Justification::centred);
-        g.drawText ("BACK",  (int) ctr.x - 24, (int) c.getBottom() + 1, 48, 12, juce::Justification::centred);
-        g.drawText ("L", (int) c.getX() - 12,     (int) ctr.y - 6, 10, 12, juce::Justification::centred);
-        g.drawText ("R", (int) c.getRight() + 3,  (int) ctr.y - 6, 10, 12, juce::Justification::centred);
+        g.setColour (ak::heading);
+        g.setFont (ak::font (10.5f, true));
+        g.drawText ("FRONT", (int) ctr.x - 30, (int) c.getY() - 15, 60, 13, juce::Justification::centred);
+        g.drawText ("BACK",  (int) ctr.x - 30, (int) c.getBottom() + 2, 60, 13, juce::Justification::centred);
+        g.drawText ("L", (int) c.getX() - 15,    (int) ctr.y - 7, 12, 14, juce::Justification::centred);
+        g.drawText ("R", (int) c.getRight() + 4, (int) ctr.y - 7, 12, 14, juce::Justification::centred);
 
-        const float x = getX01 (px), y = getX01 (py);
-        const float dx = ctr.x + x * c.getWidth() * 0.5f;
-        const float dy = ctr.y - y * c.getHeight() * 0.5f;
-        g.setColour (juce::Colour (0x33f08ba5));
-        g.fillEllipse (dx - 11.0f, dy - 11.0f, 22.0f, 22.0f);
-        g.setColour (juce::Colour (0xfff08ba5));
+        // Where the source IS. With the orbit running that is not where the
+        // pad was left, so the engine's own published position wins; with it
+        // off the parameters are used directly, which keeps the dot following
+        // the mouse even when no audio is being processed.
+        float x = paramValue (px), y = paramValue (py);
+        if (orbit > 0.0f)
+        {
+            x = proc.uiSpaceX.load (std::memory_order_relaxed);
+            y = proc.uiSpaceY.load (std::memory_order_relaxed);
+            const float rr = std::sqrt (x * x + y * y);
+            if (rr > 0.001f)
+            {
+                g.setColour (ak::seriesOut.withAlpha (0.35f));
+                dashedCircle (g, ctr, rr * rad, 1.0f);
+            }
+        }
+
+        const float dx = ctr.x + x * rad;
+        const float dy = ctr.y - y * rad;
+
+        // the line of sight from the listener to the source
+        g.setColour (ak::seriesOut.withAlpha (0.35f));
+        g.drawLine (ctr.x, ctr.y, dx, dy, 1.0f);
+
+        drawHead (g, ctr, rad * 0.15f);
+
+        // Ear gains: the two constant-power channel gains, as short arcs just
+        // outside each ear. This is the pan made visible, and the numbers are
+        // the same ones the audio stage uses. Kept thin and pale on purpose —
+        // at the centre both gains are unity, so a bold version draws two big
+        // brackets on a pad that is doing nothing.
+        {
+            const float dist = std::min (1.0f, std::sqrt (x * x + y * y));
+            const float dg = 1.0f - 0.6f * (distP * 0.01f) * dist;
+            const float ph = (x + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
+            const float gL = std::max (0.0f, dg * std::cos (ph) * juce::MathConstants<float>::sqrt2);
+            const float gR = std::max (0.0f, dg * std::sin (ph) * juce::MathConstants<float>::sqrt2);
+            const float pi = juce::MathConstants<float>::pi;
+            for (int s = 0; s < 2; ++s)
+            {
+                const float gain = std::min (1.4f, s == 0 ? gL : gR);
+                juce::Path arc;
+                const float mid = s == 0 ? -juce::MathConstants<float>::halfPi
+                                         :  juce::MathConstants<float>::halfPi;
+                arc.addCentredArc (ctr.x, ctr.y, rad * 0.215f, rad * 0.215f, 0.0f,
+                                   mid - 0.20f * pi, mid + 0.20f * pi, true);
+                g.setColour (ak::seriesIn.withAlpha (juce::jlimit (0.05f, 0.55f, gain * 0.42f)));
+                g.strokePath (arc, juce::PathStrokeType (2.0f + 2.6f * std::min (1.0f, gain),
+                                                         juce::PathStrokeType::curved,
+                                                         juce::PathStrokeType::rounded));
+            }
+        }
+
+        // the source itself: halo, then core
+        g.setColour (ak::seriesOut.withAlpha (0.20f));
+        g.fillEllipse (dx - 15.0f, dy - 15.0f, 30.0f, 30.0f);
+        g.setColour (ak::seriesOut.withAlpha (0.38f));
+        g.fillEllipse (dx - 10.0f, dy - 10.0f, 20.0f, 20.0f);
+        g.setColour (ak::seriesOut);
         g.fillEllipse (dx - 6.0f, dy - 6.0f, 12.0f, 12.0f);
-    }
-
-    static float getX01 (juce::RangedAudioParameter* p)
-    {
-        return p != nullptr ? p->convertFrom0to1 (p->getValue()) : 0.0f;
+        g.setColour (juce::Colours::white.withAlpha (0.9f));
+        g.drawEllipse (dx - 6.0f, dy - 6.0f, 12.0f, 12.0f, 1.2f);
     }
 
     void setFromMouse (const juce::MouseEvent& e)
@@ -4083,62 +4241,269 @@ private:
     juce::RangedAudioParameter *px = nullptr, *py = nullptr;
 };
 
+// ---------------------------------------------------------------------------
+// A named starting point for the whole page. Scenes exist because the spatial
+// controls interact — "behind you, in a room, slightly muffled" is five
+// parameters, and nobody discovers that combination by turning one knob at a
+// time. Each scene is applied as ONE undo step and respects locked rows,
+// exactly like loading a preset.
+struct AsmrScene
+{
+    const char* name;
+    const char* jp;
+    float x, y;
+    bool  binaural;
+    float distance, air, room, size, width, orbit, depth;
+};
+
+inline const AsmrScene* getAsmrScenes (int& count)
+{
+    static const AsmrScene k[] = {
+        //  name          jp             x      y   bin   dist  air  room  size width orbit depth
+        { "Off",        "効果なし",    0.0f,  0.0f, false, 100,   0,    0,  50,  100, 0.0f,  60 },
+        { "Close Left", "左耳ささやき", -0.62f, 0.28f, true,  70,  10,   12,  30,  110, 0.0f,  60 },
+        { "Close Right","右耳ささやき",  0.62f, 0.28f, true,  70,  10,   12,  30,  110, 0.0f,  60 },
+        { "Behind",     "背後から",     0.0f, -0.75f, true, 100,  25,   26,  55,  100, 0.0f,  60 },
+        { "Across",     "少し離れて",   0.0f,  0.85f, true, 100,  45,   40,  70,  100, 0.0f,  60 },
+        { "Orbit",      "ぐるぐる",     0.0f,  0.0f, true,  90,  20,   22,  45,  115, 0.12f, 75 },
+    };
+    count = (int) (sizeof (k) / sizeof (k[0]));
+    return k;
+}
+
 class AsmrPanel : public juce::Component
 {
 public:
     explicit AsmrPanel (VoxMorphProcessor& p) : proc (p), pad (p)
     {
-        heading.setText ("ASMR POSITION", juce::dontSendNotification);
+        heading.setText ("ASMR SPACE", juce::dontSendNotification);
         ak::styleSectionHeading (heading);
         addAndMakeVisible (heading);
 
         help.setJustificationType (juce::Justification::topLeft);
-        help.setFont (juce::Font (juce::FontOptions (12.5f)));
+        help.setFont (ak::font (11.5f));
+        help.setColour (juce::Label::textColourId, ak::heading.withAlpha (0.9f));
         help.setText (juce::String::fromUTF8 (
-            "擬似立体音響: 円の中の点をドラッグすると声の聞こえる方向と距離を調整できます。\n"
-            "上=正面 / 左右=耳元 / 中心から離れるほど遠く(小さく)。ダブルクリックで中央に戻り\n"
-            "ます(中央=効果なし)。ステレオ出力時のみ左右に振れます(モノラル時は距離のみ)。"),
+            "変換後の音を頭のまわりに配置します。エンジン(MAINタブ)より後ろの段なので、"
+            "声質・ピッチには一切影響しません。\n"
+            "すべての項目は既定値=オフで、その状態の音は従来と完全に同一です。"
+            "まず下の Scene から選び、そこから微調整するのがおすすめです。"),
             juce::dontSendNotification);
         addAndMakeVisible (help);
 
-        resetBtn.setTooltip (juce::String::fromUTF8 ("点を中央(効果なし)に戻します。"));
-        resetBtn.onClick = [this]
+        // ---- scene buttons ------------------------------------------------
+        sceneLbl.setText ("SCENE", juce::dontSendNotification);
+        sceneLbl.setFont (ak::font (10.5f, true));
+        sceneLbl.setColour (juce::Label::textColourId, ak::heading.withAlpha (0.8f));
+        addAndMakeVisible (sceneLbl);
+
+        int nScenes = 0;
+        const auto* sc = getAsmrScenes (nScenes);
+        for (int i = 0; i < nScenes; ++i)
         {
-            for (auto* id : { "asmrx", "asmry" })
-                if (auto* rp = proc.apvts.getParameter (id))
-                {
-                    rp->beginChangeGesture();
-                    rp->setValueNotifyingHost (rp->convertTo0to1 (0.0f));
-                    rp->endChangeGesture();
-                }
-        };
-        addAndMakeVisible (resetBtn);
+            auto* b = scenes.add (new juce::TextButton (sc[i].name));
+            b->setTooltip (juce::String::fromUTF8 (sc[i].jp)
+                           + juce::String::fromUTF8 ("。この場面の設定を一括で適用します"
+                                                     "(ロック中の項目はそのまま)。"));
+            b->onClick = [this, i] { applyScene (i); };
+            addAndMakeVisible (b);
+        }
+
         addAndMakeVisible (pad);
+
+        // ---- control cards ------------------------------------------------
+        cardPos.setTitle ("POSITION", "ui_mark_L_ASMR_png", ak::headBlue, ak::markBlue);
+        add (cardPos, "asmrdist", ParamRow::Kind::slider, "Distance Amount (%)", ak::Tone::blue,
+             tipOf ("How much the distance from the centre lowers the level. 100 % is the "
+                    "classic behaviour (about -8 dB at the rim), 0 % keeps the level flat so "
+                    "the pad only decides the direction, and 200 % makes stepping back "
+                    "dramatic. This is a level control only - it does not change the tone.",
+                    "中心からの距離で音量をどれだけ下げるかです。100%=従来どおり"
+                    "(外周で約-8dB)、0%=音量は変えず方向だけを決める、200%=離れると"
+                    "大きく小さくなります。音色は変わりません。"));
+        add (cardPos, "asmrair", ParamRow::Kind::slider, "Air Absorption (%)", ak::Tone::blue,
+             tipOf ("Distant sound loses its high end on the way to you - that is what makes "
+                    "far away sound far away rather than just quiet. This adds that loss, and "
+                    "it grows as the dot moves out; at the centre it does nothing whatever the "
+                    "value. Works on a mono output too.",
+                    "遠くの音は高域を失いながら届きます。「小さい」だけでなく「遠い」と"
+                    "感じさせるのはこの高域の減衰です。点を外側に動かすほど強くかかり、"
+                    "中心では値に関係なく無効です。モノラル出力でも有効。"));
+
+        cardBin.setTitle ("BINAURAL", "ui_mark_M_Monitor_png", ak::headPink, ak::markBlue);
+        add (cardBin, "asmrbin", ParamRow::Kind::toggle, "Binaural Cues", ak::Tone::pink,
+             tipOf ("Adds the two cues your ears actually use to locate a voice: the far ear "
+                    "hears it a fraction of a millisecond LATER (up to 0.66 ms), and duller, "
+                    "because your head is in the way. It also makes a voice placed behind you "
+                    "sound behind you rather than merely quiet. Best on headphones - this is "
+                    "what turns left/right panning into 'she is at my ear'. Needs a stereo "
+                    "output; off is the previous behaviour.",
+                    "耳が実際に方向を判断している2つの手がかりを加えます。遠い側の耳には"
+                    "わずかに遅れて(最大0.66ms)、頭に遮られて少しこもって届きます。"
+                    "後ろに置いた声が「小さい」ではなく「後ろにいる」と聞こえるようにも"
+                    "なります。ヘッドホン推奨。左右の音量差だけだったパンが"
+                    "「耳元にいる」感覚に変わります。ステレオ出力が必要。オフ=従来どおり。"));
+        add (cardBin, "asmrwidth", ParamRow::Kind::slider, "Stereo Width (%)", ak::Tone::pink,
+             tipOf ("Widens or narrows the whole stereo picture. 100 % leaves it untouched, 0 % "
+                    "collapses it to the centre, 200 % pushes it out past the speakers. Useful "
+                    "with a binaural microphone (Stereo Input) where the recording already "
+                    "carries its own width.",
+                    "ステレオの広がりを調整します。100%=変更なし、0%=中央にまとめる、"
+                    "200%=スピーカーの外側まで広げる。バイノーラルマイク(Stereo Input)の"
+                    "録音のように、元から広がりがある音に対して有効です。"));
+
+        cardRoom.setTitle ("ROOM", "ui_mark_M_Advanced_png", ak::headGold, ak::markBlue);
+        add (cardRoom, "asmrroom", ParamRow::Kind::slider, "Ambience (%)", ak::Tone::yellow,
+             tipOf ("Puts the voice in a small room: a few early reflections and a short, "
+                    "damped tail. Deliberately subtle - this is a bedroom, not a hall. The "
+                    "further out the dot sits the more of the room you hear, which is most of "
+                    "what 'further away, indoors' actually sounds like. 0 % switches the "
+                    "reverb off entirely.",
+                    "声を小さな部屋の中に置きます。初期反射と短い残響を少しだけ加えます"
+                    "(ホールではなく室内程度の控えめな量)。点が外側にあるほど残響の"
+                    "割合が増え、屋内で「遠ざかった」感じになります。0%で完全にオフ。"));
+        add (cardRoom, "asmrsize", ParamRow::Kind::slider, "Room Size (%)", ak::Tone::yellow,
+             tipOf ("How big that room is. Small values give a tight booth-like closeness, "
+                    "large values a longer, more open decay. Has no effect while Ambience is 0.",
+                    "部屋の大きさです。小さいほど狭くタイトに、大きいほど長く開放的に"
+                    "響きます。Ambienceが0のときは効果がありません。"));
+
+        cardMove.setTitle ("MOTION", "ui_mark_M_Intonation_png", ak::headBlue, ak::markBlue);
+        add (cardMove, "asmrorbit", ParamRow::Kind::slider, "Orbit Rate (Hz)", ak::Tone::blue,
+             tipOf ("Slowly circles the voice around your head, hands-free. 0 = off. 0.1 Hz is "
+                    "one lap every ten seconds, which is about as fast as this stays pleasant; "
+                    "anything above roughly 0.5 Hz starts to sound like an effect rather than "
+                    "a person moving. The pad's dot follows the real position while this runs.",
+                    "声を頭のまわりにゆっくり周回させます。0=オフ。0.1Hzで10秒に1周で、"
+                    "心地よさを保てるのはこのあたりまでです。0.5Hzを超えると人の移動では"
+                    "なくエフェクトに聞こえ始めます。動作中はパッドの点が実際の位置を"
+                    "示します。"));
+        add (cardMove, "asmrdepth", ParamRow::Kind::slider, "Orbit Radius (%)", ak::Tone::blue,
+             tipOf ("How wide the orbit is when the pad is sitting at the centre. If you have "
+                    "already dragged the dot further out than this, that larger radius is used "
+                    "instead - so the orbit never pulls the voice closer than you put it.",
+                    "パッドが中央にあるときの周回半径です。すでに点をこれより外側に"
+                    "ドラッグしている場合は、そちらの半径が使われます"
+                    "(周回によって声が近づいてしまうことはありません)。"));
+
+        for (auto* c : { &cardPos, &cardBin, &cardRoom, &cardMove })
+            addAndMakeVisible (*c);
     }
 
-    // v0.31.2: sits on the ANOKOE page gradient, so it draws its own card
-    void paint (juce::Graphics& g) override
+    // Locks are honoured here for the same reason presets honour them: a
+    // scene is a bulk write, and a locked row means "not by anything".
+    void applyScene (int index)
+    {
+        int n = 0;
+        const auto* sc = getAsmrScenes (n);
+        if (index < 0 || index >= n) return;
+        const auto& s = sc[index];
+
+        const struct { const char* id; float v; } vals[] = {
+            { "asmrx",     s.x },        { "asmry",     s.y },
+            { "asmrbin",   s.binaural ? 1.0f : 0.0f },
+            { "asmrdist",  s.distance }, { "asmrair",   s.air },
+            { "asmrroom",  s.room },     { "asmrsize",  s.size },
+            { "asmrwidth", s.width },    { "asmrorbit", s.orbit },
+            { "asmrdepth", s.depth },
+        };
+        proc.history.group ([&]
+        {
+            for (auto& v : vals)
+            {
+                if (proc.isParamLocked (v.id)) continue;
+                if (auto* rp = proc.apvts.getParameter (v.id))
+                {
+                    rp->beginChangeGesture();
+                    rp->setValueNotifyingHost (rp->convertTo0to1 (v.v));
+                    rp->endChangeGesture();
+                }
+            }
+        });
+    }
+
+    void refreshLocks() { for (auto& r : rows) r->refreshLock(); }
+    std::function<void()> onLockChanged;   // set by the editor
+
+    void paint (juce::Graphics&) override
     {
         // no panel: the page sits on the same flat body tone as MAIN
-        juce::ignoreUnused (g);
     }
 
     void resized() override
     {
-        auto r = getLocalBounds().reduced (16, 12);
+        auto r = getLocalBounds().reduced (ak::kPageMarginX + 8, 12);
         heading.setBounds (r.removeFromTop (24));
-        help.setBounds (r.removeFromTop (56));
-        resetBtn.setBounds (r.removeFromTop (30).withWidth (150).withHeight (26));
+        help.setBounds (r.removeFromTop (40));
         r.removeFromTop (6);
-        const int s = std::min (r.getWidth(), r.getHeight());
-        pad.setBounds (r.withSizeKeepingCentre (s, s));
+
+        // left column: the pad, with the scene row under it
+        const int leftW = juce::jlimit (280, 460, r.getWidth() * 42 / 100);
+        auto left = r.removeFromLeft (leftW);
+        r.removeFromLeft (ak::kGap * 2);
+        // Cap the control column: a slider row stretched across 900 px reads
+        // as a different instrument from the MAIN grid, where the same rows
+        // sit in a third of the window. Extra width is left as margin.
+        r = r.withWidth (juce::jmin (r.getWidth(), 560));
+
+        // The pad takes a square off the TOP of the column and the scenes sit
+        // straight underneath it. Reserving the scene row off the bottom
+        // instead leaves the buttons pinned to the foot of the window, a long
+        // way from the pad they act on.
+        const int s = juce::jmax (200, std::min (left.getWidth(), left.getHeight() - 60));
+        pad.setBounds (left.removeFromTop (s).withSizeKeepingCentre (s, s));
+        left.removeFromTop (8);
+        sceneLbl.setBounds (left.removeFromTop (15));
+        auto sceneRow = left.removeFromTop (30);
+        const int nb = scenes.size();
+        if (nb > 0)
+        {
+            const int bw = (sceneRow.getWidth() - (nb - 1) * 6) / nb;
+            for (int i = 0; i < nb; ++i)
+            {
+                scenes[i]->setBounds (sceneRow.removeFromLeft (bw).reduced (0, 2));
+                sceneRow.removeFromLeft (6);
+            }
+        }
+
+        // right column: the cards, stacked
+        for (auto* c : { &cardPos, &cardBin, &cardRoom, &cardMove })
+        {
+            c->setBounds (r.removeFromTop (c->preferredHeight()));
+            r.removeFromTop (ak::kGap);
+        }
     }
 
 private:
+    static juce::String tipOf (const char* en, const char* jp) { return vmTip (en, jp); }
+
+    void add (ak::Card& card, const char* id, ParamRow::Kind kind,
+              const juce::String& label, ak::Tone tone, const juce::String& tipText)
+    {
+        auto row = std::make_unique<ParamRow> (proc, id, kind, label, tipText, tone);
+        row->setLookAndFeel (tone == ak::Tone::pink   ? (juce::LookAndFeel*) &lnfPink
+                           : tone == ak::Tone::yellow ? (juce::LookAndFeel*) &lnfYellow
+                                                      : (juce::LookAndFeel*) &lnfBlue);
+        // a lock toggled here has to reach the MAIN page's rows too, and the
+        // editor's poll is what does that -- so tell it something changed
+        row->onLockChanged = [this] { if (onLockChanged) onLockChanged(); };
+        card.add (*row, kind == ParamRow::Kind::toggle ? ak::kToggleH : ak::kRowH);
+        rows.push_back (std::move (row));
+    }
+
     VoxMorphProcessor& proc;
-    juce::Label heading, help;
-    juce::TextButton resetBtn { "Center (Off)" };
+    // The look-and-feels are declared BEFORE the rows that point at them:
+    // members die in reverse declaration order, so this is what guarantees
+    // every row is gone before the LookAndFeel it references. (Same ordering
+    // as VoxMorphEditor's own lnf* / owned pair, for the same reason.)
+    ak::ToneLookAndFeel lnfBlue   { ak::Tone::blue };
+    ak::ToneLookAndFeel lnfPink   { ak::Tone::pink };
+    ak::ToneLookAndFeel lnfYellow { ak::Tone::yellow };
+    juce::Label heading, help, sceneLbl;
     SonarPad pad;
+    juce::OwnedArray<juce::TextButton> scenes;
+    ak::Card cardPos, cardBin, cardRoom, cardMove;
+    std::vector<std::unique_ptr<ParamRow>> rows;
 };
 
 // window that shows a hosted FX plugin's own editor (falls back to a
@@ -5504,6 +5869,7 @@ public:
 
         buildMainPage();
         buildVisualizerPage();
+        asmrPanel.onLockChanged = [this] { syncLockUI(); };
 
         footer.setFont (ak::font (11.0f));
         footer.setColour (juce::Label::textColourId, ak::heading.withAlpha (0.85f));
@@ -6440,6 +6806,7 @@ private:
     void syncLockUI()
     {
         for (auto* r : rows) r->refreshLock();
+        asmrPanel.refreshLocks();       // its rows are owned by the panel
         lastLockState = proc.lockedIds.joinIntoString (",");
     }
 

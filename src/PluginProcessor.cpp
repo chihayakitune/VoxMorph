@@ -160,6 +160,28 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::NormalisableRange<float> (-1.0f, 1.0f, 0.001f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "asmry", 1 }, "ASMR Y",
                 juce::NormalisableRange<float> (-1.0f, 1.0f, 0.001f), 0.0f));
+    // ---- ASMR spatial stage (v0.45.0) -----------------------------------
+    // EVERY default below is the value at which its stage is skipped, so a
+    // session or preset written before this release loads with the whole
+    // extension inert and comes out bit-identical to v0.44. That property is
+    // checked in test/spatial_test.cpp; do not "improve" a default here
+    // without re-running it.
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "asmrbin", 1 }, "ASMR Binaural Cues", false));
+    layout.add (std::make_unique<P> (juce::ParameterID { "asmrdist", 1 }, "ASMR Distance Amount (%)",
+                juce::NormalisableRange<float> (0.0f, 200.0f, 1.0f), 100.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "asmrair", 1 }, "ASMR Air Absorption (%)",
+                juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 0.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "asmrroom", 1 }, "ASMR Room Ambience (%)",
+                juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 0.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "asmrsize", 1 }, "ASMR Room Size (%)",
+                juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 50.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "asmrwidth", 1 }, "ASMR Stereo Width (%)",
+                juce::NormalisableRange<float> (0.0f, 200.0f, 1.0f), 100.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "asmrorbit", 1 }, "ASMR Orbit Rate (Hz)",
+                juce::NormalisableRange<float> (0.0f, 2.0f, 0.01f, 0.5f), 0.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "asmrdepth", 1 }, "ASMR Orbit Depth (%)",
+                juce::NormalisableRange<float> (0.0f, 100.0f, 1.0f), 60.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "mix", 1 }, "Mix",
                 juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 1.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "gain", 1 }, "Output Gain (dB)",
@@ -238,6 +260,14 @@ VoxMorphProcessor::VoxMorphProcessor()
     pGate      = apvts.getRawParameterValue ("gate");
     pAsmrX     = apvts.getRawParameterValue ("asmrx");
     pAsmrY     = apvts.getRawParameterValue ("asmry");
+    pAsmrBin   = apvts.getRawParameterValue ("asmrbin");
+    pAsmrDist  = apvts.getRawParameterValue ("asmrdist");
+    pAsmrAir   = apvts.getRawParameterValue ("asmrair");
+    pAsmrRoom  = apvts.getRawParameterValue ("asmrroom");
+    pAsmrSize  = apvts.getRawParameterValue ("asmrsize");
+    pAsmrWidth = apvts.getRawParameterValue ("asmrwidth");
+    pAsmrOrbit = apvts.getRawParameterValue ("asmrorbit");
+    pAsmrDepth = apvts.getRawParameterValue ("asmrdepth");
     pStereo    = apvts.getRawParameterValue ("stereo");
 
     loadFxChains();   // standalone: restore the saved Pre/Post FX setup
@@ -256,6 +286,7 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     engine.prepare (sampleRate);
     engineR.prepare (sampleRate);
+    spatial.prepare (sampleRate, samplesPerBlock);   // allocates its delay lines
     monoScratch.assign ((size_t) samplesPerBlock, 0.0f);
     scratchL.assign ((size_t) samplesPerBlock, 0.0f);
     scratchR.assign ((size_t) samplesPerBlock, 0.0f);
@@ -270,7 +301,8 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     // reset the per-run smoothing states so a device restart (or host
     // transport re-prepare) never resumes from a stale mute/gate fade
     rmsSm = 0.0f;  loudSec = 0.0f;  muteSec = 0.0f;  muteGain = 1.0f;
-    gateEnv = 0.0f;  gateGain = 1.0f;  panL = 1.0f;  panR = 1.0f;
+    gateEnv = 0.0f;  gateGain = 1.0f;
+    spatial.reset();          // clears the pan smoothers and any room tail
     gainSm = juce::Decibels::decibelsToGain (pGain->load());
     uiInL.reset();  uiInR.reset();                    // UI meter ballistics
     uiOutL.reset(); uiOutR.reset();
@@ -769,36 +801,36 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             }
     }
 
-    // ASMR pseudo-position: constant-power pan (X) + distance attenuation,
-    // normalised so the centre position is exactly unity (no effect)
-    const float ax = juce::jlimit (-1.0f, 1.0f, pAsmrX->load());
-    const float ay = juce::jlimit (-1.0f, 1.0f, pAsmrY->load());
-    const float dist = std::min (1.0f, std::sqrt (ax * ax + ay * ay));
-    const float dg = 1.0f - 0.6f * dist;
-    const float panPhase = (ax + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
-    const float tL = dg * std::cos (panPhase) * juce::MathConstants<float>::sqrt2;
-    const float tR = dg * std::sin (panPhase) * juce::MathConstants<float>::sqrt2;
-    // Centre position = unity on both sides, so once the pan smoothers have
-    // converged the whole stage is a copy. Same snap-and-skip rule as the
-    // output gain above (the copy is also what lets the compiler memcpy it).
-    const bool panNeutral = (ax == 0.0f && ay == 0.0f)
-                         && std::abs (panL - 1.0f) < 1.0e-6f
-                         && std::abs (panR - 1.0f) < 1.0e-6f;
-    if (panNeutral) { panL = 1.0f; panR = 1.0f; }
-    for (int c = 0; c < ch; ++c)
+    // ASMR spatial stage (v0.45.0): position, distance, binaural cues, room
+    // and width. Up to v0.44 this was a constant-power pan plus a distance
+    // attenuation written out here; that maths now lives in SpatialEngine
+    // unchanged, with every addition gated on its own control so the defaults
+    // still produce the identical samples (test/spatial_test.cpp proves it by
+    // memcmp). Everything it does happens AFTER the visualizer tap and the
+    // Refine capture below, exactly as the old pan did.
+    if (ch > 0)
     {
-        float* d = buffer.getWritePointer (c);
-        const float t = ch == 1 ? dg : (c == 0 ? tL : tR);
-        float& sm = c == 0 ? panL : panR;
-        const float* src = stereoMode ? (c == 0 ? sL : sR) : m;
-        if (panNeutral)
-            std::copy (src, src + n, d);
-        else
-            for (int i = 0; i < n; ++i)
-            {
-                sm += 0.002f * (t - sm);
-                d[i] = sm * src[i];
-            }
+        SpatialEngine::Params sp;
+        sp.x           = pAsmrX->load();
+        sp.y           = pAsmrY->load();
+        sp.binaural    = pAsmrBin->load() > 0.5f;
+        sp.distanceP   = pAsmrDist->load();
+        sp.airP        = pAsmrAir->load();
+        sp.roomP       = pAsmrRoom->load();
+        sp.sizeP       = pAsmrSize->load();
+        sp.widthP      = pAsmrWidth->load();
+        sp.orbitHz     = pAsmrOrbit->load();
+        sp.orbitDepthP = pAsmrDepth->load();
+
+        const float* srcL = stereoMode ? sL : m;
+        const float* srcR = stereoMode ? sR : m;
+        spatial.process (srcL, ch > 1 ? srcR : nullptr,
+                         buffer.getWritePointer (0),
+                         ch > 1 ? buffer.getWritePointer (1) : nullptr, n, sp);
+
+        // publish the orbited position for the pad to draw
+        uiSpaceX.store (spatial.currentX(), std::memory_order_relaxed);
+        uiSpaceY.store (spatial.currentY(), std::memory_order_relaxed);
     }
 
     // Post FX chain (standalone external plugins) on the converted output;

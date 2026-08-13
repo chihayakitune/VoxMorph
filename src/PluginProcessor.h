@@ -2,6 +2,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "PsolaEngine.h"
 #include "VoiceAnalyzer.h"
+#include "SpatialEngine.h"
 
 class VoxMorphProcessor : public juce::AudioProcessor
 {
@@ -224,6 +225,12 @@ public:
     std::atomic<float> uiVowelH { 0.5f }, uiVowelF { 0.5f }, uiVowelConf { 0.0f };
     std::atomic<bool>  uiVowelActive { false };
 
+    // ASMR readout (v0.45.0): where the source ACTUALLY is, i.e. the pad
+    // position after the auto-orbit has rotated it. The pad draws from here
+    // rather than from asmrx/asmry, so a running orbit is visible; with the
+    // orbit off these simply mirror the two parameters.
+    std::atomic<float> uiSpaceX { 0.0f }, uiSpaceY { 0.0f };
+
     // ---- UI level meters (v0.30.0, per channel since v0.30.3) -------------
     // Written on the audio thread, read by the editor at ~30 Hz. Fast attack
     // / slow release on the RMS and a decaying peak hold, both driven by TIME
@@ -352,6 +359,10 @@ private:
 
     PsolaEngine engine;              // mono path / LEFT channel in stereo mode
     PsolaEngine engineR;             // RIGHT channel (stereo input mode only)
+    // ASMR positioning, applied to the FINISHED output (see SpatialEngine.h).
+    // It is downstream of everything above and of the visualizer tap, so it
+    // cannot influence the conversion or what the graphs show.
+    SpatialEngine spatial;
     std::vector<float> monoScratch, scratchL, scratchR;
 
     std::atomic<float>* pPitch     = nullptr;
@@ -399,12 +410,22 @@ private:
 
     // feedback-runaway protection state
     float rmsSm = 0.0f, loudSec = 0.0f, muteSec = 0.0f, muteGain = 1.0f;
-    // noise gate + ASMR pan + output gain smoothing state
-    float gateEnv = 0.0f, gateGain = 1.0f, panL = 1.0f, panR = 1.0f;
+    // noise gate + output gain smoothing state. The ASMR pan smoothers used
+    // to live here too; they moved into SpatialEngine with the rest of the
+    // positioning stage in v0.45.0.
+    float gateEnv = 0.0f, gateGain = 1.0f;
     float gainSm = 1.0f;
     std::atomic<float>* pGate  = nullptr;
     std::atomic<float>* pAsmrX = nullptr;
     std::atomic<float>* pAsmrY = nullptr;
+    std::atomic<float>* pAsmrBin   = nullptr;
+    std::atomic<float>* pAsmrDist  = nullptr;
+    std::atomic<float>* pAsmrAir   = nullptr;
+    std::atomic<float>* pAsmrRoom  = nullptr;
+    std::atomic<float>* pAsmrSize  = nullptr;
+    std::atomic<float>* pAsmrWidth = nullptr;
+    std::atomic<float>* pAsmrOrbit = nullptr;
+    std::atomic<float>* pAsmrDepth = nullptr;
     std::atomic<float>* pStereo = nullptr;
 
     // external FX hosting state

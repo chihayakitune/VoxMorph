@@ -417,6 +417,229 @@ int main (int argc, char** argv)
         shoot (*ed, outDir.getChildFile ("matching_" + tag + ".png"));
     }
 
+    // ---- v0.45.0: the ASMR page ------------------------------------------
+    // Checked on the PIXELS as well as the components. The point of this page
+    // is a picture -- where the dot sits and what colour things are -- and
+    // neither of those is observable from bounds. A scaled-down screenshot is
+    // not evidence either: the old pad's mint disc (0xffeef7f4) and the theme
+    // dish (0xfffafcfd) look identical at thumbnail size and differ by a hue
+    // the eye cannot name, so the tones are compared numerically.
+    {
+        std::printf ("\n== ASMR page ==\n");
+        ed->setSize (1400, 1080);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (200);
+        auto* asmrTab = findButton (ed.get(), "ASMR");
+        check (asmrTab != nullptr, "ASMR tab button exists");
+        if (asmrTab != nullptr) asmrTab->triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (250);
+
+        // -- the parameters, with the ranges and NEUTRAL defaults that make
+        //    an old session load unchanged (see dsp/SpatialEngine.h)
+        struct Want { const char* id; float lo, hi, def; };
+        static const Want wants[] = {
+            { "asmrbin",   0.0f,   1.0f,   0.0f   },
+            { "asmrdist",  0.0f, 200.0f, 100.0f   },
+            { "asmrair",   0.0f, 100.0f,   0.0f   },
+            { "asmrroom",  0.0f, 100.0f,   0.0f   },
+            { "asmrsize",  0.0f, 100.0f,  50.0f   },
+            { "asmrwidth", 0.0f, 200.0f, 100.0f   },
+            { "asmrorbit", 0.0f,   2.0f,   0.0f   },
+            { "asmrdepth", 0.0f, 100.0f,  60.0f   },
+        };
+        for (auto& w : wants)
+        {
+            auto* rp = dynamic_cast<juce::RangedAudioParameter*> (proc.apvts.getParameter (w.id));
+            check (rp != nullptr, juce::String (w.id) + " exists");
+            if (rp == nullptr) continue;
+            const auto& rng = rp->getNormalisableRange();
+            check (std::abs (rng.start - w.lo) < 1.0e-4f && std::abs (rng.end - w.hi) < 1.0e-4f,
+                   juce::String (w.id) + " range is correct");
+            check (std::abs (rp->convertFrom0to1 (rp->getDefaultValue()) - w.def) < 1.0e-3f,
+                   juce::String (w.id) + " default is the neutral value");
+        }
+
+        juce::Component* page = asmrTab != nullptr ? nullptr : nullptr;
+        SonarPad* pad = nullptr;
+        walk (ed.get(), [&] (juce::Component* c)
+        {
+            if (auto* sp = dynamic_cast<SonarPad*> (c)) if (sp->isShowing()) pad = sp;
+        });
+        check (pad != nullptr && pad->isShowing(), "the sonar pad is on screen");
+
+        // -- every control the page promises has a row bound to it. Rows are
+        //    found by label text, the same convention the Definition check
+        //    above uses: a parameter with no control would still save and
+        //    automate perfectly while being unreachable.
+        for (const char* label : { "Distance Amount", "Air Absorption", "Binaural Cues",
+                                   "Stereo Width", "Ambience", "Room Size",
+                                   "Orbit Rate", "Orbit Radius" })
+        {
+            int hits = 0;
+            walk (ed.get(), [&] (juce::Component* c)
+            {
+                if (auto* l = dynamic_cast<juce::Label*> (c))
+                    if (l->getText() == label && l->isShowing()) ++hits;
+                if (auto* b = dynamic_cast<juce::Button*> (c))
+                    if (b->getButtonText() == label && b->isShowing()) ++hits;
+            });
+            check (hits >= 1, juce::String ("a visible control for ") + label);
+        }
+
+        // -- scenes are a bulk write, so they are driven, not just counted
+        if (auto* behind = findButton (ed.get(), "Behind"))
+        {
+            behind->triggerClick();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
+            const float by  = proc.apvts.getRawParameterValue ("asmry")->load();
+            const float bin = proc.apvts.getRawParameterValue ("asmrbin")->load();
+            const float air = proc.apvts.getRawParameterValue ("asmrair")->load();
+            std::printf ("  Behind scene -> y=%.2f bin=%.0f air=%.0f\n", by, bin, air);
+            check (by < -0.5f && bin > 0.5f && air > 0.0f, "the Behind scene writes its whole set");
+        }
+        else
+            check (false, "Behind scene button exists");
+
+        if (auto* offBtn = findButton (ed.get(), "Off"))
+        {
+            offBtn->triggerClick();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
+            bool allNeutral = true;
+            for (auto& w : wants)
+                if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (proc.apvts.getParameter (w.id)))
+                    if (std::abs (rp->convertFrom0to1 (rp->getValue()) - w.def) > 1.0e-3f)
+                        allNeutral = false;
+            check (allNeutral, "the Off scene puts every control back to neutral");
+        }
+        else
+            check (false, "Off scene button exists");
+
+        // -- the dot is drawn, in the theme's OUTPUT pink, in the quadrant
+        //    the two position parameters point at
+        if (pad != nullptr)
+        {
+            auto setP = [&] (const char* id, float v)
+            {
+                if (auto* rp = proc.apvts.getParameter (id))
+                {
+                    rp->beginChangeGesture();
+                    rp->setValueNotifyingHost (rp->convertTo0to1 (v));
+                    rp->endChangeGesture();
+                }
+            };
+            setP ("asmrx", -0.6f);      // front-left
+            setP ("asmry",  0.6f);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (150);
+
+            const auto img  = render (*ed);
+            const auto area = ed->getLocalArea (pad, pad->getLocalBounds());
+            const auto want = ak::seriesOut;                 // 0xfff08ba5
+            double sx = 0.0, sy = 0.0;
+            int hits = 0;
+            for (int y = area.getY(); y < area.getBottom(); ++y)
+                for (int x = area.getX(); x < area.getRight(); ++x)
+                {
+                    const auto px = img.getPixelAt (x, y);
+                    const int d = std::abs (px.getRed()   - want.getRed())
+                                + std::abs (px.getGreen() - want.getGreen())
+                                + std::abs (px.getBlue()  - want.getBlue());
+                    if (d < 12) { sx += x; sy += y; ++hits; }
+                }
+            std::printf ("  pad %s: %d pink px, centroid (%.0f, %.0f), centre (%d, %d)\n",
+                         area.toString().toRawUTF8(), hits,
+                         hits ? sx / hits : 0.0, hits ? sy / hits : 0.0,
+                         area.getCentreX(), area.getCentreY());
+            check (hits > 40, "the source dot is drawn in the OUTPUT pink");
+            if (hits > 0)
+            {
+                check (sx / hits < area.getCentreX() - 20, "x = -0.6 puts the dot LEFT of centre");
+                check (sy / hits < area.getCentreY() - 20, "y = +0.6 puts the dot ABOVE centre");
+            }
+
+            // The dish must be the VISUALIZER donuts' vertical gradient
+            // (0xfffafcfd at the top -> 0xffeceff3 at the bottom), not the
+            // pad's own mint disc from before v0.45.
+            //
+            // Asserted POSITIVELY, on two samples of empty dish. The obvious
+            // test -- "the old colour 0xffeef7f4 appears nowhere" -- is not
+            // sound: it also matches the antialiased edge of the new mint
+            // head against the new dish, which lands on that exact tone at
+            // one particular alpha, so it reports ~15 hits on a pad that has
+            // no disc at all. Absence of a colour is the wrong question when
+            // blending can synthesise it.
+            //
+            // Both samples are taken along the 45-degree ray into the BACK-
+            // RIGHT quadrant, which is the one part of the dish with nothing
+            // drawn on it: the axes are exactly horizontal/vertical, the
+            // rings sit at 1/3, 2/3 and 1 of the radius, the dB labels are
+            // only ever above the centre, the ear arcs are at 0.30, and the
+            // line of sight runs to the dot in the FRONT-LEFT.
+            {
+                const float rr = (float) area.getWidth() * 0.5f - 24.0f;
+                const float k  = 0.70710678f;
+                auto sample = [&] (float f)
+                {
+                    return img.getPixelAt ((int) (area.getCentreX() + rr * f * k),
+                                           (int) (area.getCentreY() + rr * f * k));
+                };
+                const auto up = sample (0.48f), down = sample (0.86f);
+                std::printf ("  dish gradient: upper %s  lower %s\n",
+                             up.toDisplayString (false).toRawUTF8(),
+                             down.toDisplayString (false).toRawUTF8());
+                auto inRange = [] (juce::Colour c)
+                {
+                    return c.getRed()   >= 232 && c.getRed()   <= 254
+                        && c.getGreen() >= 235 && c.getGreen() <= 254
+                        && c.getBlue()  >= 239 && c.getBlue()  <= 255;
+                };
+                check (inRange (up) && inRange (down),
+                       "the dish tone is the theme's (neutral, not mint)");
+                check (down.getGreen() < up.getGreen(),
+                       "and it is the same top-lighter gradient the donuts use");
+                // the old disc was a FLAT mint fill: a saturated green cast
+                check (up.getGreen() - up.getRed() < 8 && down.getGreen() - down.getRed() < 8,
+                       "no green cast left over from the old mint disc");
+            }
+
+            // Behind-you shading. The back cue is a FILTER: it has no slider,
+            // so the shaded lower half is the only thing on screen that says
+            // it is armed. Measured as the same pixel with the switch off and
+            // on, which cancels the dish gradient out of the comparison.
+            {
+                const int px = area.getCentreX() - 40;
+                const int py = area.getCentreY() + (int) ((area.getWidth() * 0.5f - 24.0f) * 0.55f);
+                setP ("asmrbin", 0.0f);
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
+                const auto offPx = render (*ed).getPixelAt (px, py);
+                setP ("asmrbin", 1.0f);
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
+                const auto onPx = render (*ed).getPixelAt (px, py);
+                std::printf ("  back shading at (%d,%d): off %s  on %s\n", px, py,
+                             offPx.toDisplayString (false).toRawUTF8(),
+                             onPx.toDisplayString (false).toRawUTF8());
+                check (onPx.getBrightness() < offPx.getBrightness() - 0.005f,
+                       "Binaural Cues shades the behind-you half of the pad");
+                shoot (*ed, outDir.getChildFile ("asmr_active.png"));
+                setP ("asmrbin", 0.0f);
+            }
+
+            setP ("asmrx", 0.0f);
+            setP ("asmry", 0.0f);
+        }
+
+        const int over = auditOverflow (ed.get(), "asmr");
+        std::printf ("  children outside their parent: %d\n", over);
+        check (over == 0, "no component escapes its parent on the ASMR page");
+        shoot (*ed, outDir.getChildFile ("asmr_1400x1080.png"));
+
+        // and at the smallest window the editor allows
+        ed->setSize (1180, 920);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (250);
+        const int overMin = auditOverflow (ed.get(), "asmr-min");
+        check (overMin == 0, "ASMR page still fits at the minimum window size");
+        shoot (*ed, outDir.getChildFile ("asmr_1180x920.png"));
+        juce::ignoreUnused (page);
+    }
+
     // ---- .vmprofile round-trip, including the v0.40.0 texture fields ----
     // profileToXml / profileFromXml live in PluginEditor.h and need JUCE, so
     // offline_test cannot reach them; this is the only place they get tested.
