@@ -212,6 +212,11 @@ public:
         vaw.prepare (sampleRate, 512);        // vowel-adaptive warp (control rate)
         vaHiScale = 1.0f;
 
+        anF0In = anF0Out = 0.0f;              // display-only analysis taps
+        anFIn[0] = anFIn[1] = anFIn[2] = 0.0f;
+        anFOut[0] = anFOut[1] = anFOut[2] = 0.0f;
+        anFmtValid = false;
+
         airSplit.setup (sampleRate);
         airSplit.reset();
         airCombT = 0.0f;
@@ -618,6 +623,30 @@ public:
     float vowelConfidence()      const { return vaw.confidence(); }
     float vowelOffsetSemi (int i) const { return vaw.offsetSemi (i); }
     float vowelGainDb (int i)     const { return vaw.gainDb (i); }
+
+    // ---- analysis taps for the VISUALIZER's detection lane (v0.47.0) ----
+    // Same contract as the vowel taps above: plain floats WRITTEN on the
+    // audio thread while a grain is placed, never read from the message
+    // thread directly -- the processor republishes them through atomics.
+    //
+    // They report what the engine already decided, in real Hz, so the lane
+    // can be drawn straight onto the spectrum's own frequency axis:
+    //   f0 in   the detected input pitch
+    //   f0 out  the pitch this grain is actually emitted at, i.e. after
+    //           Pitch, Intonation, Low Limit and the High Range guard
+    //   F1-F3   the tracked formants. IN divides the grain's resample ratio
+    //           back out; OUT is where the warp is putting them.
+    //
+    // formantsValid() is false whenever the SPECTRAL LAYER did not run on the
+    // last grain -- it is skipped unless a formant feature is on, and trackF[]
+    // is then stale. That is a real state the UI has to show rather than
+    // paper over: running the layer for the sake of a display would change
+    // both the CPU cost and the output.
+    float analysisF0In()   const { return anF0In; }
+    float analysisF0Out()  const { return anF0Out; }
+    bool  formantsValid()  const { return anFmtValid; }
+    float analysisFormantIn  (int i) const { return anFIn [std::clamp (i, 0, 2)]; }
+    float analysisFormantOut (int i) const { return anFOut[std::clamp (i, 0, 2)]; }
 
 private:
     static constexpr int kRing = 1 << 15;
@@ -1161,6 +1190,11 @@ private:
         if (jitterAmt > 0.0f && v && !robotize)
             Ts *= 1.0f + 0.02f * jitterAmt * nextRand();
 
+        // display-only: read AFTER the jitter so the lane shows the pitch the
+        // grain is really emitted at, not the one before the last stage
+        anF0In  = v ? (float) (fs / P)  : 0.0f;
+        anF0Out = Ts > 0.0f ? (float) (fs / Ts) : 0.0f;
+
         const int64_t mi  = (int64_t) std::llround (nextMarkF);
         const double  err = nextMarkF - (double) mi;
 
@@ -1256,6 +1290,7 @@ private:
         // vaOn keeps the path (and with it the F1-F3 tracking the vowel
         // estimator depends on) alive even when every manual value is 0.
         const bool spectral = v && (perFmt || breath > 0.001f || vaOn || defOn);
+        anFmtValid = spectral;          // display-only; see formantsValid()
         if (spectral)
             spectralProcess (2 * Hout + 1, f);
 
@@ -1482,6 +1517,16 @@ private:
         dBin[2] = std::min (dBin[2], tail - 1);
         dBin[1] = std::min (dBin[1], dBin[2] - binOf (150.0 * f));
         dBin[0] = std::min (dBin[0], dBin[1] - binOf (120.0 * f));
+
+        // display-only: the two ends of the warp, in real Hz. trackF[] lives
+        // in the RESAMPLED grain domain (input formants x f), so the input
+        // side divides f back out; the destination bin is already the output
+        // frequency, since the grain is written to the output at 1:1.
+        for (int i = 0; i < 3; ++i)
+        {
+            anFIn [i] = trackF[i] > 0.0f ? trackF[i] / std::max (0.25f, f) : 0.0f;
+            anFOut[i] = (float) hzOf (dBin[i]);
+        }
 
         const int srcA[5] = { 0, sBin[0], sBin[1], sBin[2], tail };
         const int dstA[5] = { 0, dBin[0], dBin[1], dBin[2], tail };
@@ -1734,6 +1779,14 @@ private:
     VowelAdaptiveWarp vaw;
     bool  vaOn      = false;   // enabled AND amount > 0
     float vaHiScale = 1.0f;    // High Range guard scale on the offsets
+
+    // display-only analysis taps (see the getters above). Written here and
+    // read by nothing inside the engine, which is why adding them leaves the
+    // output bit-identical.
+    float anF0In = 0.0f, anF0Out = 0.0f;
+    float anFIn[3]  = { 0.0f, 0.0f, 0.0f };
+    float anFOut[3] = { 0.0f, 0.0f, 0.0f };
+    bool  anFmtValid = false;
 
     int64_t writePos = 0;
     double  nextMarkF = 0.0, lastInMark = 0.0;

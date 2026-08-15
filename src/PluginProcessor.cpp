@@ -691,6 +691,23 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             uiVowelConf.store (0.0f, std::memory_order_relaxed);
     }
 
+    // Detection readout for the VISUALIZER lane (v0.47.0). Always the LEFT
+    // engine: in Stereo Input mode both run the same parameters, and every
+    // other analysis tap on this page is the mono/left one too.
+    {
+        uiF0In .store (engine.analysisF0In(),  std::memory_order_relaxed);
+        uiF0Out.store (engine.analysisF0Out(), std::memory_order_relaxed);
+        const bool fv = engine.formantsValid();
+        for (int i = 0; i < 3; ++i)
+        {
+            uiFmtIn [i].store (fv ? engine.analysisFormantIn  (i) : 0.0f,
+                               std::memory_order_relaxed);
+            uiFmtOut[i].store (fv ? engine.analysisFormantOut (i) : 0.0f,
+                               std::memory_order_relaxed);
+        }
+        uiFmtValid.store (fv, std::memory_order_relaxed);
+    }
+
     // Latency estimate = engine lookahead (changes with Low Latency Mode)
     // + enabled hosted FX plugins. Pitch/Formant/Voice Quality/Breath run
     // inside the same grain pipeline and add no delay of their own. The UI

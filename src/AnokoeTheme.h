@@ -64,9 +64,15 @@ namespace anokoe
     const juce::Colour bandInk  { 0xffe6ebff };
     const juce::Colour bandDim  { 0xff8f9bc4 };
 
-    // graph series colours (kept from the old skin so the DSP-facing meaning
-    // of mint = input / pink = output does not change)
-    const juce::Colour seriesIn  { 0xff54bda1 };
+    // Graph series colours. The DSP-facing meaning is fixed — seriesIn is
+    // always the signal ARRIVING and seriesOut always the converted signal
+    // leaving — so every view that shows both uses these two and nothing
+    // else. v0.47.0 moved the input series from the old mint green
+    // (0xff54bda1) to an azure blue at the user's request; the meaning and
+    // every call site are unchanged, which is the point of having the token.
+    // Anything that needs "input colour" must reference seriesIn rather than
+    // writing a literal, or it silently stays behind on the next change.
+    const juce::Colour seriesIn  { 0xff4fa8dd };
     const juce::Colour seriesOut { 0xfff08ba5 };
 
     // ---- geometry (styles.css) --------------------------------------------

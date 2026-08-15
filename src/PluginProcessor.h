@@ -225,6 +225,23 @@ public:
     std::atomic<float> uiVowelH { 0.5f }, uiVowelF { 0.5f }, uiVowelConf { 0.0f };
     std::atomic<bool>  uiVowelActive { false };
 
+    // Detection readout (v0.47.0) for the VISUALIZER's detection lane, in Hz
+    // on the same axis as the spectrum above it. Republished from the
+    // engine's analysis taps for the same reason as the vowel coordinate:
+    // the getters are plain floats written on the audio thread. 0 = nothing
+    // detected (unvoiced or silent).
+    //
+    // uiFmtValid is false while the SPECTRAL LAYER is skipped, which it is
+    // unless a formant feature is on -- the formant numbers are then stale
+    // and the lane must say so rather than draw them. Do NOT "fix" this by
+    // forcing the layer on: it is a per-grain FFT, and it also rewrites the
+    // grain, so the plugin would cost more AND sound different purely
+    // because a display was open.
+    std::atomic<float> uiF0In { 0.0f }, uiF0Out { 0.0f };
+    std::atomic<float> uiFmtIn[3]  { { 0.0f }, { 0.0f }, { 0.0f } };
+    std::atomic<float> uiFmtOut[3] { { 0.0f }, { 0.0f }, { 0.0f } };
+    std::atomic<bool>  uiFmtValid { false };
+
     // ASMR readout (v0.45.0): where the source ACTUALLY is, i.e. the pad
     // position after the auto-orbit has rotated it. The pad draws from here
     // rather than from asmrx/asmry, so a running orbit is visible; with the

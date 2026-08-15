@@ -1,4 +1,4 @@
-// ui_shot.cpp — offscreen render + layout audit for the editor (v0.46.0).
+// ui_shot.cpp — offscreen render + layout audit for the editor (v0.47.0).
 //
 // Build:  cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVOXMORPH_UI_HARNESS=ON
 //         cmake --build build --target VoxMorphUiShot
@@ -663,17 +663,20 @@ int main (int argc, char** argv)
 
         VowelMeter*  vowel = nullptr;
         LevelMeters* level = nullptr;
-        SpectrumView* spec = nullptr;
+        SpectrumView*  spec = nullptr;
+        DetectionLane* lane = nullptr;
         walk (ed.get(), [&] (juce::Component* c)
         {
             if (auto* v = dynamic_cast<VowelMeter*>  (c)) if (v->isShowing()) vowel = v;
             if (auto* l = dynamic_cast<LevelMeters*> (c)) if (l->isShowing()) level = l;
             if (auto* s = dynamic_cast<SpectrumView*> (c)) if (s->isShowing()) spec = s;
+            if (auto* d = dynamic_cast<DetectionLane*> (c)) if (d->isShowing()) lane = d;
         });
         check (vowel != nullptr, "the vowel meter is on screen");
         check (level != nullptr, "the level meters are on screen");
         check (spec  != nullptr, "the spectrum is on screen");
-        if (vowel == nullptr || level == nullptr || spec == nullptr) return 1;
+        check (lane  != nullptr, "the detection lane is on screen");
+        if (vowel == nullptr || level == nullptr || spec == nullptr || lane == nullptr) return 1;
 
         // The donut row used to take 55 % of the page. The point of replacing
         // it was to hand that back to the graph, so this is asserted rather
@@ -845,6 +848,127 @@ int main (int argc, char** argv)
         }
         shoot (*ed, outDir.getChildFile ("viz_speaking.png"));
 
+        // ---- detection lane (v0.47.0) -------------------------------------
+        // The whole promise of this strip is that a marker sits at the x of
+        // the thing it names in the curve above. That is a geometric claim,
+        // so it is measured, not admired: the marker positions are read out
+        // of the rendered image, converted back to Hz through the axis, and
+        // compared with the numbers the engine actually published.
+        {
+            check (lane->getX() == spec->getX() && lane->getWidth() == spec->getWidth(),
+                   "the lane has the spectrum's exact x and width (this is what aligns them)");
+
+            const auto laneArea = ed->getLocalArea (lane, lane->getLocalBounds());
+            const auto sp = vmAxis::span (lane->getLocalBounds());
+            auto hzAt = [&] (double xLocal)
+            {
+                const double t = (xLocal - sp.getStart()) / sp.getLength();
+                return vmAxis::kLoHz * std::pow (1000.0, t);
+            };
+            // centroid of one row's markers, split into clusters: markers are
+            // 7 px wide and the four features are far apart on a log axis
+            auto rowMarkers = [&] (const juce::Image& img, float yFrac, juce::Colour want)
+            {
+                std::vector<double> hits, out;
+                const int y0 = laneArea.getY() + (int) (laneArea.getHeight() * yFrac) - 5;
+                const int y1 = y0 + 10;
+                for (int x = laneArea.getX(); x < laneArea.getRight(); ++x)
+                {
+                    int n = 0;
+                    for (int y = y0; y < y1; ++y)
+                    {
+                        const auto px = img.getPixelAt (x, y);
+                        if (std::abs (px.getRed()   - want.getRed())
+                          + std::abs (px.getGreen() - want.getGreen())
+                          + std::abs (px.getBlue()  - want.getBlue()) < 30) ++n;
+                    }
+                    if (n >= 3) hits.push_back (x);      // a marker body, not a hairline
+                }
+                for (size_t i = 0; i < hits.size();)
+                {
+                    size_t j = i;
+                    double sum = 0.0;
+                    while (j < hits.size() && hits[j] - hits[i == j ? j : j - 1] <= 2.0)
+                    { sum += hits[j]; ++j; }
+                    out.push_back (sum / (double) (j - i));
+                    i = j;
+                }
+                return out;
+            };
+
+            const auto img = render (*ed);
+            const auto inM = rowMarkers (img, 0.34f, ak::seriesIn);
+            std::printf ("  lane IN markers: %d\n", (int) inM.size());
+            for (auto x : inM)
+                std::printf ("    x=%.0f -> %.0f Hz\n", x, hzAt (x - laneArea.getX()));
+
+            // engine truth: f0 and F1-F3, as published
+            const float truth[4] = { proc.uiF0In.load(),  proc.uiFmtIn[0].load(),
+                                     proc.uiFmtIn[1].load(), proc.uiFmtIn[2].load() };
+            std::printf ("  engine says f0=%.0f F1=%.0f F2=%.0f F3=%.0f Hz\n",
+                         truth[0], truth[1], truth[2], truth[3]);
+            check (proc.uiFmtValid.load(), "formants are being tracked (AEIOU is on)");
+            check (inM.size() >= 4, "all four input markers are drawn");
+
+            // Every published feature must have a marker within 3 px of where
+            // the shared axis puts it. 3 px is about 1.7 % in frequency here,
+            // i.e. tighter than the marker is wide.
+            for (int i = 0; i < 4 && inM.size() >= 4; ++i)
+            {
+                // span() is in the lane's LOCAL coordinates (getLocalBounds()
+                // starts at 0), so the only conversion is the lane's origin
+                // in the editor -- laneArea.getX(). Adding the lane's own x
+                // within its page on top of that is a second offset for the
+                // same thing, and it showed up as every marker being a
+                // constant 15 px "wrong" while the frequencies read back off
+                // those same pixels were exact.
+                const float wantX = vmAxis::xFor (sp, truth[i]) + laneArea.getX();
+                double best = 1.0e9;
+                for (auto x : inM) best = std::min (best, std::abs (x - (double) wantX));
+                std::printf ("    %s: want x=%.0f, nearest marker %.1f px away\n",
+                             i == 0 ? "f0" : i == 1 ? "F1" : i == 2 ? "F2" : "F3", wantX, best);
+                check (best <= 3.0, juce::String ("a marker sits on the published ")
+                                      + (i == 0 ? "f0" : i == 1 ? "F1" : i == 2 ? "F2" : "F3"));
+            }
+
+            // -- and it MOVES with the conversion: +7 semitones has to push
+            //    the output f0 marker to the right of the input one, by the
+            //    ratio the axis says (a marker that never moves would pass
+            //    every static check above)
+            const float f0Before = proc.uiF0Out.load();
+            setP ("pitch", 7.0f);
+            feed (40);
+            const float f0After = proc.uiF0Out.load();
+            std::printf ("  +7 st: output f0 %.1f -> %.1f Hz (x1.498 expected)\n",
+                         f0Before, f0After);
+            check (f0After > f0Before * 1.42f && f0After < f0Before * 1.58f,
+                   "the published output f0 follows the pitch parameter");
+            // Recorded, not asserted: a +7 st shift narrows the grain (the
+            // width is capped at 1.25x the OUTPUT spacing), so the engine's
+            // envelope has fewer bins to work with and its own F2/F3 start
+            // to merge. That is the engine's reading and the lane shows it
+            // faithfully -- pinning a number on it here would be asserting
+            // the tracker, not the display.
+            std::printf ("  at +7 st the engine reads F1=%.0f F2=%.0f F3=%.0f Hz\n",
+                         proc.uiFmtIn[0].load(), proc.uiFmtIn[1].load(),
+                         proc.uiFmtIn[2].load());
+            {
+                const auto img2 = render (*ed);
+                const auto outM = rowMarkers (img2, 0.72f, ak::seriesOut);
+                const auto inM2 = rowMarkers (img2, 0.34f, ak::seriesIn);
+                check (! outM.empty() && ! inM2.empty(), "both rows still have markers");
+                if (! outM.empty() && ! inM2.empty())
+                {
+                    std::printf ("  leftmost marker: IN x=%.0f  OUT x=%.0f\n", inM2[0], outM[0]);
+                    check (outM[0] > inM2[0] + 8.0,
+                           "the OUTPUT f0 marker has moved right of the INPUT one");
+                }
+                shoot (*ed, outDir.getChildFile ("viz_lane_shifted.png"));
+            }
+            setP ("pitch", 0.0f);
+            feed (30);
+        }
+
         // ---- silence: the mix settles back to an even five ----------------
         // "No input" means SILENT BLOCKS STILL ARRIVING, which is what a host
         // does when you stop talking -- not the host stopping. Simply ceasing
@@ -917,6 +1041,33 @@ int main (int argc, char** argv)
             for (int i = 0; i < 5; ++i)
                 check (foot[i] < 8, juce::String ("bar ") + juce::String (i)
                                       + " is empty with the feature off");
+
+            // The lane has the same dependency: with no formant feature on,
+            // the engine skips its spectral layer and trackF[] is stale. The
+            // lane must drop to the f0 pair alone rather than keep drawing
+            // the last formants it saw.
+            check (! proc.uiFmtValid.load(),
+                   "the engine reports its formant analysis as not running");
+            const auto laneA = ed->getLocalArea (lane, lane->getLocalBounds());
+            int rows = 0;
+            {
+                const int y0 = laneA.getY() + (int) (laneA.getHeight() * 0.34f) - 5;
+                bool run = false;
+                for (int x = laneA.getX(); x < laneA.getRight(); ++x)
+                {
+                    int n = 0;
+                    for (int y = y0; y < y0 + 10; ++y)
+                    {
+                        const auto px = img.getPixelAt (x, y);
+                        if (std::abs (px.getRed()   - ak::seriesIn.getRed())
+                          + std::abs (px.getGreen() - ak::seriesIn.getGreen())
+                          + std::abs (px.getBlue()  - ak::seriesIn.getBlue()) < 30) ++n;
+                    }
+                    if (n >= 3) { if (! run) ++rows; run = true; } else run = false;
+                }
+            }
+            std::printf ("  lane with formants off: %d input marker(s)\n", rows);
+            check (rows == 1, "only the f0 marker is left, not stale formants");
         }
         shoot (*ed, outDir.getChildFile ("viz_off.png"));
         setP ("vamount", 60.0f);

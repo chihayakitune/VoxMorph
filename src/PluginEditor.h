@@ -193,7 +193,36 @@ private:
     unsigned onPos  = 0;      // vizPos when the taps were switched back on
 };
 
-// Spectrum visualizer: INPUT (mint) and converted OUTPUT (pink) spectra
+// The VISUALIZER's frequency axis, and the ONE place its horizontal geometry
+// lives (v0.47.0). The detection lane below the spectrum is a separate
+// component of the same width and x, and its markers only line up with the
+// curve above because both ask this for the same numbers — an inset that
+// existed only inside SpectrumView::paint would drift them apart silently,
+// and a marker that is a few pixels off the peak it names is worse than no
+// marker at all.
+namespace vmAxis
+{
+    constexpr double kLoHz = 20.0, kHiHz = 20000.0;   // 3 decades
+    constexpr float  kCardInset = 2.0f;               // card edge
+    constexpr float  kPlotInset = 10.0f;              // plot inside the card
+
+    // the x range the curve occupies, for a component of these bounds
+    inline juce::Range<float> span (juce::Rectangle<int> local)
+    {
+        const float in = kCardInset + kPlotInset;
+        return { (float) local.getX() + in, (float) local.getRight() - in };
+    }
+
+    inline float xFor (juce::Range<float> s, double hz)
+    {
+        const double t = std::log10 (juce::jmax (kLoHz, hz) / kLoHz) / 3.0;
+        return s.getStart() + s.getLength() * (float) juce::jlimit (0.0, 1.0, t);
+    }
+
+    inline bool visible (double hz) { return hz >= kLoHz && hz <= kHiHz; }
+}
+
+// Spectrum visualizer: INPUT (blue) and converted OUTPUT (pink) spectra
 // overlaid on a 20 Hz - 20 kHz log axis. Pure painter — the numbers come
 // from the shared SpectrumData.
 class SpectrumView : public juce::Component
@@ -211,7 +240,14 @@ private:
         juce::Path p;
         for (int c = 0; c < kCols; ++c)
         {
-            const float x = r.getX() + r.getWidth()  * (float) c / (float) (kCols - 1);
+            // Each column is placed at the frequency it actually analysed,
+            // through the shared axis — the same mapping the grid lines and
+            // the detection lane use. It used to be a plain c / (kCols - 1),
+            // which is the same curve stretched by one column; that is
+            // invisible on its own but it would put every marker in the lane
+            // a pixel or two off the lobe it names.
+            const float x = vmAxis::xFor ({ r.getX(), r.getRight() },
+                                          vmAxis::kLoHz * std::pow (1000.0, (double) c / (double) kCols));
             const float y = r.getY() + r.getHeight() * (kTop - v[(size_t) c]) / (kTop - kFloor);
             if (c == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
         }
@@ -226,15 +262,16 @@ private:
 
     void paint (juce::Graphics& g) override
     {
-        auto b = getLocalBounds().toFloat().reduced (2.0f);
+        auto b = getLocalBounds().toFloat().reduced (vmAxis::kCardInset);
         ak::paintCard (g, b);
 
-        auto r = b.reduced (10.0f, 10.0f);
+        auto r = b.reduced (vmAxis::kPlotInset, vmAxis::kPlotInset);
+        const auto sp = vmAxis::span (getLocalBounds());
         g.setColour (juce::Colour (0x12000000));                   // grid
         g.setFont (juce::Font (juce::FontOptions (10.0f)));
         for (double f : { 100.0, 1000.0, 10000.0 })
         {
-            const float x = r.getX() + r.getWidth() * (float) (std::log10 (f / 20.0) / 3.0);
+            const float x = vmAxis::xFor (sp, f);
             g.setColour (juce::Colour (0x12000000));
             g.drawVerticalLine ((int) x, r.getY(), r.getBottom());
             g.setColour (juce::Colour (0x66000000));
@@ -248,17 +285,266 @@ private:
             g.drawHorizontalLine ((int) y, r.getX(), r.getRight());
         }
 
-        drawCurve (g, data.in(),  r, ak::seriesIn);   // input: mint
+        drawCurve (g, data.in(),  r, ak::seriesIn);   // input: blue
         drawCurve (g, data.out(), r, ak::seriesOut);   // output: pink
 
         g.setFont (juce::Font (juce::FontOptions (11.0f)));        // legend
-        g.setColour (juce::Colour (0xff54bda1));
+        g.setColour (ak::seriesIn);
         g.drawText ("Input",  (int) r.getRight() - 110, (int) r.getY() + 2, 50, 14, juce::Justification::left);
-        g.setColour (juce::Colour (0xfff08ba5));
+        g.setColour (ak::seriesOut);
         g.drawText ("Output", (int) r.getRight() - 56,  (int) r.getY() + 2, 54, 14, juce::Justification::left);
     }
 
     const SpectrumData& data;
+};
+
+// ---------------------------------------------------------------------------
+// Detection lane, v0.47.0 — a short strip directly under the spectrum, on the
+// SAME width and the SAME frequency axis (vmAxis), so everything drawn here
+// sits at the x of the thing it describes in the curve above.
+//
+// Two rows: what came IN (blue, upper) and what is going OUT (pink, lower),
+// with a connector between each pair so the direction and size of the move
+// read at a glance. On each row:
+//   * f0        the pitch, as a diamond. Output f0 is what the grain is
+//               really emitted at, so Intonation, the Low Limit and the High
+//               Range guard are all already in it.
+//   * F1-F3     the tracked formants, as dots.
+//   * a faint harmonic comb from f0, which is what makes the picket fence in
+//     the spectrum above — input comb under the input row, output comb over
+//     the output row.
+// Plus dashed verticals for the frequency-valued PARAMETERS: Low Limit,
+// High Range Start and the 6 kHz edge Air Shine works above.
+//
+// Every number is the engine's own — republished from its analysis taps, in
+// the same way as the vowel coordinate. Nothing here re-estimates anything:
+// a second estimator that disagrees with the DSP is exactly the trap v0.28.3
+// and v0.28.4 fell into.
+//
+// The formant row is EMPTY unless the engine's spectral layer ran, because
+// then it has not measured a formant. That layer is skipped unless a formant
+// feature is on, and switching it on for the sake of a display would change
+// the CPU cost and the output. The lane says "F1-F3 not tracked" instead.
+class DetectionLane : public juce::Component, public juce::SettableTooltipClient,
+                      private juce::Timer
+{
+public:
+    explicit DetectionLane (VoxMorphProcessor& p) : proc (p)
+    {
+        setTooltip (vmTip (
+            "What the engine is detecting, on the same frequency axis as the spectrum "
+            "directly above - so a marker sits under the peak it belongs to. The upper "
+            "blue row is your voice going in, the lower pink row is the converted voice "
+            "coming out, and the sloped line between a pair shows how far that feature "
+            "moved. The diamond is the pitch f0 (the output one already includes "
+            "Intonation, Low Limit and the High Range guard) and the dots are the "
+            "formants F1-F3; the fine ticks are the harmonics of f0, which are the comb "
+            "you can see in the spectrum. The dashed verticals are your frequency "
+            "settings: Low Limit, High Range Start and the 6 kHz edge Air Shine lifts "
+            "above. F1-F3 only appear while a formant feature is running (F1-F3 Shift or "
+            "Gain, AEIOU Character, or Formant Definition) - the engine skips its "
+            "formant analysis entirely when none of them is on, and turning it on just "
+            "to draw this would cost CPU and change the sound.",
+            "エンジンがいま検出している位置を、真上のスペクトラムと同じ周波数軸で表示します"
+            "(マーカーが対応する山の真下に来ます)。上の青い行が入力、下のピンクの行が変換後で、"
+            "2つを結ぶ斜めの線がその成分の移動量です。ひし形がピッチf0(出力側はIntonation・"
+            "Low Limit・High Rangeガードを通した後の実際の値)、丸がフォルマントF1〜F3です。"
+            "細かい目盛りはf0の倍音で、スペクトラムに見える櫛状の山がこれにあたります。"
+            "破線は周波数に関わる設定値(Low Limit / High Range Start / Air Shineが効く6kHz)です。"
+            "F1〜F3は、フォルマント系の機能(F1〜F3 Shift/Gain、AEIOU Character、"
+            "Formant Definition)のいずれかが動作している間だけ表示されます。どれもオフのときは"
+            "エンジンがフォルマント解析自体を省略しており、表示のためだけに動かすとCPUが増えて"
+            "音も変わってしまうためです。"));
+        startTimerHz (30);
+    }
+
+    // the lane needs this much height to hold two rows plus its labels
+    static constexpr int kHeight = 66;
+
+private:
+    static constexpr int kN = 4;                     // f0, F1, F2, F3
+    static constexpr const char* kLbl[kN] = { "f0", "F1", "F2", "F3" };
+
+    void timerCallback() override
+    {
+        if (const int hz = vmDrawHz (proc, 30); hz != rateHz)
+        { rateHz = hz; startTimerHz (hz); }   // Performance Mode
+        if (! isShowing()) return;
+
+        const bool fv = proc.uiFmtValid.load (std::memory_order_relaxed);
+        float wantIn[kN], wantOut[kN];
+        wantIn [0] = proc.uiF0In .load (std::memory_order_relaxed);
+        wantOut[0] = proc.uiF0Out.load (std::memory_order_relaxed);
+        for (int i = 0; i < 3; ++i)
+        {
+            wantIn [i + 1] = fv ? proc.uiFmtIn [i].load (std::memory_order_relaxed) : 0.0f;
+            wantOut[i + 1] = fv ? proc.uiFmtOut[i].load (std::memory_order_relaxed) : 0.0f;
+        }
+
+        bool moved = false;
+        for (int i = 0; i < kN; ++i)
+        {
+            // A marker is live only when BOTH ends of its pair are known:
+            // drawing one end of a connector is worse than drawing neither.
+            const bool live = wantIn[i] > 20.0f && wantOut[i] > 20.0f;
+            if (live)
+            {
+                moved = glide (hzIn [i], wantIn [i]) || moved;
+                moved = glide (hzOut[i], wantOut[i]) || moved;
+            }
+            // fade rather than blink: speech is full of short unvoiced gaps,
+            // and a marker that vanishes on every consonant is unreadable
+            const float target = live ? 1.0f : 0.0f;
+            if (std::abs (target - alpha[i]) > 0.004f)
+            { alpha[i] += 0.12f * (target - alpha[i]); moved = true; }
+            else if (alpha[i] != target)
+            { alpha[i] = target; moved = true; if (target == 0.0f) { hzIn[i] = hzOut[i] = 0.0f; } }
+        }
+        if (fv != fmtValid) { fmtValid = fv; moved = true; }
+        if (moved) repaint();
+    }
+
+    // Glide in LOG frequency, so a marker moves at the same apparent speed
+    // wherever it sits on the axis — the same 40 Hz step is a third of an
+    // octave down at f0 and a rounding error up at F3. Returns whether it
+    // actually moved, so a still picture stops repainting.
+    static bool glide (float& cur, float want)
+    {
+        if (cur < 20.0f) { cur = want; return true; }
+        const float n = std::exp2 (std::log2 (cur)
+                                   + 0.35f * (std::log2 (want) - std::log2 (cur)));
+        if (std::abs (n - cur) < 0.15f) return false;
+        cur = n;
+        return true;
+    }
+
+    float param (const char* id) const
+    {
+        if (auto* v = proc.apvts.getRawParameterValue (id))
+            return v->load (std::memory_order_relaxed);
+        return 0.0f;
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced (vmAxis::kCardInset);
+        ak::paintCard (g, b);
+        const auto sp = vmAxis::span (getLocalBounds());
+        if (sp.getLength() < 80.0f || b.getHeight() < 40.0f) return;
+
+        const float yIn  = b.getY() + b.getHeight() * 0.34f;
+        const float yOut = b.getY() + b.getHeight() * 0.72f;
+
+        // ---- the frequency-valued parameters, behind everything ----------
+        {
+            const float dash[2] = { 3.0f, 3.5f };
+            auto vline = [&] (double hz, const char* name)
+            {
+                if (! vmAxis::visible (hz)) return;
+                const float x = vmAxis::xFor (sp, hz);
+                g.setColour (ak::treeLine);
+                g.drawDashedLine ({ x, b.getY() + 4.0f, x, b.getBottom() - 12.0f }, dash, 2, 1.0f);
+                g.setColour (ak::heading.withAlpha (0.65f));
+                g.setFont (ak::font (8.5f));
+                g.drawText (name, (int) x + 3, (int) b.getBottom() - 13, 74, 11,
+                            juce::Justification::left, false);
+            };
+            const float lo = param ("pitchfloor"), hi = param ("hifreq");
+            if (lo > 20.0f) vline (lo, "Low Limit");
+            if (hi > 20.0f) vline (hi, "High Range");
+            if (param ("airshine") > 0.01f) vline (6000.0, "Air Shine");
+        }
+
+        // ---- harmonic combs: the picket fence in the curve above ---------
+        auto comb = [&] (float f0, float y, float dir, juce::Colour col, float a)
+        {
+            if (f0 < 20.0f || a < 0.02f) return;
+            g.setColour (col.withAlpha (0.20f * a));
+            float prevX = -1.0e9f;
+            for (int k = 2; k <= 80; ++k)
+            {
+                const double hz = (double) f0 * k;
+                if (hz > vmAxis::kHiHz) break;
+                const float x = vmAxis::xFor (sp, hz);
+                // The log axis crowds the upper harmonics together; past the
+                // point where consecutive ticks are less than 3 px apart they
+                // stop being ticks and become a grey smear that reads as a
+                // filled band. Stop there rather than drawing a lie about
+                // how far up the comb is resolvable.
+                if (x - prevX < 3.0f) break;
+                prevX = x;
+                g.fillRect (juce::Rectangle<float> (x - 0.5f, y + dir * 6.0f, 1.0f, 4.0f));
+            }
+        };
+        comb (hzIn[0],  yIn,  1.0f, ak::seriesIn,  alpha[0]);
+        comb (hzOut[0], yOut, -1.0f, ak::seriesOut, alpha[0]);
+
+        // ---- the pairs: in marker, connector, out marker ------------------
+        for (int i = 0; i < kN; ++i)
+        {
+            if (alpha[i] < 0.02f || hzIn[i] < 20.0f || hzOut[i] < 20.0f) continue;
+            if (! vmAxis::visible (hzIn[i]) && ! vmAxis::visible (hzOut[i])) continue;
+            const float xi = vmAxis::xFor (sp, hzIn[i]);
+            const float xo = vmAxis::xFor (sp, hzOut[i]);
+            const float a  = alpha[i];
+
+            g.setGradientFill (juce::ColourGradient (ak::seriesIn .withAlpha (0.55f * a), xi, yIn,
+                                                     ak::seriesOut.withAlpha (0.55f * a), xo, yOut,
+                                                     false));
+            g.drawLine (xi, yIn + 5.0f, xo, yOut - 5.0f, 1.2f);
+
+            marker (g, xi, yIn,  ak::seriesIn,  a, i == 0);
+            marker (g, xo, yOut, ak::seriesOut, a, i == 0);
+
+            g.setColour (ak::ink.withAlpha (0.75f * a));
+            g.setFont (ak::font (9.0f, i == 0));
+            g.drawText (kLbl[i], juce::Rectangle<float> (24.0f, 11.0f)
+                                     .withCentre ({ xi, yIn - 11.0f }).toNearestInt(),
+                        juce::Justification::centred, false);
+        }
+
+        // ---- row tags, and the honest note when formants are not tracked --
+        // Both live at the far right, above 15 kHz: f0 and F1-F3 never reach
+        // there, so nothing can collide with them.
+        g.setFont (ak::font (9.0f, true));
+        g.setColour (ak::seriesIn.withAlpha (0.9f));
+        g.drawText ("IN",  (int) sp.getEnd() - 22, (int) yIn - 6, 22, 12,
+                    juce::Justification::right, false);
+        g.setColour (ak::seriesOut.withAlpha (0.9f));
+        g.drawText ("OUT", (int) sp.getEnd() - 22, (int) yOut - 6, 22, 12,
+                    juce::Justification::right, false);
+
+        if (! fmtValid)
+        {
+            g.setColour (ak::heading.withAlpha (0.75f));
+            g.setFont (ak::font (9.5f));
+            g.drawText ("F1-F3 not tracked", (int) sp.getEnd() - 152, (int) b.getY() + 3, 128, 12,
+                        juce::Justification::right, false);
+        }
+    }
+
+    // f0 is a diamond and the formants are dots, so the two kinds of reading
+    // stay apart for anyone who cannot separate the two row colours
+    static void marker (juce::Graphics& g, float x, float y, juce::Colour col,
+                        float a, bool diamond)
+    {
+        g.setColour (col.withAlpha (a));
+        if (diamond)
+        {
+            juce::Path p;
+            p.addQuadrilateral (x, y - 4.6f, x + 4.6f, y, x, y + 4.6f, x - 4.6f, y);
+            g.fillPath (p);
+        }
+        else
+            g.fillEllipse (juce::Rectangle<float> (7.0f, 7.0f).withCentre ({ x, y }));
+    }
+
+    VoxMorphProcessor& proc;
+    int   rateHz = 30;   // current timer rate; Performance Mode lowers it
+    float hzIn[kN]  = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float hzOut[kN] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float alpha[kN] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    bool  fmtValid = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -1285,7 +1571,7 @@ private:
 // a dead channel is the failure you actually want to catch — a single summed
 // bar hides it.
 //
-// Three states in one lamp: dark = silence, mint = signal, pink = the channel
+// Three states in one lamp: dark = silence, blue = signal, pink = the channel
 // touched 0 dBFS. The pink LATCHES for a moment: a clip is a handful of
 // samples and would be over before you looked up.
 class OutputLamps : public juce::Component, public juce::SettableTooltipClient,
@@ -1296,12 +1582,12 @@ public:
     {
         setTooltip (vmTip (
             "The signal actually leaving VoxMorph, per channel (after Mute, Output "
-            "Gain, the ASMR position and any Post FX). Dark = silence, mint = sound "
+            "Gain, the ASMR position and any Post FX). Dark = silence, blue = sound "
             "is going out, and pink means that channel hit 0 dBFS and may be "
             "clipping - lower Output Gain. Pink stays lit for a moment so a brief "
             "clip cannot slip past.",
             "VoxMorphから実際に出ている音を左右それぞれ表示します(Mute・Output Gain・"
-            "ASMR位置・Post FXをすべて通過した後)。消灯=無音、ミント=出力あり、"
+            "ASMR位置・Post FXをすべて通過した後)。消灯=無音、青=出力あり、"
             "ピンクはそのチャンネルが0dBFSに達した状態で音が割れる可能性があります"
             "(Output Gainを下げてください)。ピンクは一瞬のクリップを見逃さないよう"
             "少しの間点灯し続けます。"));
@@ -1479,8 +1765,8 @@ class ProfileGraph : public juce::Component
 {
 public:
     // series identity — colour AND glyph are set per series, so viewers who
-    // can't tell mint from yellow can still tell Current from Target (spec 4.4)
-    const VoiceProfile* you       = nullptr;   // Current  = mint, filled dot
+    // can't tell blue from yellow can still tell Current from Target (spec 4.4)
+    const VoiceProfile* you       = nullptr;   // Current  = blue, filled dot
     const VoiceProfile* target    = nullptr;   // Target   = pastel yellow, ring
     const VoiceProfile* estimated = nullptr;   // Estimated= violet, diamond, dashed
     const VoiceProfile* conv      = nullptr;   // Matched  = pink, double concentric
@@ -1505,8 +1791,8 @@ public:
                         (int) x + 3, (int) r.getBottom() - 13, 30, 12, juce::Justification::left);
         }
 
-        const juce::Colour cy (0xff54bda1), ct (0xffdfb545), ce (0xffa889f4),
-                           cc (0xfff08ba5);
+        const juce::Colour cy = ak::seriesIn, ct (0xffdfb545), ce (0xffa889f4),
+                           cc = ak::seriesOut;
         // Correction ◤◢ hatch first, UNDER the curves (spec 4.5): draws a
         // diagonal-stripe band between Current and Estimated formant
         // positions for each of F1/F2/F3. Only when both series are valid.
@@ -1532,8 +1818,8 @@ public:
                 g.drawText (name, (int) x + 3, (int) r.getBottom() - 26, 70, 12,
                             juce::Justification::left);
             };
-            vline (param ("hifreq"),     juce::Colour (0xff54bda1), "High Range");
-            vline (param ("pitchfloor"), juce::Colour (0xfff08ba5), "Floor");
+            vline (param ("hifreq"),     ak::seriesIn,  "High Range");
+            vline (param ("pitchfloor"), ak::seriesOut, "Floor");
         }
 
         // legend: label + tiny glyph, so viewers who can't tell colours apart
@@ -3130,7 +3416,7 @@ public:
         deleteBtn.onClick = [this] { deleteSelected(); };
         addAndMakeVisible (deleteBtn);
 
-        // preview graph: a standard reference voice (mint) vs how this
+        // preview graph: a standard reference voice (blue) vs how this
         // preset's settings would transform it (pink) — input-independent
         pGraph.you  = &pvBase;
         pGraph.conv = &pvConv;
@@ -3144,7 +3430,7 @@ public:
         pvLbl.setFont (juce::Font (juce::FontOptions (11.0f)));
         pvLbl.setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
         pvLbl.setText (juce::String::fromUTF8 (
-            "プレビュー: 標準的な声(ミント)がこのプリセットでどう変わるか(ピンク)のイメージ。"),
+            "プレビュー: 標準的な声(青)がこのプリセットでどう変わるか(ピンク)のイメージ。"),
             juce::dontSendNotification);
         addAndMakeVisible (pvLbl);
 
@@ -3809,7 +4095,7 @@ private:
 // it: binaural cues, air absorption, a room, width and an auto-orbit.
 //
 // Colours come from the ANOKOE palette only — ak::seriesOut (pink) is the
-// source, ak::seriesIn (mint) is the listener, and the dish is the same
+// source, ak::seriesIn (blue) is the listener, and the dish is the same
 // gradient and guide-ring tone the VISUALIZER's panels use, so the two pages
 // read as one instrument. The old pad had its own mint-green disc and rings
 // that appear nowhere else in the app.
@@ -6540,6 +6826,7 @@ private:
     {
         specData.addView (&spectrum);
         vizPage.addAndMakeVisible (spectrum);
+        vizPage.addAndMakeVisible (detect);
         vizPage.addAndMakeVisible (vowel);
         vizPage.addAndMakeVisible (levels);
 
@@ -6551,10 +6838,10 @@ private:
         vizNote.setColour (juce::Label::textColourId, ak::heading.withAlpha (0.9f));
         vizNote.setJustificationType (juce::Justification::topLeft);
         vizNote.setText (juce::String::fromUTF8 (
-            "入力(ミント)と変換後(ピンク)を重ねたスペクトラムです。表示だけの機能で、"
+            "入力(青)と変換後(ピンク)を重ねたスペクトラムです。表示だけの機能で、"
             "音には一切影響しません。\n"
-            "下段は、いま聞こえている母音の割合(声を止めると約1秒で均等に戻ります)と、"
-            "入出力レベルのL/Rです。"),
+            "すぐ下の細い帯は同じ周波数軸で、検出したピッチ(ひし形)とフォルマント(丸)の"
+            "入力→出力の位置を示します。最下段は母音の割合と入出力レベルのL/Rです。"),
             juce::dontSendNotification);
         vizPage.addAndMakeVisible (vizNote);
 
@@ -6570,6 +6857,11 @@ private:
             // graph bigger, not stretch two rows of bars.
             auto strip = r.removeFromBottom (juce::jlimit (124, 152, r.getHeight() / 4));
             r.removeFromBottom (ak::kGap);
+            // The lane must keep the spectrum's EXACT x and width — that is
+            // what makes vmAxis line the two up — so it is taken off the
+            // bottom of the same rectangle and nothing insets it sideways.
+            detect.setBounds (r.removeFromBottom (DetectionLane::kHeight));
+            r.removeFromBottom (4);
             spectrum.setBounds (r);
 
             const int vw = juce::jlimit (230, 430, strip.getWidth() * 38 / 100);
@@ -6645,7 +6937,9 @@ private:
     void flashFooter (const juce::String& msg)
     {
         footer.setText (msg, juce::dontSendNotification);
-        footer.setColour (juce::Label::textColourId, juce::Colour (0xff5a9c7f));
+        // v0.47.0: was a confirmation green, the last green left in the
+        // palette after the input series moved to blue
+        footer.setColour (juce::Label::textColourId, ak::seriesIn.darker (0.35f));
         startTimer (2600);
     }
 
@@ -6753,10 +7047,11 @@ private:
     // VISUALIZER page
     FnComponent  vizPage;
     juce::Label  vizHead, vizNote;
-    SpectrumData specData { proc };
-    SpectrumView spectrum { specData };
-    VowelMeter   vowel    { proc };
-    LevelMeters  levels   { proc };
+    SpectrumData  specData { proc };
+    SpectrumView  spectrum { specData };
+    DetectionLane detect   { proc };
+    VowelMeter    vowel    { proc };
+    LevelMeters   levels   { proc };
 
     // other pages
     MatchingPanel matchingPanel { proc };
