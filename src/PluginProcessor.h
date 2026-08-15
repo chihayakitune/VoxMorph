@@ -165,8 +165,8 @@ public:
     // it produces is identical with the mode on and off.
     //
     // What it does: lowers the refresh rate of purely visual work (spectrum
-    // analysis, donuts, meters) so the message thread competes less with the
-    // audio callback, and — standalone only — unlocks the device buffer
+    // analysis, vowel meter, level meters) so the message thread competes
+    // less with the audio callback, and — standalone only — unlocks the device buffer
     // helper in Audio Settings. Everything else in this pass (the zero-value
     // DSP bypasses) is unconditional and applies in every mode, because a
     // bypass that produces identical samples has no reason to be optional.
@@ -215,7 +215,7 @@ public:
     // between sessions, not between machines.
     juce::String characterImagePath;
 
-    // AEIOU vowel readout (v0.30.2) for the vowel donut in the VISUALIZER.
+    // AEIOU vowel readout (v0.30.2) for the vowel meter in the VISUALIZER.
     // These are the engine's OWN vowel coordinate — the same numbers the
     // AEIOU Character warp acts on — republished through atomics because the
     // engine's getters are not safe to call from the message thread.

@@ -674,7 +674,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     else
         engine.process (m, m, n);
 
-    // AEIOU vowel readout for the UI donut. The engine only tracks vowels
+    // AEIOU vowel readout for the UI vowel meter. The engine only tracks vowels
     // while the AEIOU Character warp is on (it is what drives the tracking),
     // so publish that flag too and let the UI show an inactive state rather
     // than drawing values that stopped updating.

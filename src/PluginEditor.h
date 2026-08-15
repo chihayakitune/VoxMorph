@@ -59,11 +59,12 @@ inline int vmDrawHz (const VoxMorphProcessor& p, int baseHz)
              ? juce::jmax (2, (baseHz * 2) / 3) : baseHz;
 }
 
-// Shared spectrum analysis (v0.30.1). One FFT pair per frame feeds BOTH the
-// linear SpectrumView and the radial donut view — each frame is two
-// 4096-point FFTs, so letting the donut analyse separately would double that
-// cost for identical numbers. Views register themselves and are repainted
-// after each frame; the analysis is skipped entirely while none is on screen.
+// Shared spectrum analysis (v0.30.1). Each frame is two 4096-point FFTs, so
+// any view that wants the numbers registers itself here instead of analysing
+// its own copy. v0.30.1 - v0.45.0 had a second (radial) view sharing them;
+// only SpectrumView is left, and the registration stays because the cost that
+// motivated it has not changed — and because the gate below is what tells the
+// audio thread to stop filling the taps once nothing is on screen.
 class SpectrumData : private juce::Timer
 {
 public:
@@ -261,153 +262,10 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Radial ("donut") visualizer, v0.30.1 — the same INPUT/OUTPUT spectra as
-// SpectrumView wrapped around a circle. Frequency runs clockwise from the top
-// and the radius is the level (inner edge = the -66 dB floor, outer edge =
-// +6 dB), so a voice shows up as a star whose points are its formants.
-//
-// Two deliberate differences from the linear graph next to it, both needed to
-// make a ~150 px circle readable (checked against rendered test spectra):
-//  * Span is 60 Hz - 12 kHz, not 20 Hz - 20 kHz. On a log axis the empty
-//    20-110 Hz region would eat the first QUARTER of the circle and leave the
-//    formants squashed into the bottom half.
-//  * The 220 analysis columns are averaged down to 72 angular points and
-//    drawn as a smooth closed curve. Wrapping all 220 round a ~50 px annulus
-//    turns every single harmonic into a needle instead of a lobe.
-class RadialSpectrumView : public juce::Component, public juce::SettableTooltipClient
-{
-public:
-    explicit RadialSpectrumView (const SpectrumData& d) : data (d)
-    {
-        setTooltip (vmTip (
-            "The spectrum from the graph on the left, wrapped around a circle. Frequency "
-            "runs clockwise from 60 Hz at the top through 12 kHz, and the distance from "
-            "the centre is the level (inner edge -66 dB, outer edge +6 dB). Mint = your "
-            "input, pink = the converted output. The points of the star are the formants "
-            "of your voice, so the two shapes show at a glance how far the conversion "
-            "moved them.",
-            "左のグラフと同じスペクトラムを円形に巻いたものです。周波数は真上の60Hzから"
-            "時計回りに12kHzまで進み、中心からの距離がレベルを表します(内側=-66dB、"
-            "外側=+6dB)。ミントが入力、ピンクが変換後の出力です。星のとがった部分が声の"
-            "フォルマントなので、2つの形を見比べると変換でどれだけ動いたかが一目で分かります。"));
-    }
-
-private:
-    static constexpr int    kPts  = 72;                  // angular points
-    static constexpr double kLoHz = 60.0, kHiHz = 12000.0;
-
-    // SpectrumData column index of a frequency on its 20 Hz - 20 kHz log grid
-    static int colFor (double hz)
-    {
-        return juce::jlimit (0, SpectrumData::kCols,
-                   (int) std::lround (SpectrumData::kCols * std::log10 (hz / 20.0) / 3.0));
-    }
-
-    // columns -> kPts angular points: mean dB per bucket, then a circular
-    // 3-tap smooth (the averaging is what turns needles into lobes)
-    static void reduce (const std::vector<float>& v, float* outPts)
-    {
-        const int lo = colFor (kLoHz), hi = colFor (kHiHz);
-        const int span = juce::jmax (kPts, hi - lo);
-        float acc[kPts];
-        for (int i = 0; i < kPts; ++i)
-        {
-            const int c0 = lo + i * span / kPts;
-            const int c1 = juce::jmax (c0 + 1, lo + (i + 1) * span / kPts);
-            double s = 0.0;  int n = 0;
-            for (int c = c0; c < c1 && c < (int) v.size(); ++c) { s += v[(size_t) c]; ++n; }
-            acc[i] = n > 0 ? (float) (s / n) : SpectrumData::kFloor;
-        }
-        for (int i = 0; i < kPts; ++i)
-            outPts[i] = 0.25f * acc[(i + kPts - 1) % kPts]
-                      + 0.50f * acc[i]
-                      + 0.25f * acc[(i + 1) % kPts];
-    }
-
-    static float radiusFor (float db, float rIn, float rOut)
-    {
-        const float t = juce::jlimit (0.0f, 1.0f,
-            (db - SpectrumData::kFloor) / (SpectrumData::kTop - SpectrumData::kFloor));
-        // 6 % margin so a silent band rests just clear of the centre puck
-        return rIn + (rOut - rIn) * (0.06f + 0.94f * t);
-    }
-
-    static juce::Rectangle<float> circle (juce::Point<float> c, float r)
-    {
-        return juce::Rectangle<float> (r * 2.0f, r * 2.0f).withCentre (c);
-    }
-
-    void drawRing (juce::Graphics& g, const std::vector<float>& v, juce::Point<float> c,
-                   float rIn, float rOut, juce::Colour col, float thick) const
-    {
-        if ((int) v.size() < kPts) return;
-        float db[kPts];
-        reduce (v, db);
-
-        juce::Point<float> pt[kPts];
-        for (int i = 0; i < kPts; ++i)
-        {
-            const float a = juce::MathConstants<float>::twoPi * (float) i / (float) kPts
-                          - juce::MathConstants<float>::halfPi;      // 0 = top
-            const float r = radiusFor (db[i], rIn, rOut);
-            pt[i] = { c.x + r * std::cos (a), c.y + r * std::sin (a) };
-        }
-
-        // smooth closed curve: quadratic segments anchored at the midpoints
-        // with each sample as the control point — wraps seamlessly where
-        // 12 kHz meets 60 Hz again at the top
-        auto mid = [&] (int i, int j) { return (pt[i] + pt[j]) * 0.5f; };
-        juce::Path p;
-        p.startNewSubPath (mid (kPts - 1, 0));
-        for (int i = 0; i < kPts; ++i)
-            p.quadraticTo (pt[i], mid (i, (i + 1) % kPts));
-        p.closeSubPath();
-
-        g.setColour (col);
-        g.strokePath (p, juce::PathStrokeType (thick, juce::PathStrokeType::curved,
-                                                      juce::PathStrokeType::rounded));
-    }
-
-    void paint (juce::Graphics& g) override
-    {
-        auto b = getLocalBounds().toFloat().reduced (2.0f);
-        ak::paintCard (g, b);
-
-        const auto  c    = b.getCentre();
-        const float rOut = 0.5f * juce::jmin (b.getWidth(), b.getHeight()) - 9.0f;
-        if (rOut < 26.0f) return;                       // too small to be readable
-        const float rIn  = rOut * 0.30f;                // the donut hole
-
-        // the dish the curves sit in: a soft raised disc
-        g.setGradientFill (juce::ColourGradient (juce::Colour (0xfffafcfd), c.x, c.y - rOut,
-                                                 juce::Colour (0xffeceff3), c.x, c.y + rOut, false));
-        g.fillEllipse (circle (c, rOut));
-        g.setColour (juce::Colour (0x14000000));
-        g.drawEllipse (circle (c, rOut), 1.0f);
-
-        g.setColour (juce::Colour (0x12000000));        // level guide rings
-        for (float db : { -48.0f, -24.0f, 0.0f })
-            g.drawEllipse (circle (c, radiusFor (db, rIn, rOut)), 0.8f);
-
-        drawRing (g, data.in(),  c, rIn, rOut, juce::Colour (0xff54bda1).withAlpha (0.8f), 1.2f);
-        drawRing (g, data.out(), c, rIn, rOut, juce::Colour (0xfff08ba5),                  1.9f);
-
-        // centre puck: covers the crowded low-radius area and gives the donut
-        // its raised look
-        juce::Path hole;
-        hole.addEllipse (circle (c, rIn));
-        juce::DropShadow (juce::Colour (0x3a000000), 11, { 0, 3 }).drawForPath (g, hole);
-        g.setGradientFill (juce::ColourGradient (juce::Colours::white,       c.x, c.y - rIn,
-                                                 juce::Colour (0xffe7ebef),  c.x, c.y + rIn, false));
-        g.fillPath (hole);
-    }
-
-    const SpectrumData& data;
-};
-
-// ---------------------------------------------------------------------------
-// AEIOU vowel-mix donut, v0.30.2 — a true donut chart whose five arcs are
-// proportional to how much /a/ /i/ /u/ /e/ /o/ the engine currently hears.
+// AEIOU vowel meter, v0.46.0 — five bars whose heights are how much /a/ /i/
+// /u/ /e/ /o/ the engine currently hears. (v0.30.2 - v0.45.0 drew this as a
+// donut chart; the bars say the same thing in a third of the height and read
+// without a legend.)
 //
 // The numbers are NOT re-estimated here. They are the engine's own vowel
 // coordinate (height = openness from F1, frontness = log F2/F1) run through
@@ -419,11 +277,17 @@ private:
 // Consequence: the engine only tracks vowels while AEIOU Character is ON with
 // Amount > 0 (that feature is what drives the tracking). With it off there is
 // no data, so the chart says so instead of drawing stale values.
-class VowelDonut : public juce::Component, public juce::SettableTooltipClient,
+//
+// v0.46.0: with no voice arriving the mix now GLIDES BACK TO NEUTRAL (an even
+// fifth each) over about a second, the same way the spectrum falls back to
+// its floor. Until now it froze on the last shape and only dimmed, and a
+// frozen shape at 22 % alpha still reads as a reading — of a vowel nobody is
+// saying.
+class VowelMeter : public juce::Component, public juce::SettableTooltipClient,
                    private juce::Timer
 {
 public:
-    explicit VowelDonut (VoxMorphProcessor& p) : proc (p)
+    explicit VowelMeter (VoxMorphProcessor& p) : proc (p)
     {
         setTooltip (vmTip (
             "How much of each Japanese vowel the engine hears in your voice right now, "
@@ -431,32 +295,31 @@ public:
             "feature uses to pick its per-vowel formant offsets, so it shows you why a "
             "Character is doing what it is doing. It needs AEIOU Character switched on "
             "(FORMANT section) with Amount above 0 - the vowel tracking is part of that "
-            "feature and does not run otherwise. The chart fades while you are not "
-            "speaking, because the estimate is only meaningful on voiced sound.",
+            "feature and does not run otherwise. When you stop speaking the bars settle "
+            "back to an even mix over about a second, because the estimate is only "
+            "meaningful on voiced sound.",
             "いま話している声に含まれる母音(あいうえお)の割合です。AEIOU Character機能が"
             "母音ごとのフォルマント補正を選ぶのに使っている値そのものなので、Characterが"
             "なぜその効き方をしているのかが分かります。表示にはFORMANTセクションの"
             "AEIOU Characterがオンで、Amountが0より大きいことが必要です(母音の推定自体が"
-            "この機能の一部で、オフのときは動作しません)。声を出していない間は推定が"
-            "無意味なため薄く表示されます。"));
+            "この機能の一部で、オフのときは動作しません)。声を出すのをやめると、推定が"
+            "無意味になるため約1秒かけて均等(ニュートラル)へ戻ります。"));
         startTimerHz (30);
     }
 
 private:
     static constexpr int kV = 5;                                  // a i u e o
     static constexpr const char* kLbl[kV] = { "A", "I", "U", "E", "O" };
-
-    static juce::Colour colourFor (int i)
-    {
-        static const juce::Colour c[kV] = {
-            juce::Colour (0xfff08ba5),   // A  pink   (matches the output curve)
-            juce::Colour (0xff7999db),   // I  mint   (matches the input curve)
-            juce::Colour (0xffa79ee0),   // U  lavender
-            juce::Colour (0xffe3a63c),   // E  amber
-            juce::Colour (0xff6fb2dc)    // O  sky
-        };
-        return c[juce::jlimit (0, kV - 1, i)];
-    }
+    static constexpr float kNeutral = 1.0f / (float) kV;   // "nothing to say"
+    // A bar is full at this share. Even an unmistakable vowel rarely takes
+    // much more than 0.6 of the anchor weight, so scaling to 1.0 would park
+    // every bar in the bottom third and waste the panel.
+    static constexpr float kFull = 0.62f;
+    // A vowel counts as dominant once it is this far clear of an even mix.
+    // Without the margin the chip names a "winner" out of rounding noise
+    // while the bars are all sitting at neutral — "A 21 %" out of five
+    // vowels is not a reading, it is the absence of one.
+    static constexpr float kCalled = kNeutral + 0.08f;
 
     void timerCallback() override
     {
@@ -468,227 +331,195 @@ private:
         const float conf = proc.uiVowelConf  .load (std::memory_order_relaxed);
         const bool  good = live && conf > 0.02f;
 
+        float w[kV];
         if (good)
-        {
-            float w[kV];
             VowelAdaptiveWarp::anchorWeights (proc.uiVowelH.load (std::memory_order_relaxed),
                                               proc.uiVowelF.load (std::memory_order_relaxed), w);
-            for (int i = 0; i < kV; ++i)
-                sm[i] += 0.22f * (w[i] - sm[i]);      // glide, ~150 ms
+        else
+            for (int i = 0; i < kV; ++i) w[i] = kNeutral;
+
+        // rising: ~150 ms, fast enough to follow running speech.
+        // falling back to neutral: ~1.1 s, slow enough to read as settling
+        // rather than as the chart being switched off.
+        const float k = good ? 0.22f : 0.030f;
+        bool moved = false;
+        for (int i = 0; i < kV; ++i)
+        {
+            if (std::abs (w[i] - sm[i]) > 0.0015f) { sm[i] += k * (w[i] - sm[i]); moved = true; }
+            else                                     sm[i] = w[i];
         }
-        // hold the last mix while silent, but fade it out so a frozen shape is
-        // never mistaken for a live reading
-        fade   += 0.15f * ((good ? 1.0f : 0.22f) - fade);
-        active  = live;
-        repaint();
+
+        const float fadeTo = good ? 1.0f : 0.55f;
+        if (std::abs (fadeTo - fade) > 0.002f) { fade += 0.15f * (fadeTo - fade); moved = true; }
+        else                                     fade = fadeTo;
+
+        if (active != live) { active = live; moved = true; }
+        if (moved) repaint();
     }
 
     void paint (juce::Graphics& g) override
     {
         auto b = getLocalBounds().toFloat().reduced (2.0f);
         ak::paintCard (g, b);
-
-        const auto  c    = b.getCentre();
-        const float rOut = 0.5f * juce::jmin (b.getWidth(), b.getHeight()) - 9.0f;
-        if (rOut < 26.0f) return;
-        const float rIn  = rOut * 0.52f;              // wider hole: this is a
-        const auto  box  = juce::Rectangle<float> (rOut * 2.0f, rOut * 2.0f).withCentre (c);
-
-        g.setGradientFill (juce::ColourGradient (juce::Colour (0xfffafcfd), c.x, c.y - rOut,
-                                                 juce::Colour (0xffeceff3), c.x, c.y + rOut, false));
-        g.fillEllipse (box);
-        g.setColour (juce::Colour (0x14000000));
-        g.drawEllipse (box, 1.0f);
-
-        if (! active)
-        {
-            drawPuck (g, c, rIn);          // puck FIRST — the message sits on top
-            g.setColour (juce::Colour (0xff8f9ab5));
-            g.setFont (juce::Font (juce::FontOptions (10.5f)));
-            g.drawFittedText ("AEIOU Character\nis off",
-                              box.toNearestInt(), juce::Justification::centred, 2);
-            return;
-        }
+        auto r = b.reduced (14.0f, 10.0f);
+        if (r.getWidth() < 90.0f || r.getHeight() < 60.0f) return;
 
         float sum = 0.0f;
         for (int i = 0; i < kV; ++i) sum += juce::jmax (0.0f, sm[i]);
-        if (sum <= 1.0e-6f) { drawPuck (g, c, rIn); return; }
+        if (sum <= 1.0e-6f) sum = 1.0f;
+        int top = 0;
+        for (int i = 1; i < kV; ++i) if (sm[i] > sm[top]) top = i;
+        const float topShare = juce::jmax (0.0f, sm[top]) / sum;
+        const bool  called   = active && topShare > kCalled;
 
-        const float twoPi = juce::MathConstants<float>::twoPi;
-        const float gap   = 0.018f;                   // radians between arcs
-        float a0 = 0.0f;                              // JUCE: 0 = top, clockwise
-        int   top = 0;
-        for (int i = 0; i < kV; ++i)
+        // ---- heading row: the panel's name, and the winner as a chip ------
+        auto head = r.removeFromTop (16.0f);
+        g.setColour (ak::headBlue);
+        g.setFont (ak::font (11.5f, true));
+        g.drawText ("VOWEL MIX", head.removeFromLeft (head.getWidth() - 62.0f).toNearestInt(),
+                    juce::Justification::centredLeft, false);
+        if (called)
         {
-            const float share = juce::jmax (0.0f, sm[i]) / sum;
-            const float a1    = a0 + share * twoPi;
-            if (share > sm[top] / sum) top = i;
-
-            if (a1 - a0 > gap * 2.0f)
-            {
-                juce::Path seg;
-                seg.addPieSegment (box, a0 + gap, a1 - gap, rIn / rOut);
-                g.setColour (colourFor (i).withMultipliedAlpha (fade));
-                g.fillPath (seg);
-
-                // vowel letter on the arc, once the arc is wide enough to hold it
-                if (share > 0.085f)
-                {
-                    const float am = 0.5f * (a0 + a1);
-                    const float rm = 0.5f * (rIn + rOut);
-                    const juce::Point<float> lp (c.x + rm * std::sin (am),
-                                                 c.y - rm * std::cos (am));
-                    g.setColour (juce::Colours::white.withMultipliedAlpha (fade));
-                    g.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
-                    g.drawText (kLbl[i], juce::Rectangle<float> (18.0f, 14.0f).withCentre (lp)
-                                                                             .toNearestInt(),
-                                juce::Justification::centred);
-                }
-            }
-            a0 = a1;
+            auto chip = head.removeFromRight (58.0f).reduced (0.0f, 1.0f);
+            g.setColour (ak::seriesOut.withMultipliedAlpha (fade));
+            g.fillRoundedRectangle (chip, chip.getHeight() * 0.5f);
+            g.setColour (juce::Colours::white.withMultipliedAlpha (juce::jmax (0.7f, fade)));
+            g.setFont (ak::font (10.0f, true));
+            g.drawText (juce::String (kLbl[top]) + "  "
+                          + juce::String (juce::roundToInt (topShare * 100.0f)) + " %",
+                        chip.toNearestInt(), juce::Justification::centred, false);
         }
 
-        drawPuck (g, c, rIn);
+        r.removeFromTop (7.0f);
+        auto letters = r.removeFromBottom (14.0f);
+        auto lane    = r;
+        if (lane.getHeight() < 20.0f) return;
 
-        // dominant vowel + its share in the hole
-        const float topShare = juce::jmax (0.0f, sm[top]) / sum;
-        g.setColour (ak::ink.withMultipliedAlpha (juce::jmax (0.35f, fade)));
-        g.setFont (juce::Font (juce::FontOptions (juce::jmin (22.0f, rIn * 0.9f),
-                                                  juce::Font::bold)));
-        g.drawText (kLbl[top],
-                    juce::Rectangle<float> (rIn * 1.6f, rIn * 0.95f)
-                        .withCentre ({ c.x, c.y - rIn * 0.20f }).toNearestInt(),
-                    juce::Justification::centred);
-        g.setColour (juce::Colour (0xff8f9ab5));
-        g.setFont (juce::Font (juce::FontOptions (juce::jmin (11.0f, rIn * 0.42f))));
-        g.drawText (juce::String (juce::roundToInt (topShare * 100.0f)) + "%",
-                    juce::Rectangle<float> (rIn * 1.6f, rIn * 0.6f)
-                        .withCentre ({ c.x, c.y + rIn * 0.44f }).toNearestInt(),
-                    juce::Justification::centred);
-    }
+        // ---- the five bars ------------------------------------------------
+        const float cellW = lane.getWidth() / (float) kV;
+        const float barW  = juce::jlimit (10.0f, 26.0f, cellW - 12.0f);
+        for (int i = 0; i < kV; ++i)
+        {
+            const float cx = lane.getX() + cellW * ((float) i + 0.5f);
+            const auto track = juce::Rectangle<float> (barW, lane.getHeight())
+                                   .withCentre ({ cx, lane.getCentreY() });
+            const float rad = barW * 0.5f;
 
-    static void drawPuck (juce::Graphics& g, juce::Point<float> c, float rIn)
-    {
-        juce::Path hole;
-        hole.addEllipse (juce::Rectangle<float> (rIn * 2.0f, rIn * 2.0f).withCentre (c));
-        juce::DropShadow (juce::Colour (0x3a000000), 11, { 0, 3 }).drawForPath (g, hole);
-        g.setGradientFill (juce::ColourGradient (juce::Colours::white,      c.x, c.y - rIn,
-                                                 juce::Colour (0xffe7ebef), c.x, c.y + rIn, false));
-        g.fillPath (hole);
+            g.setColour (ak::valueFill);
+            g.fillRoundedRectangle (track, rad);
+            g.setColour (ak::valueLine);
+            g.drawRoundedRectangle (track.reduced (0.5f), rad, 1.0f);
+
+            // With the feature off nothing is measuring a vowel, so the bars
+            // are left EMPTY rather than parked at a neutral fifth each: a
+            // filled bar is a reading, and there is no reading to show.
+            const float t = juce::jlimit (0.0f, 1.0f, juce::jmax (0.0f, sm[i]) / kFull);
+            if (active && t > 0.02f)
+            {
+                // A floor is needed because a rounded fill shorter than its
+                // own cap radius degenerates into a sliver. Keep it at HALF
+                // the bar width, not the full width: at a full width a 6 %
+                // vowel was drawn the same height as a 30 % one (measured
+                // 0.29 of the lane against a true 0.10), which is the chart
+                // lying about the reading it exists to show.
+                const float h = juce::jmax (barW * 0.5f, track.getHeight() * t);
+                const auto  fill = track.withTop (track.getBottom() - h);
+                const bool  win  = called && i == top;
+                g.setColour ((win ? ak::seriesOut : ak::seriesIn)
+                                 .withMultipliedAlpha (win ? fade : 0.55f + 0.45f * fade));
+                g.fillRoundedRectangle (fill, rad);
+            }
+
+            g.setColour (called && i == top ? ak::ink : ak::heading.withAlpha (0.85f));
+            g.setFont (ak::font (11.0f, called && i == top));
+            g.drawText (kLbl[i], juce::Rectangle<float> (cellW, letters.getHeight())
+                                     .withCentre ({ cx, letters.getCentreY() }).toNearestInt(),
+                        juce::Justification::centred, false);
+        }
+
+        // ---- the feature is off: say so, on the empty tracks --------------
+        if (! active)
+        {
+            auto plate = juce::Rectangle<float> (juce::jmin (lane.getWidth(), 200.0f), 30.0f)
+                             .withCentre (lane.getCentre());
+            g.setColour (juce::Colour (0xe8ffffff));
+            g.fillRoundedRectangle (plate, 10.0f);
+            g.setColour (ak::line);
+            g.drawRoundedRectangle (plate.reduced (0.5f), 10.0f, 1.0f);
+            g.setColour (ak::heading);
+            g.setFont (ak::font (11.0f));
+            g.drawFittedText ("AEIOU Character is off", plate.toNearestInt(),
+                              juce::Justification::centred, 2);
+        }
     }
 
     VoxMorphProcessor& proc;
     int rateHz = 30;   // current timer rate; Performance Mode lowers it
-    float sm[kV] = { 0.2f, 0.2f, 0.2f, 0.2f, 0.2f };
-    float fade = 0.22f;
+    float sm[kV] = { kNeutral, kNeutral, kNeutral, kNeutral, kNeutral };
+    float fade = 0.55f;
     bool  active = false;
 };
 
 // ---------------------------------------------------------------------------
-// Level rings, v0.30.3 (re-laid out v0.30.4) — the four level meters as one
-// donut, split by CHANNEL SIDE:
-//
-//        left half = L            right half = R
-//        outer lane = input       outer lane = input      (mint)
-//        inner lane = output      inner lane = output     (pink)
-//
-// Both halves start at the bottom and rise to 12 o'clock, so the top of the
-// dial is the top of the scale on both sides and the two halves are mirror
-// images — a glance at the symmetry tells you the L/R balance.
+// Level meters, v0.46.0 — the four levels as four slim horizontal bars, which
+// is the same shape the OUTPUT card's volume bar uses on MAIN. (v0.30.3 -
+// v0.45.0 wrapped them round a dial split L | R; it was handsome and it cost
+// a square panel to say what four 16 px rows say.)
 //
 // Input is measured before the noise gate and the Pre FX (so you can see your
 // mic even while the gate has it shut); output is what actually leaves the
-// plugin. With a mono bus the two halves read the same.
-class LevelRingsDonut : public juce::Component, public juce::SettableTooltipClient,
-                        private juce::Timer
+// plugin. With a mono bus the two channels of a pair read the same.
+class LevelMeters : public juce::Component, public juce::SettableTooltipClient,
+                    private juce::Timer
 {
 public:
-    explicit LevelRingsDonut (VoxMorphProcessor& p) : proc (p)
+    explicit LevelMeters (VoxMorphProcessor& p) : proc (p)
     {
         setTooltip (vmTip (
-            "All four level meters in one dial, split by channel: the LEFT half is the "
-            "left channel and the RIGHT half is the right channel, each with two lanes - "
-            "the outer lane is the input (mint) and the inner lane is the converted "
-            "output (pink). Both halves rise from the bottom to 12 o'clock, which is the "
-            "top of the scale, so the L and R halves are mirror images and any imbalance "
-            "shows up as asymmetry. The scale is -60 to +6 dB with a red zone above "
-            "0 dBFS; the small tick is the recent peak and turns red on a clip. The input "
-            "is measured before the noise gate, so it keeps showing your mic even while "
-            "the gate is closed. With a mono input or output both halves read the same.",
-            "入力L/R・出力L/Rの4つのレベルを1つにまとめた表示です。左半分がLチャンネル、"
-            "右半分がRチャンネルで、それぞれ2列あります(外側=入力(ミント)、内側="
-            "変換後の出力(ピンク))。左右とも下から12時方向へ伸び、12時がスケールの最大"
-            "です。左右が鏡写しになるので、バランスが崩れると非対称になってすぐ分かります。"
-            "目盛りは-60〜+6dBで、0dBFSより上は赤いゾーンです。細い目盛りが直近のピークで、"
-            "クリップすると赤くなります。入力はノイズゲートより前で測っているので、ゲートが"
-            "閉じている間もマイクの状態が分かります。モノラルの場合は左右が同じ値になります。"));
+            "All four level meters: the two INPUT rows are what arrives at VoxMorph and "
+            "the two OUTPUT rows are what leaves it, left and right channel each. The "
+            "scale is -60 to +6 dB and the pink zone at the right is above 0 dBFS, where "
+            "the signal may clip - the thin tick is the recent peak and turns red when it "
+            "gets there. The input is measured before the noise gate, so it keeps showing "
+            "your mic even while the gate is closed. With a mono input or output the two "
+            "rows of that pair read the same.",
+            "入力L/R・出力L/Rの4つのレベルです。上2行がVoxMorphに入ってくる音、下2行が"
+            "実際に出ていく音で、それぞれ左右のチャンネルです。目盛りは-60〜+6dBで、右端の"
+            "ピンクの帯は0dBFSより上=音が割れる可能性がある領域です。細い縦線が直近の"
+            "ピークで、そこに達すると赤くなります。入力はノイズゲートより前で測っている"
+            "ので、ゲートが閉じている間もマイクの状態が分かります。モノラルの場合はその"
+            "ペアの2行が同じ値になります。"));
         startTimerHz (30);
     }
 
 private:
-    // meters, in draw order: [side][lane], side 0 = L, lane 0 = input
-    static constexpr int kSide = 2, kLane = 2, kR = kSide * kLane;
-    static constexpr float kZeroDb = 60.0f / 66.0f;    // where 0 dBFS lands
+    static constexpr int   kR      = 4;                // in L, in R, out L, out R
+    static constexpr float kSpan   = 66.0f;            // -60 dB .. +6 dB
+    static constexpr float kZeroDb = 60.0f / kSpan;    // where 0 dBFS lands
 
-    // Both halves run bottom -> top, mirrored. The bottom gap is the wider of
-    // the two: with a small one the L and R arcs joined into a single U and
-    // the dial read as one meter instead of two. The top gap keeps the two
-    // scales from merging where they both hit maximum.
-    // JUCE angles: 0 = 12 o'clock, increasing clockwise.
-    static constexpr float kGapB = 0.17f, kGapT = 0.10f;
-
-    static float angleAt (int side, float p)
-    {
-        const float pi   = juce::MathConstants<float>::pi;
-        const float span = pi - kGapB - kGapT;
-        return side == 0 ? (pi + kGapB) + p * span      // left half, clockwise
-                         : (pi - kGapB) - p * span;     // right half, anticlockwise
-    }
-
-    static float pos (float lin)                    // linear -> 0..1 on the scale
+    static float pos (float lin)                       // linear -> 0..1
     {
         const float db = juce::Decibels::gainToDecibels (lin, -60.0f);
-        return juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 66.0f);
+        return juce::jlimit (0.0f, 1.0f, (db + 60.0f) / kSpan);
     }
-
-    static void strokeArc (juce::Graphics& g, juce::Point<float> c, float r, int side,
-                           float from, float to, float w, juce::Colour col, bool round)
-    {
-        const float a0 = angleAt (side, from), a1 = angleAt (side, to);
-        if (std::abs (a1 - a0) < 1.0e-4f) return;
-        juce::Path a;
-        a.addCentredArc (c.x, c.y, r, r, 0.0f, a0, a1, true);
-        g.setColour (col);
-        g.strokePath (a, juce::PathStrokeType (w, juce::PathStrokeType::curved,
-                                round ? juce::PathStrokeType::rounded
-                                      : juce::PathStrokeType::butt));
-    }
-
-    // lane colour: input mint / output pink, the same on both sides — the
-    // side is already carried by which half of the dial you are looking at
-    static juce::Colour laneColour (int lane)
-    {
-        return lane == 0 ? juce::Colour (0xff7999db) : juce::Colour (0xfff08ba5);
-    }
-
-    static int idx (int side, int lane) { return side * kLane + lane; }
 
     void timerCallback() override
     {
         if (const int hz = vmDrawHz (proc, 30); hz != rateHz)
         { rateHz = hz; startTimerHz (hz); }   // Performance Mode
         if (! isShowing()) return;
-        // order must match idx(): L-in, L-out, R-in, R-out
+        // order must match the labels in paint(): in L, in R, out L, out R
         const VoxMorphProcessor::LevelMeter* src[kR] = {
-            &proc.uiInL, &proc.uiOutL, &proc.uiInR, &proc.uiOutR };
+            &proc.uiInL, &proc.uiInR, &proc.uiOutL, &proc.uiOutR };
         bool changed = false;
         for (int i = 0; i < kR; ++i)
         {
-            const float pk  = src[i]->peak.load (std::memory_order_relaxed);
-            const float r   = pos (src[i]->rms.load (std::memory_order_relaxed));
-            const float p   = pos (pk);
+            const float pk = src[i]->peak.load (std::memory_order_relaxed);
+            const float rm = src[i]->rms .load (std::memory_order_relaxed);
+            const float r  = pos (rm), p = pos (pk);
             if (r != lvl[i] || p != pkPos[i]) changed = true;
             lvl[i] = r;  pkPos[i] = p;
+            db[i]  = juce::Decibels::gainToDecibels (rm, -100.0f);
             clip[i] = juce::Decibels::gainToDecibels (pk, -60.0f) >= -0.1f;
         }
         if (changed) repaint();
@@ -698,122 +529,109 @@ private:
     {
         auto b = getLocalBounds().toFloat().reduced (2.0f);
         ak::paintCard (g, b);
+        auto r = b.reduced (14.0f, 10.0f);
+        if (r.getWidth() < 150.0f || r.getHeight() < 60.0f) return;
 
-        const auto  c    = b.getCentre();
-        const float rOut = 0.5f * juce::jmin (b.getWidth(), b.getHeight()) - 9.0f;
-        if (rOut < 26.0f) return;
-        const float rIn  = rOut * 0.40f;
+        g.setColour (ak::headBlue);
+        g.setFont (ak::font (11.5f, true));
+        g.drawText ("LEVELS", r.removeFromTop (16.0f).toNearestInt(),
+                    juce::Justification::centredLeft, false);
+        r.removeFromTop (4.0f);
 
-        g.setGradientFill (juce::ColourGradient (juce::Colour (0xfffafcfd), c.x, c.y - rOut,
-                                                 juce::Colour (0xffeceff3), c.x, c.y + rOut, false));
-        g.fillEllipse (juce::Rectangle<float> (rOut * 2.0f, rOut * 2.0f).withCentre (c));
-        g.setColour (juce::Colour (0x14000000));
-        g.drawEllipse (juce::Rectangle<float> (rOut * 2.0f, rOut * 2.0f).withCentre (c), 1.0f);
+        auto scale = r.removeFromBottom (12.0f);
+        const float rowH = juce::jmax (13.0f, r.getHeight() / (float) kR);
+        const float labW = 46.0f, valW = 50.0f;
 
-        const float rTop  = rOut - 3.0f;             // clear of the dish outline
-        const float band  = rTop - rIn;
-        const float gap   = band * 0.09f;            // only two lanes now: wider
-        const float ringW = (band - gap) / (float) kLane;
+        static const char* names[kR] = { "IN  L", "IN  R", "OUT L", "OUT R" };
+        juce::Rectangle<float> lastTrack;
+        for (int i = 0; i < kR; ++i)
+        {
+            auto row = r.removeFromTop (rowH);
+            g.setColour (ak::heading.withAlpha (0.9f));
+            g.setFont (ak::font (10.0f, i == 0 || i == 2));
+            g.drawText (names[i], row.removeFromLeft (labW).toNearestInt(),
+                        juce::Justification::centredLeft, false);
 
-        for (int side = 0; side < kSide; ++side)
-            for (int lane = 0; lane < kLane; ++lane)
+            auto val = row.removeFromRight (valW);
+            auto track = row.withTrimmedRight (6.0f)
+                            .withSizeKeepingCentre (row.getWidth() - 6.0f,
+                                                    juce::jmin (10.0f, rowH - 4.0f));
+            lastTrack = track;
+            drawTrack (g, track, i);
+
+            g.setColour (ak::ink.withAlpha (0.85f));
+            g.setFont (ak::font (10.0f));
+            g.drawText (db[i] <= -59.5f ? juce::String ("--")
+                                        : juce::String (db[i], 1),
+                        val.toNearestInt(), juce::Justification::centredRight, false);
+        }
+
+        // ---- the scale, under the bars and aligned to them ----------------
+        if (! lastTrack.isEmpty())
+        {
+            g.setColour (ak::heading.withAlpha (0.6f));
+            g.setFont (ak::font (9.0f));
+            for (const float mark : { -60.0f, -40.0f, -20.0f, 0.0f })
             {
-                const int   i    = idx (side, lane);
-                const float rMid = rTop - ((float) lane * (ringW + gap)) - ringW * 0.5f;
-
-                strokeArc (g, c, rMid, side, 0.0f, 1.0f, ringW,           // track
-                           juce::Colour (0x12000000), false);
-                strokeArc (g, c, rMid, side, kZeroDb, 1.0f, ringW,        // 0 dB..+6
-                           juce::Colour (0x22e23b52), false);             // danger zone
-
-                if (lvl[i] > 0.004f)
-                    strokeArc (g, c, rMid, side, 0.0f, lvl[i], ringW * 0.92f,
-                               laneColour (lane), true);
-
-                if (pkPos[i] > 0.004f)                                    // peak tick
-                {
-                    const float a  = angleAt (side, pkPos[i]);
-                    const float s  = std::sin (a), co = std::cos (a);
-                    const float r0 = rMid - ringW * 0.5f, r1 = rMid + ringW * 0.5f;
-                    g.setColour (clip[i] ? juce::Colour (0xffe23b52)
-                                         : laneColour (lane).darker (0.45f));
-                    g.drawLine (c.x + r0 * s, c.y - r0 * co,
-                                c.x + r1 * s, c.y - r1 * co, 1.8f);
-                }
+                const float x = lastTrack.getX()
+                              + lastTrack.getWidth() * ((mark + 60.0f) / kSpan);
+                g.drawText (mark == 0.0f ? juce::String ("0")
+                                         : juce::String ((int) mark),
+                            juce::Rectangle<float> (30.0f, scale.getHeight())
+                                .withCentre ({ x, scale.getCentreY() }).toNearestInt(),
+                            juce::Justification::centred, false);
             }
+        }
+    }
 
-        // 0 dBFS marker across both lanes, on each side
-        g.setColour (juce::Colour (0x66e23b52));
-        for (int side = 0; side < kSide; ++side)
-        {
-            const float a = angleAt (side, kZeroDb);
-            const float s = std::sin (a), co = std::cos (a);
-            g.drawLine (c.x + (rIn + 1.0f) * s, c.y - (rIn + 1.0f) * co,
-                        c.x + rTop * s,         c.y - rTop * co, 1.0f);
+    // one bar: track, the above-0 dBFS zone, the level fill and a peak tick
+    void drawTrack (juce::Graphics& g, juce::Rectangle<float> track, int i) const
+    {
+        const float rad = track.getHeight() * 0.5f;
+        const bool  out = i >= 2;
+
+        g.setColour (ak::valueFill);
+        g.fillRoundedRectangle (track, rad);
+
+        {   // the danger zone, clipped to the rounded track so it keeps the cap
+            juce::Graphics::ScopedSaveState ss (g);
+            juce::Path clipTo;
+            clipTo.addRoundedRectangle (track, rad);
+            g.reduceClipRegion (clipTo);
+            g.setColour (juce::Colour (0x22e23b52));
+            g.fillRect (track.withLeft (track.getX() + track.getWidth() * kZeroDb));
         }
 
-        // centre puck: L | R, matching the half you are looking at
-        juce::Path hole;
-        hole.addEllipse (juce::Rectangle<float> (rIn * 2.0f, rIn * 2.0f).withCentre (c));
-        juce::DropShadow (juce::Colour (0x3a000000), 11, { 0, 3 }).drawForPath (g, hole);
-        g.setGradientFill (juce::ColourGradient (juce::Colours::white,      c.x, c.y - rIn,
-                                                 juce::Colour (0xffe7ebef), c.x, c.y + rIn, false));
-        g.fillPath (hole);
-
-        if (rIn >= 17.0f)
+        if (lvl[i] > 0.004f)
         {
-            g.setColour (juce::Colour (0x1a000000));
-            g.drawLine (c.x, c.y - rIn * 0.52f, c.x, c.y + rIn * 0.52f, 1.0f);
-            g.setColour (juce::Colour (0xff8d9694));
-            g.setFont (juce::Font (juce::FontOptions (juce::jmin (13.0f, rIn * 0.62f),
-                                                      juce::Font::bold)));
-            g.drawText ("L", juce::Rectangle<float> (rIn * 0.8f, rIn * 0.9f)
-                                 .withCentre ({ c.x - rIn * 0.44f, c.y }).toNearestInt(),
-                        juce::Justification::centred);
-            g.drawText ("R", juce::Rectangle<float> (rIn * 0.8f, rIn * 0.9f)
-                                 .withCentre ({ c.x + rIn * 0.44f, c.y }).toNearestInt(),
-                        juce::Justification::centred);
+            const float w = juce::jmax (track.getHeight(), track.getWidth() * lvl[i]);
+            g.setColour (out ? ak::seriesOut : ak::seriesIn);
+            g.fillRoundedRectangle (track.withWidth (w), rad);
         }
+
+        if (pkPos[i] > 0.004f)                                    // peak tick
+        {
+            const float x = track.getX() + track.getWidth() * pkPos[i];
+            g.setColour (clip[i] ? juce::Colour (0xffe23b52)
+                                 : (out ? ak::seriesOut : ak::seriesIn).darker (0.5f));
+            g.fillRect (juce::Rectangle<float> (x - 1.0f, track.getY(), 2.0f, track.getHeight()));
+        }
+
+        g.setColour (juce::Colour (0x55e23b52));                  // the 0 dBFS mark
+        const float zx = track.getX() + track.getWidth() * kZeroDb;
+        g.fillRect (juce::Rectangle<float> (zx - 0.5f, track.getY() - 1.0f,
+                                            1.0f, track.getHeight() + 2.0f));
+
+        g.setColour (ak::valueLine);
+        g.drawRoundedRectangle (track.reduced (0.5f), rad, 1.0f);
     }
 
     VoxMorphProcessor& proc;
     int rateHz = 30;   // current timer rate; Performance Mode lowers it
     float lvl[kR]   = { 0.0f, 0.0f, 0.0f, 0.0f };
     float pkPos[kR] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float db[kR]    = { -100.0f, -100.0f, -100.0f, -100.0f };
     bool  clip[kR]  = { false, false, false, false };
-};
-
-// VISUALIZER row (v0.30.1, extended v0.30.2 / v0.30.3): the linear spectrum
-// on the left, then three square donuts — the radial spectrum, the AEIOU
-// vowel mix and the four level rings. On narrow windows the donuts shrink
-// rather than disappearing.
-class VisualizerRow : public juce::Component
-{
-public:
-    VisualizerRow (juce::Component& lin, std::initializer_list<juce::Component*> donutList)
-        : linear (lin), donuts (donutList)
-    {
-        addAndMakeVisible (linear);
-        for (auto* d : donuts) addAndMakeVisible (*d);
-    }
-
-    void resized() override
-    {
-        auto r = getLocalBounds();
-        const int n    = juce::jmax (1, (int) donuts.size());
-        const int side = juce::jlimit (juce::jmin (70, r.getWidth() / (n + 1)), r.getHeight(),
-                                       (int) ((float) r.getWidth() * 0.20f));
-        for (int i = (int) donuts.size(); --i >= 0;)
-        {
-            donuts[(size_t) i]->setBounds (r.removeFromRight (side));
-            r.removeFromRight (4);
-        }
-        linear.setBounds (r);
-    }
-
-private:
-    juce::Component& linear;
-    std::vector<juce::Component*> donuts;
 };
 
 // Realtime status row under the visualizer. Shows the estimated internal
@@ -3992,7 +3810,7 @@ private:
 //
 // Colours come from the ANOKOE palette only — ak::seriesOut (pink) is the
 // source, ak::seriesIn (mint) is the listener, and the dish is the same
-// gradient and guide-ring tone the VISUALIZER donuts use, so the two pages
+// gradient and guide-ring tone the VISUALIZER's panels use, so the two pages
 // read as one instrument. The old pad had its own mint-green disc and rings
 // that appear nowhere else in the app.
 // ===========================================================================
@@ -4086,7 +3904,7 @@ private:
         const float rad = c.getWidth() * 0.5f;
         if (rad < 30.0f) return;
 
-        // the dish, same treatment as the VISUALIZER donuts
+        // the dish: the theme's soft raised-disc gradient
         g.setGradientFill (juce::ColourGradient (juce::Colour (0xfffafcfd), ctr.x, ctr.y - rad,
                                                  juce::Colour (0xffeceff3), ctr.x, ctr.y + rad, false));
         g.fillEllipse (c);
@@ -5825,8 +5643,8 @@ private:
 //    Card::preferredHeight(), so nothing else needs touching.
 //  - Colours, art and geometry live in AnokoeTheme.h; the skinned drawing of
 //    knobs / sliders / checkboxes lives in AnokoeWidgets.h.
-//  - The three analysis donuts (radial spectrum, AEIOU mix, level rings) and
-//    the linear spectrum live on the VISUALIZER page.
+//  - The spectrum, the AEIOU vowel mix and the four level meters live on
+//    the VISUALIZER page.
 class VoxMorphEditor : public juce::AudioProcessorEditor,
                        private juce::Timer
 {
@@ -6712,36 +6530,50 @@ private:
     }
 
     // ---- VISUALIZER page -------------------------------------------------
+    // v0.46.0: the spectrum, and under it one short strip carrying the vowel
+    // mix and the four levels. The radial ("donut") spectrum that used to sit
+    // bottom-left is gone — it drew the same numbers as the graph above it,
+    // and a third of the page is a lot to pay for the same reading twice.
+    // Heading and help text are laid out like the ASMR page's, so the two
+    // non-MAIN pages open the same way.
     void buildVisualizerPage()
     {
-        specData.addView (&spectrum);        // one FFT pair feeds both views
-        specData.addView (&radial);
+        specData.addView (&spectrum);
         vizPage.addAndMakeVisible (spectrum);
-        vizPage.addAndMakeVisible (radial);
         vizPage.addAndMakeVisible (vowel);
         vizPage.addAndMakeVisible (levels);
+
+        vizHead.setText ("VISUALIZER", juce::dontSendNotification);
+        ak::styleSectionHeading (vizHead);
+        vizPage.addAndMakeVisible (vizHead);
+
         vizNote.setFont (ak::font (11.5f));
         vizNote.setColour (juce::Label::textColourId, ak::heading.withAlpha (0.9f));
-        vizNote.setJustificationType (juce::Justification::centredLeft);
+        vizNote.setJustificationType (juce::Justification::topLeft);
         vizNote.setText (juce::String::fromUTF8 (
-            "上: 入力(ミント)と変換後(ピンク)のスペクトラム。 "
-            "下: 同じスペクトラムの円形表示 / AEIOU母音率 / 入出力レベル(L・R)。"),
+            "入力(ミント)と変換後(ピンク)を重ねたスペクトラムです。表示だけの機能で、"
+            "音には一切影響しません。\n"
+            "下段は、いま聞こえている母音の割合(声を止めると約1秒で均等に戻ります)と、"
+            "入出力レベルのL/Rです。"),
             juce::dontSendNotification);
         vizPage.addAndMakeVisible (vizNote);
 
         vizPage.fn = [this]
         {
-            auto r = vizPage.getLocalBounds();
-            vizNote.setBounds (r.removeFromTop (22));
-            r.removeFromTop (4);
-            spectrum.setBounds (r.removeFromTop (juce::jmax (180, r.getHeight() * 45 / 100)));
-            r.removeFromTop (ak::kGap);
-            const int side = juce::jmin (r.getHeight(), r.getWidth() / 3 - ak::kGap);
-            auto strip = r.withHeight (juce::jmax (140, side));
-            const int w = (strip.getWidth() - 2 * ak::kGap) / 3;
-            radial.setBounds (strip.removeFromLeft (w));
-            strip.removeFromLeft (ak::kGap);
-            vowel .setBounds (strip.removeFromLeft (w));
+            auto r = vizPage.getLocalBounds().reduced (ak::kPageMarginX + 8, 12);
+            vizHead.setBounds (r.removeFromTop (24));
+            vizNote.setBounds (r.removeFromTop (36));
+            r.removeFromTop (6);
+
+            // The strip is a fixed short band off the BOTTOM and the spectrum
+            // takes everything left over: growing the window should make the
+            // graph bigger, not stretch two rows of bars.
+            auto strip = r.removeFromBottom (juce::jlimit (124, 152, r.getHeight() / 4));
+            r.removeFromBottom (ak::kGap);
+            spectrum.setBounds (r);
+
+            const int vw = juce::jlimit (230, 430, strip.getWidth() * 38 / 100);
+            vowel .setBounds (strip.removeFromLeft (vw));
             strip.removeFromLeft (ak::kGap);
             levels.setBounds (strip);
         };
@@ -6919,13 +6751,12 @@ private:
     juce::String defaultFooterText;
 
     // VISUALIZER page
-    FnComponent        vizPage;
-    juce::Label        vizNote;
-    SpectrumData       specData { proc };
-    SpectrumView       spectrum { specData };
-    RadialSpectrumView radial   { specData };
-    VowelDonut         vowel    { proc };
-    LevelRingsDonut    levels   { proc };
+    FnComponent  vizPage;
+    juce::Label  vizHead, vizNote;
+    SpectrumData specData { proc };
+    SpectrumView spectrum { specData };
+    VowelMeter   vowel    { proc };
+    LevelMeters  levels   { proc };
 
     // other pages
     MatchingPanel matchingPanel { proc };

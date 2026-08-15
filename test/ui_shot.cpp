@@ -1,4 +1,4 @@
-// ui_shot.cpp — offscreen render + layout audit for the editor (v0.39.0).
+// ui_shot.cpp — offscreen render + layout audit for the editor (v0.46.0).
 //
 // Build:  cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVOXMORPH_UI_HARNESS=ON
 //         cmake --build build --target VoxMorphUiShot
@@ -12,7 +12,9 @@
 // those read 0 the screenshot is not evidence about anything they drive.
 //
 // It also audits the layout numerically rather than by eye: children that
-// escape their parent, and buttons that should or should not exist.
+// escape their parent, buttons that should or should not exist, and -- for views
+// driven by audio -- what the rendered pixels actually say once signal has
+// been pushed through processBlock.
 #include "../src/PluginProcessor.h"
 #include "../src/PluginEditor.h"
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -638,6 +640,296 @@ int main (int argc, char** argv)
         check (overMin == 0, "ASMR page still fits at the minimum window size");
         shoot (*ed, outDir.getChildFile ("asmr_1180x920.png"));
         juce::ignoreUnused (page);
+    }
+
+    // ---- VISUALIZER page (v0.46.0) ----------------------------------------
+    // The page lost the radial spectrum donut and turned the vowel mix and the
+    // level rings into bars. Two claims here cannot be checked by looking at a
+    // screenshot, so both are measured from rendered pixels with signal
+    // actually pushed through processBlock:
+    //   1. the bars MOVE with the audio (the v0.36.9 trap: a view that has
+    //      quietly stopped analysing still draws a perfectly plausible shape)
+    //   2. when the voice stops the vowel mix RETURNS TO NEUTRAL instead of
+    //      freezing on its last reading, which is the whole point of the
+    //      change -- a frozen shape at low alpha still reads as a reading
+    {
+        std::printf ("\n== VISUALIZER page ==\n");
+        ed->setSize (1400, 1080);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (200);
+        auto* vizTab = findButton (ed.get(), "Visualizer");
+        check (vizTab != nullptr, "Visualizer tab button exists");
+        if (vizTab != nullptr) vizTab->triggerClick();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (250);
+
+        VowelMeter*  vowel = nullptr;
+        LevelMeters* level = nullptr;
+        SpectrumView* spec = nullptr;
+        walk (ed.get(), [&] (juce::Component* c)
+        {
+            if (auto* v = dynamic_cast<VowelMeter*>  (c)) if (v->isShowing()) vowel = v;
+            if (auto* l = dynamic_cast<LevelMeters*> (c)) if (l->isShowing()) level = l;
+            if (auto* s = dynamic_cast<SpectrumView*> (c)) if (s->isShowing()) spec = s;
+        });
+        check (vowel != nullptr, "the vowel meter is on screen");
+        check (level != nullptr, "the level meters are on screen");
+        check (spec  != nullptr, "the spectrum is on screen");
+        if (vowel == nullptr || level == nullptr || spec == nullptr) return 1;
+
+        // The donut row used to take 55 % of the page. The point of replacing
+        // it was to hand that back to the graph, so this is asserted rather
+        // than admired: the strip must be short and the spectrum must be the
+        // thing that grew.
+        std::printf ("  spectrum %s  vowel %s  levels %s\n",
+                     spec->getBounds().toString().toRawUTF8(),
+                     vowel->getBounds().toString().toRawUTF8(),
+                     level->getBounds().toString().toRawUTF8());
+        check (vowel->getHeight() <= 160 && level->getHeight() <= 160,
+               "the readout strip is short (<= 160 px)");
+        check (spec->getHeight() > 2 * vowel->getHeight(),
+               "the spectrum is more than twice the strip's height");
+        check (vowel->getBounds().getRight() <= level->getX(),
+               "vowel and levels do not overlap");
+
+        auto setP = [&] (const char* id, float v)
+        {
+            if (auto* rp = proc.apvts.getParameter (id))
+            {
+                rp->beginChangeGesture();
+                rp->setValueNotifyingHost (rp->convertTo0to1 (v));
+                rp->endChangeGesture();
+            }
+        };
+
+        // ---- the audio the bars are supposed to be reacting to ------------
+        // A voiced /a/: a 140 Hz harmonic series shaped by three resonances,
+        // plus a little noise. Parameters alone move nothing -- the taps are
+        // filled on the audio thread, so the signal has to go through
+        // processBlock, interleaved with the dispatch loop that ticks the
+        // 30 Hz timers.
+        juce::AudioBuffer<float> buf (2, 512);
+        juce::MidiBuffer midi;
+        double ph = 0.0;
+        juce::Random rnd (7);
+        auto feed = [&] (int blocks)
+        {
+            for (int blk = 0; blk < blocks; ++blk)
+            {
+                for (int i = 0; i < 512; ++i)
+                {
+                    double s = 0.0;
+                    for (int k = 1; k <= 30; ++k)
+                    {
+                        const double f = 140.0 * k;
+                        s += (1.0 / (1.0 + std::pow ((f -  730.0) /  90.0, 2.0))
+                            + 0.5 / (1.0 + std::pow ((f - 1090.0) / 110.0, 2.0))
+                            + 0.3 / (1.0 + std::pow ((f - 2440.0) / 160.0, 2.0)))
+                             * std::sin (juce::MathConstants<double>::twoPi * f * ph);
+                    }
+                    const float v = 0.28f * (float) s + 0.004f * (rnd.nextFloat() - 0.5f);
+                    buf.setSample (0, i, v);
+                    buf.setSample (1, i, v * 0.8f);
+                    ph += 1.0 / 48000.0;
+                }
+                proc.processBlock (buf, midi);
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (12);
+            }
+        };
+
+        // The vowel coordinate is a by-product of AEIOU Character: with the
+        // feature off the engine does not track vowels at all, so the panel
+        // has nothing to draw and says so instead.
+        setP ("vadapt",  1.0f);
+        setP ("vamount", 100.0f);
+        feed (120);
+
+        std::printf ("  gates: uiWantsViz=%d uiWantsMeters=%d  vowelActive=%d conf=%.2f\n",
+                     (int) proc.uiWantsViz.load(), (int) proc.uiWantsMeters.load(),
+                     (int) proc.uiVowelActive.load(), proc.uiVowelConf.load());
+        check (proc.uiWantsViz.load() && proc.uiWantsMeters.load(),
+               "the page asks the audio thread for both taps");
+        check (proc.uiInL.rms.load() > 0.01f && proc.uiOutL.rms.load() > 0.001f,
+               "signal reached the meters");
+
+        const auto vowelArea = ed->getLocalArea (vowel, vowel->getLocalBounds());
+        const auto levelArea = ed->getLocalArea (level, level->getLocalBounds());
+
+        auto isColour = [] (juce::Colour px, juce::Colour want, int tol)
+        {
+            return std::abs (px.getRed()   - want.getRed())
+                 + std::abs (px.getGreen() - want.getGreen())
+                 + std::abs (px.getBlue()  - want.getBlue()) < tol;
+        };
+
+        // Bar heights, read off the picture: split the panel into five equal
+        // columns and find the topmost FILLED pixel in each. Returns 0 for
+        // "no bar", 1 for "full". The heading row is skipped because the
+        // dominant-vowel chip is drawn in the same pink up there.
+        //
+        // "Filled" is saturation, not an exact colour match: the bars are
+        // drawn at an alpha that drops while nothing is being said, so a
+        // resting mint bar lands on (117, 201, 180) rather than on seriesIn
+        // itself and an exact-match scan reports the panel as empty. Anything
+        // this panel paints is far more colourful than the card (spread 5)
+        // or the track outline (spread 19); the exact-colour checks below are
+        // where the theme colours themselves get asserted.
+        auto saturated = [] (juce::Colour c)
+        {
+            const int hi = juce::jmax (c.getRed(), juce::jmax (c.getGreen(), c.getBlue()));
+            const int lo = juce::jmin (c.getRed(), juce::jmin (c.getGreen(), c.getBlue()));
+            return hi - lo > 35;
+        };
+        auto barHeights = [&] (const juce::Image& img, float* out)
+        {
+            const int x0 = vowelArea.getX() + 16, x1 = vowelArea.getRight() - 16;
+            const int y0 = vowelArea.getY() + 40, y1 = vowelArea.getBottom() - 22;
+            for (int c = 0; c < 5; ++c)
+            {
+                const int cx0 = x0 + (x1 - x0) * c / 5, cx1 = x0 + (x1 - x0) * (c + 1) / 5;
+                int topY = y1;
+                for (int y = y0; y < y1; ++y)
+                    for (int x = cx0; x < cx1; ++x)
+                        if (saturated (img.getPixelAt (x, y)))
+                        { topY = juce::jmin (topY, y); y = y1; break; }
+                out[c] = (float) (y1 - topY) / (float) juce::jmax (1, y1 - y0);
+            }
+        };
+
+        float speaking[5] = {};
+        {
+            const auto img = render (*ed);
+            barHeights (img, speaking);
+            std::printf ("  bars while speaking: A %.2f  I %.2f  U %.2f  E %.2f  O %.2f\n",
+                         speaking[0], speaking[1], speaking[2], speaking[3], speaking[4]);
+            float lo = 1.0f, hi = 0.0f;
+            for (float v : speaking) { lo = juce::jmin (lo, v); hi = juce::jmax (hi, v); }
+            check (hi > 0.6f, "a vowel is being read (one bar is well up)");
+            check (hi - lo > 0.3f, "the bars differ, i.e. they carry a measurement");
+
+            // The winning bar and its chip are the theme's OUTPUT pink and the
+            // rest are the INPUT mint -- no colour of this panel's own. Both
+            // are counted POSITIVELY: "the old colour is absent" is the wrong
+            // question when antialiasing can synthesise any tone (v0.45.0).
+            int pink = 0, mint = 0;
+            for (int y = vowelArea.getY(); y < vowelArea.getBottom(); ++y)
+                for (int x = vowelArea.getX(); x < vowelArea.getRight(); ++x)
+                {
+                    const auto px = img.getPixelAt (x, y);
+                    if (isColour (px, ak::seriesOut, 12)) ++pink;
+                    if (isColour (px, ak::seriesIn,  12)) ++mint;
+                }
+            std::printf ("  vowel panel: %d px seriesOut, %d px seriesIn\n", pink, mint);
+            check (pink > 200, "the dominant vowel is drawn in the theme's output pink");
+            check (mint > 50,  "the other vowels are drawn in the theme's input mint");
+        }
+
+        // ---- the levels are the theme's colours, per row ------------------
+        // Checked row by row: the two INPUT rows must carry mint and the two
+        // OUTPUT rows pink. The dial this replaced drew its input lane in the
+        // sidebar blue, which is what "unify the colours" was about.
+        {
+            const auto img = render (*ed);
+            const int top = levelArea.getY() + 32, bot = levelArea.getBottom() - 24;
+            const int rowH = juce::jmax (1, (bot - top) / 4);
+            for (int row = 0; row < 4; ++row)
+            {
+                const auto want = row < 2 ? ak::seriesIn : ak::seriesOut;
+                int hits = 0;
+                for (int y = top + row * rowH; y < top + (row + 1) * rowH; ++y)
+                    for (int x = levelArea.getX(); x < levelArea.getRight(); ++x)
+                        if (isColour (img.getPixelAt (x, y), want, 12)) ++hits;
+                std::printf ("  level row %d: %d px of %s\n", row, hits,
+                             want.toDisplayString (false).toRawUTF8());
+                check (hits > 100, juce::String ("level row ") + juce::String (row)
+                                     + " is filled in its theme colour");
+            }
+        }
+        shoot (*ed, outDir.getChildFile ("viz_speaking.png"));
+
+        // ---- silence: the mix settles back to an even five ----------------
+        // "No input" means SILENT BLOCKS STILL ARRIVING, which is what a host
+        // does when you stop talking -- not the host stopping. Simply ceasing
+        // to call processBlock freezes uiVowelConf at its last value and the
+        // meter would be right to hold, so that version of the test proved
+        // nothing about the release. ~2.4 s is a little over two of the
+        // glide's time constants. The release is deliberately slow (about a
+        // 1.1 s time constant), so this runs for ~3.5 s of message thread:
+        // at 2.4 s the held vowel was still 0.14 of the lane above the rest,
+        // which is the glide working, not the glide failing.
+        for (int blk = 0; blk < 300; ++blk)
+        {
+            buf.clear();          // INSIDE the loop: processBlock works in
+                                  // place, so reusing the buffer without
+                                  // clearing feeds the output back in as the
+                                  // next input and the "silence" is a
+                                  // feedback loop that never goes quiet
+            proc.processBlock (buf, midi);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (12);
+        }
+        std::printf ("  after silence: vowelConf=%.3f  inL=%.5f outL=%.5f\n",
+                     proc.uiVowelConf.load(), proc.uiInL.rms.load(), proc.uiOutL.rms.load());
+        check (proc.uiInL.rms.load() < 0.002f, "the input meter fell back on silence");
+        {
+            const auto img = render (*ed);
+            float quiet[5] = {};
+            barHeights (img, quiet);
+            std::printf ("  bars after silence:  A %.2f  I %.2f  U %.2f  E %.2f  O %.2f\n",
+                         quiet[0], quiet[1], quiet[2], quiet[3], quiet[4]);
+            float lo = 1.0f, hi = 0.0f;
+            for (float v : quiet) { lo = juce::jmin (lo, v); hi = juce::jmax (hi, v); }
+            check (hi - lo < 0.10f, "silence brings the five bars back level with each other");
+            check (lo > 0.05f && hi < 0.7f,
+                   "and to a NEUTRAL height, not to zero and not stuck at the last shape");
+            check (quiet[0] < speaking[0] - 0.2f,
+                   "the vowel that was being held has actually come down");
+        }
+        shoot (*ed, outDir.getChildFile ("viz_neutral.png"));
+
+        // ---- AEIOU Character off: there is no measurement to show ---------
+        setP ("vadapt", 0.0f);
+        feed (12);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
+        {
+            check (! proc.uiVowelActive.load(), "the engine stops tracking vowels");
+            const auto img = render (*ed);
+            int pink = 0;
+            for (int y = vowelArea.getY(); y < vowelArea.getBottom(); ++y)
+                for (int x = vowelArea.getX(); x < vowelArea.getRight(); ++x)
+                    if (isColour (img.getPixelAt (x, y), ak::seriesOut, 12)) ++pink;
+            // Empty, not neutral: a filled bar is a reading, and with the
+            // feature off nothing measured one. The panel says so in words
+            // instead (drawn text, so it has no component to find).
+            //
+            // Read at the FOOT of each bar, not with barHeights(): every fill
+            // grows up from the bottom, so an empty foot is an empty bar --
+            // whereas a top-down scan finds the "AEIOU Character is off"
+            // message itself, which is drawn in the heading blue across the
+            // middle three columns and is just as saturated as a bar.
+            const int x0 = vowelArea.getX() + 16, x1 = vowelArea.getRight() - 16;
+            const int footTop = vowelArea.getBottom() - 40, footBot = vowelArea.getBottom() - 26;
+            int foot[5] = {};
+            for (int c = 0; c < 5; ++c)
+                for (int y = footTop; y < footBot; ++y)
+                    for (int x = x0 + (x1 - x0) * c / 5; x < x0 + (x1 - x0) * (c + 1) / 5; ++x)
+                        if (saturated (img.getPixelAt (x, y))) ++foot[c];
+            std::printf ("  feature off: %d px seriesOut, bar feet %d %d %d %d %d\n",
+                         pink, foot[0], foot[1], foot[2], foot[3], foot[4]);
+            check (pink < 40, "no vowel is named while nothing is measuring one");
+            for (int i = 0; i < 5; ++i)
+                check (foot[i] < 8, juce::String ("bar ") + juce::String (i)
+                                      + " is empty with the feature off");
+        }
+        shoot (*ed, outDir.getChildFile ("viz_off.png"));
+        setP ("vamount", 60.0f);
+
+        const int over = auditOverflow (ed.get(), "visualizer");
+        std::printf ("  children outside their parent: %d\n", over);
+        check (over == 0, "no component escapes its parent on the VISUALIZER page");
+
+        ed->setSize (1180, 920);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (250);
+        check (auditOverflow (ed.get(), "visualizer-min") == 0,
+               "VISUALIZER page still fits at the minimum window size");
+        shoot (*ed, outDir.getChildFile ("viz_1180x920.png"));
     }
 
     // ---- .vmprofile round-trip, including the v0.40.0 texture fields ----
