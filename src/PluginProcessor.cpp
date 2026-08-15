@@ -704,6 +704,8 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                                std::memory_order_relaxed);
             uiFmtOut[i].store (fv ? engine.analysisFormantOut (i) : 0.0f,
                                std::memory_order_relaxed);
+            uiFmtMerged[i].store (fv && engine.formantMerged (i),
+                                  std::memory_order_relaxed);
         }
         uiFmtValid.store (fv, std::memory_order_relaxed);
     }

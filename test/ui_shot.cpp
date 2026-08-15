@@ -1010,7 +1010,11 @@ int main (int argc, char** argv)
 
         // ---- AEIOU Character off: there is no measurement to show ---------
         setP ("vadapt", 0.0f);
-        feed (12);
+        // Long enough for the engine to re-acquire pitch after the silence
+        // above -- the lane fades a marker out over ~0.3 s and only brings it
+        // back once f0 is being detected again, so a short burst here tests
+        // the recovery timing rather than the thing this block is about.
+        feed (60);
         juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
         {
             check (! proc.uiVowelActive.load(), "the engine stops tracking vowels");

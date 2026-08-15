@@ -241,6 +241,11 @@ public:
     std::atomic<float> uiFmtIn[3]  { { 0.0f }, { 0.0f }, { 0.0f } };
     std::atomic<float> uiFmtOut[3] { { 0.0f }, { 0.0f }, { 0.0f } };
     std::atomic<bool>  uiFmtValid { false };
+    // uiFmtMerged[i] = this formant and the one below it were the same peak,
+    // and only the engine's ordering clamp is holding their two published
+    // frequencies apart. One measurement, not two -- the lane says so rather
+    // than drawing two confident markers 200 Hz apart.
+    std::atomic<bool>  uiFmtMerged[3] { { false }, { false }, { false } };
 
     // ASMR readout (v0.45.0): where the source ACTUALLY is, i.e. the pad
     // position after the auto-orbit has rotated it. The pad draws from here

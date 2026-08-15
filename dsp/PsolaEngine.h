@@ -215,6 +215,7 @@ public:
         anF0In = anF0Out = 0.0f;              // display-only analysis taps
         anFIn[0] = anFIn[1] = anFIn[2] = 0.0f;
         anFOut[0] = anFOut[1] = anFOut[2] = 0.0f;
+        anFmtMerged[0] = anFmtMerged[1] = anFmtMerged[2] = false;
         anFmtValid = false;
 
         airSplit.setup (sampleRate);
@@ -647,6 +648,10 @@ public:
     bool  formantsValid()  const { return anFmtValid; }
     float analysisFormantIn  (int i) const { return anFIn [std::clamp (i, 0, 2)]; }
     float analysisFormantOut (int i) const { return anFOut[std::clamp (i, 0, 2)]; }
+    // true when this formant and the one below it were the SAME peak, and
+    // only the ordering clamp is holding them apart. Their two published
+    // frequencies are then one measurement, not two.
+    bool  formantMerged (int i) const { return anFmtMerged[std::clamp (i, 0, 2)]; }
 
 private:
     static constexpr int kRing = 1 << 15;
@@ -1522,10 +1527,26 @@ private:
         // in the RESAMPLED grain domain (input formants x f), so the input
         // side divides f back out; the destination bin is already the output
         // frequency, since the grain is written to the output at 1:1.
+        // Read sBin[], not trackF[]: sBin is the bin the warp is actually
+        // anchored to, i.e. after the ordering clamps below. Publishing the
+        // raw trackF let the VISUALIZER draw F2 and F3 at the SAME frequency
+        // (2437 vs 2438 Hz in the v0.47.0 screenshots) -- a collision the
+        // DSP itself never uses.
+        //
+        // But the clamp is a repair, not a measurement: when two bands pick
+        // the same peak, sBin separates them by a fixed 150 / 200 Hz that
+        // nothing measured. anFmtMerged says so, so the UI can report one
+        // reading instead of drawing two confident ones. The overlap is real
+        // -- F2's band is 850-2600 Hz and F3's is 1900-3800 -- and on a vowel
+        // whose F1 and F2 have merged into a single hump there IS only one
+        // upper resonance to find.
         for (int i = 0; i < 3; ++i)
         {
-            anFIn [i] = trackF[i] > 0.0f ? trackF[i] / std::max (0.25f, f) : 0.0f;
+            anFIn [i] = (float) hzOf (sBin[i]) / std::max (0.25f, f);
             anFOut[i] = (float) hzOf (dBin[i]);
+            anFmtMerged[i] = i > 0 && trackF[i] > 0.0f && trackF[i - 1] > 0.0f
+                          && std::abs (trackF[i] - trackF[i - 1])
+                               < (float) hzOf (i == 1 ? binOf (150.0 * f) : binOf (200.0 * f));
         }
 
         const int srcA[5] = { 0, sBin[0], sBin[1], sBin[2], tail };
@@ -1786,6 +1807,7 @@ private:
     float anF0In = 0.0f, anF0Out = 0.0f;
     float anFIn[3]  = { 0.0f, 0.0f, 0.0f };
     float anFOut[3] = { 0.0f, 0.0f, 0.0f };
+    bool  anFmtMerged[3] = { false, false, false };
     bool  anFmtValid = false;
 
     int64_t writePos = 0;

@@ -344,7 +344,10 @@ public:
             "above. F1-F3 only appear while a formant feature is running (F1-F3 Shift or "
             "Gain, AEIOU Character, or Formant Definition) - the engine skips its "
             "formant analysis entirely when none of them is on, and turning it on just "
-            "to draw this would cost CPU and change the sound.",
+            "to draw this would cost CPU and change the sound. A marker labelled F2-F3 "
+            "means those two landed on the same resonance and the engine is only holding "
+            "them apart by its minimum spacing - that is one reading, not two, and it "
+            "happens on vowels where the two really do merge into a single hump.",
             "エンジンがいま検出している位置を、真上のスペクトラムと同じ周波数軸で表示します"
             "(マーカーが対応する山の真下に来ます)。上の青い行が入力、下のピンクの行が変換後で、"
             "2つを結ぶ斜めの線がその成分の移動量です。ひし形がピッチf0(出力側はIntonation・"
@@ -354,7 +357,9 @@ public:
             "F1〜F3は、フォルマント系の機能(F1〜F3 Shift/Gain、AEIOU Character、"
             "Formant Definition)のいずれかが動作している間だけ表示されます。どれもオフのときは"
             "エンジンがフォルマント解析自体を省略しており、表示のためだけに動かすとCPUが増えて"
-            "音も変わってしまうためです。"));
+            "音も変わってしまうためです。「F2·F3」のように連結表示されたマーカーは、"
+            "その2つが同じ共鳴を指しており、エンジンが最小間隔で引き離しているだけの状態です"
+            "(2つではなく1つの測定値)。実際に2つの山が1つに融合している母音で起こります。"));
         startTimerHz (30);
     }
 
@@ -371,6 +376,7 @@ private:
         { rateHz = hz; startTimerHz (hz); }   // Performance Mode
         if (! isShowing()) return;
 
+        bool moved = false;
         const bool fv = proc.uiFmtValid.load (std::memory_order_relaxed);
         float wantIn[kN], wantOut[kN];
         wantIn [0] = proc.uiF0In .load (std::memory_order_relaxed);
@@ -379,9 +385,10 @@ private:
         {
             wantIn [i + 1] = fv ? proc.uiFmtIn [i].load (std::memory_order_relaxed) : 0.0f;
             wantOut[i + 1] = fv ? proc.uiFmtOut[i].load (std::memory_order_relaxed) : 0.0f;
+            const bool mg = fv && proc.uiFmtMerged[i].load (std::memory_order_relaxed);
+            if (mg != merged[i + 1]) { merged[i + 1] = mg; moved = true; }
         }
 
-        bool moved = false;
         for (int i = 0; i < kN; ++i)
         {
             // A marker is live only when BOTH ends of its pair are known:
@@ -482,6 +489,12 @@ private:
         // ---- the pairs: in marker, connector, out marker ------------------
         for (int i = 0; i < kN; ++i)
         {
+            // merged[i] means slot i and slot i-1 came from the SAME peak and
+            // are only held apart by the engine's ordering clamp. Draw the
+            // pair once, on the LOWER one (which carries the combined label),
+            // rather than two confident dots at a separation nothing
+            // measured -- so it is the upper slot that is skipped here.
+            if (merged[i]) continue;
             if (alpha[i] < 0.02f || hzIn[i] < 20.0f || hzOut[i] < 20.0f) continue;
             if (! vmAxis::visible (hzIn[i]) && ! vmAxis::visible (hzOut[i])) continue;
             const float xi = vmAxis::xFor (sp, hzIn[i]);
@@ -496,10 +509,15 @@ private:
             marker (g, xi, yIn,  ak::seriesIn,  a, i == 0);
             marker (g, xo, yOut, ak::seriesOut, a, i == 0);
 
+            // "F2·F3" when the two are one reading -- the dot is drawn hollow
+            // for the same reason, so a merged pair never looks like a
+            // measurement it is not
+            const bool pair = i > 0 && i + 1 < kN && merged[i + 1];
+            juce::ignoreUnused (pair);
             g.setColour (ak::ink.withAlpha (0.75f * a));
             g.setFont (ak::font (9.0f, i == 0));
-            g.drawText (kLbl[i], juce::Rectangle<float> (24.0f, 11.0f)
-                                     .withCentre ({ xi, yIn - 11.0f }).toNearestInt(),
+            g.drawText (label (i), juce::Rectangle<float> (34.0f, 11.0f)
+                                       .withCentre ({ xi, yIn - 11.0f }).toNearestInt(),
                         juce::Justification::centred, false);
         }
 
@@ -539,8 +557,17 @@ private:
             g.fillEllipse (juce::Rectangle<float> (7.0f, 7.0f).withCentre ({ x, y }));
     }
 
+    // "F2" normally; "F2·F3" when the slot above it is the same measurement
+    juce::String label (int i) const
+    {
+        if (i + 1 < kN && merged[i + 1])
+            return juce::String (kLbl[i]) + juce::String::fromUTF8 ("·") + kLbl[i + 1];
+        return kLbl[i];
+    }
+
     VoxMorphProcessor& proc;
     int   rateHz = 30;   // current timer rate; Performance Mode lowers it
+    bool  merged[kN] = { false, false, false, false };
     float hzIn[kN]  = { 0.0f, 0.0f, 0.0f, 0.0f };
     float hzOut[kN] = { 0.0f, 0.0f, 0.0f, 0.0f };
     float alpha[kN] = { 0.0f, 0.0f, 0.0f, 0.0f };
