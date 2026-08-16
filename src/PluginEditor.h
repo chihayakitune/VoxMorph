@@ -347,7 +347,12 @@ public:
             "to draw this would cost CPU and change the sound. A marker labelled F2-F3 "
             "means those two landed on the same resonance and the engine is only holding "
             "them apart by its minimum spacing - that is one reading, not two, and it "
-            "happens on vowels where the two really do merge into a single hump.",
+            "happens on vowels where the two really do merge into a single hump. A HOLLOW "
+            "marker with a question mark means the engine did not find that formant in "
+            "the last moment and is holding its previous value, and when it cannot find "
+            "it at all the marker is left out rather than drawn on a default. High "
+            "voices lose F1 first: above roughly 250 Hz the fundamental is already close "
+            "to where F1 sits, so there is no separate peak left to measure.",
             "エンジンがいま検出している位置を、真上のスペクトラムと同じ周波数軸で表示します"
             "(マーカーが対応する山の真下に来ます)。上の青い行が入力、下のピンクの行が変換後で、"
             "2つを結ぶ斜めの線がその成分の移動量です。ひし形がピッチf0(出力側はIntonation・"
@@ -359,7 +364,11 @@ public:
             "エンジンがフォルマント解析自体を省略しており、表示のためだけに動かすとCPUが増えて"
             "音も変わってしまうためです。「F2·F3」のように連結表示されたマーカーは、"
             "その2つが同じ共鳴を指しており、エンジンが最小間隔で引き離しているだけの状態です"
-            "(2つではなく1つの測定値)。実際に2つの山が1つに融合している母音で起こります。"));
+            "(2つではなく1つの測定値)。実際に2つの山が1つに融合している母音で起こります。"
+            "中抜きのマーカーと「?」は、直前の瞬間にそのフォルマントを見つけられず"
+            "前の値を保持している状態です。まったく見つけられない時はマーカー自体を出しません"
+            "(既定値の位置に点を打たないため)。高い声ではF1から失われます: f0が250Hzを超えると"
+            "基音がF1の位置に近づき、分離した山が残らないためです。"));
         startTimerHz (30);
     }
 
@@ -387,6 +396,8 @@ private:
             wantOut[i + 1] = fv ? proc.uiFmtOut[i].load (std::memory_order_relaxed) : 0.0f;
             const bool mg = fv && proc.uiFmtMerged[i].load (std::memory_order_relaxed);
             if (mg != merged[i + 1]) { merged[i + 1] = mg; moved = true; }
+            const float cf = fv ? proc.uiFmtConf[i].load (std::memory_order_relaxed) : 0.0f;
+            if (std::abs (cf - conf[i + 1]) > 0.01f) { conf[i + 1] = cf; moved = true; }
         }
 
         for (int i = 0; i < kN; ++i)
@@ -496,6 +507,15 @@ private:
             // measured -- so it is the upper slot that is skipped here.
             if (merged[i]) continue;
             if (alpha[i] < 0.02f || hzIn[i] < 20.0f || hzOut[i] < 20.0f) continue;
+            // Below kConfHide the published frequency is the band's default
+            // constant, not a measurement, and drawing a dot on it is simply
+            // a lie -- on a 251-317 Hz voice F1 reads 495 Hz (= defR[0]) on
+            // every vowel. Between the two thresholds the value did come
+            // from a peak recently but is now being held, which is worth
+            // showing as long as it is shown as held: hollow, and labelled
+            // with a question mark.
+            if (conf[i] < kConfHide) continue;
+            const bool solid = conf[i] >= kConfSolid;
             if (! vmAxis::visible (hzIn[i]) && ! vmAxis::visible (hzOut[i])) continue;
             const float xi = vmAxis::xFor (sp, hzIn[i]);
             const float xo = vmAxis::xFor (sp, hzOut[i]);
@@ -506,18 +526,17 @@ private:
                                                      false));
             g.drawLine (xi, yIn + 5.0f, xo, yOut - 5.0f, 1.2f);
 
-            marker (g, xi, yIn,  ak::seriesIn,  a, i == 0);
-            marker (g, xo, yOut, ak::seriesOut, a, i == 0);
+            marker (g, xi, yIn,  ak::seriesIn,  a, i == 0, solid);
+            marker (g, xo, yOut, ak::seriesOut, a, i == 0, solid);
 
             // "F2·F3" when the two are one reading -- the dot is drawn hollow
             // for the same reason, so a merged pair never looks like a
             // measurement it is not
-            const bool pair = i > 0 && i + 1 < kN && merged[i + 1];
-            juce::ignoreUnused (pair);
-            g.setColour (ak::ink.withAlpha (0.75f * a));
+            g.setColour (ak::ink.withAlpha ((solid ? 0.75f : 0.5f) * a));
             g.setFont (ak::font (9.0f, i == 0));
-            g.drawText (label (i), juce::Rectangle<float> (34.0f, 11.0f)
-                                       .withCentre ({ xi, yIn - 11.0f }).toNearestInt(),
+            g.drawText (label (i) + (solid ? juce::String() : juce::String (" ?")),
+                        juce::Rectangle<float> (40.0f, 11.0f)
+                            .withCentre ({ xi, yIn - 11.0f }).toNearestInt(),
                         juce::Justification::centred, false);
         }
 
@@ -544,17 +563,22 @@ private:
     // f0 is a diamond and the formants are dots, so the two kinds of reading
     // stay apart for anyone who cannot separate the two row colours
     static void marker (juce::Graphics& g, float x, float y, juce::Colour col,
-                        float a, bool diamond)
+                        float a, bool diamond, bool solid)
     {
-        g.setColour (col.withAlpha (a));
+        g.setColour (col.withAlpha (solid ? a : 0.85f * a));
         if (diamond)
         {
             juce::Path p;
             p.addQuadrilateral (x, y - 4.6f, x + 4.6f, y, x, y + 4.6f, x - 4.6f, y);
-            g.fillPath (p);
+            if (solid) g.fillPath (p);
+            else       g.strokePath (p, juce::PathStrokeType (1.3f));
         }
         else
-            g.fillEllipse (juce::Rectangle<float> (7.0f, 7.0f).withCentre ({ x, y }));
+        {
+            const auto r = juce::Rectangle<float> (7.0f, 7.0f).withCentre ({ x, y });
+            if (solid) g.fillEllipse (r);
+            else       g.drawEllipse (r.reduced (0.7f), 1.3f);
+        }
     }
 
     // "F2" normally; "F2·F3" when the slot above it is the same measurement
@@ -567,7 +591,13 @@ private:
 
     VoxMorphProcessor& proc;
     int   rateHz = 30;   // current timer rate; Performance Mode lowers it
+    // A hollow marker means "held, not measured"; below kConfHide nothing is
+    // drawn at all. The gap between them is deliberately wide: the number is
+    // a smoothed proportion of recent grains that found a peak, so anything
+    // in between genuinely is intermittent.
+    static constexpr float kConfSolid = 0.5f, kConfHide = 0.15f;
     bool  merged[kN] = { false, false, false, false };
+    float conf[kN]   = { 1.0f, 0.0f, 0.0f, 0.0f };   // f0 is always measured
     float hzIn[kN]  = { 0.0f, 0.0f, 0.0f, 0.0f };
     float hzOut[kN] = { 0.0f, 0.0f, 0.0f, 0.0f };
     float alpha[kN] = { 0.0f, 0.0f, 0.0f, 0.0f };

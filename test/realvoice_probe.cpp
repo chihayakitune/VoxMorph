@@ -64,7 +64,8 @@ int main (int argc, char** argv)
     std::vector<float> sig; double fs = 0;
     if (argc < 2 || ! loadWav (argv[1], sig, fs)) { std::printf ("load failed\n"); return 1; }
     std::printf ("%s: %.0f Hz, %.2f s\n\n", argv[1], fs, sig.size() / fs);
-    std::printf ("%6s | %-9s %-9s %-9s | merged | notes\n", "shift", "F1", "F2", "F3");
+    std::printf ("%6s | %-12s %-12s %-12s | merged | notes\n",
+                 "shift", "F1 (conf)", "F2 (conf)", "F3 (conf)");
     for (double st : { 0.0, 3.0, 5.0, 7.0, 9.0, 12.0 })
     {
         PsolaEngine e; e.prepare (fs);
@@ -72,7 +73,7 @@ int main (int argc, char** argv)
         p.pitchSemi = (float) st;
         p.vowelAdapt = true; p.vowelAdaptAmt = 1.0f;
         e.setParams (p);
-        std::vector<float> m[3], buf (512);
+        std::vector<float> m[3], c[3], buf (512);
         int nMerged = 0, nFrames = 0;
         for (size_t q = 0; q + 512 <= sig.size(); q += 512)
         {
@@ -82,10 +83,14 @@ int main (int argc, char** argv)
             ++nFrames;
             if (e.formantMerged (2) || e.formantMerged (1)) ++nMerged;
             for (int k = 0; k < 3; ++k)
+            {
                 if (e.analysisFormantIn (k) > 20.0f) m[k].push_back (e.analysisFormantIn (k));
+                c[k].push_back (e.formantConfidence (k));
+            }
         }
-        std::printf ("%5.0fst | %7.0f   %7.0f   %7.0f   | %4.0f %% | %d frames\n",
-                     st, med (m[0]), med (m[1]), med (m[2]),
+        std::printf ("%5.0fst | %6.0f(%.2f) %6.0f(%.2f) %6.0f(%.2f) | %4.0f %% | %d frames\n",
+                     st, med (m[0]), med (c[0]), med (m[1]), med (c[1]),
+                     med (m[2]), med (c[2]),
                      nFrames ? 100.0 * nMerged / nFrames : 0.0, nFrames);
     }
     return 0;

@@ -246,6 +246,12 @@ public:
     // frequencies apart. One measurement, not two -- the lane says so rather
     // than drawing two confident markers 200 Hz apart.
     std::atomic<bool>  uiFmtMerged[3] { { false }, { false }, { false } };
+    // 0..1: how much of this formant's recent history came from an actual
+    // peak rather than from the hold/default path. Near 0 means the
+    // frequency beside it is a CONSTANT, not a reading -- measured on a
+    // 251-317 Hz voice, F1 sat at the default 495 Hz on every vowel. Note
+    // this says "a peak was found", not "the right peak was found".
+    std::atomic<float> uiFmtConf[3] { { 0.0f }, { 0.0f }, { 0.0f } };
 
     // ASMR readout (v0.45.0): where the source ACTUALLY is, i.e. the pad
     // position after the auto-orbit has rotated it. The pad draws from here

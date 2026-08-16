@@ -216,6 +216,7 @@ public:
         anFIn[0] = anFIn[1] = anFIn[2] = 0.0f;
         anFOut[0] = anFOut[1] = anFOut[2] = 0.0f;
         anFmtMerged[0] = anFmtMerged[1] = anFmtMerged[2] = false;
+        fmtConf[0] = fmtConf[1] = fmtConf[2] = 0.0f;
         anFmtValid = false;
 
         airSplit.setup (sampleRate);
@@ -652,6 +653,10 @@ public:
     // only the ordering clamp is holding them apart. Their two published
     // frequencies are then one measurement, not two.
     bool  formantMerged (int i) const { return anFmtMerged[std::clamp (i, 0, 2)]; }
+    // 0..1: how much of the recent history of this formant came from an
+    // actual peak in the envelope rather than from the hold/default path.
+    // Near 0 means the published frequency is a constant, not a reading.
+    float formantConfidence (int i) const { return fmtConf[std::clamp (i, 0, 2)]; }
 
 private:
     static constexpr int kRing = 1 << 15;
@@ -1478,6 +1483,22 @@ private:
                 if (env[(size_t)k] > env[(size_t)k-1] && env[(size_t)k] >= env[(size_t)k+1]
                     && env[(size_t)k] > pv)
                 { pv = env[(size_t)k]; pk = k; }
+            // Was this frame a MEASUREMENT or a fallback? pk <= 0 means no
+            // peak existed in the band, and the value below is then either
+            // the previous frame's or the band's default constant. Smoothed
+            // over ~7 grains so a single awkward grain does not flicker it.
+            //
+            // This matters because the fallback is indistinguishable from a
+            // reading once it is published: measured on a real 251-317 Hz
+            // voice, F1 sat at 495 Hz — which is defR[0] — on most vowels,
+            // and F2 sat near 1900 Hz on all of them (on /e/ that is the
+            // deepest valley in the spectrum, 55 dB down, while the real F2
+            // was at 2827 Hz). The numbers were not wrong so much as they
+            // were never measurements. Nothing here changes what the DSP
+            // does with them; it only lets the UI stop presenting a default
+            // as a reading.
+            fmtConf[i] += 0.15f * ((pk > 0 ? 1.0f : 0.0f) - fmtConf[i]);
+
             const float hz = pk > 0 ? (float) hzOf (pk)
                                     : (trackF[i] > 0 ? trackF[i] : (float)(defR[i] * f));
             trackF[i] = trackF[i] > 0 ? 0.7f * trackF[i] + 0.3f * hz : hz;
@@ -1808,6 +1829,7 @@ private:
     float anFIn[3]  = { 0.0f, 0.0f, 0.0f };
     float anFOut[3] = { 0.0f, 0.0f, 0.0f };
     bool  anFmtMerged[3] = { false, false, false };
+    float fmtConf[3] = { 0.0f, 0.0f, 0.0f };   // measured vs fallen back
     bool  anFmtValid = false;
 
     int64_t writePos = 0;

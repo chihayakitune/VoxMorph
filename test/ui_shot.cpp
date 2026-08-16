@@ -1,4 +1,4 @@
-// ui_shot.cpp — offscreen render + layout audit for the editor (v0.47.0).
+// ui_shot.cpp — offscreen render + layout audit for the editor (v0.48.0).
 //
 // Build:  cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVOXMORPH_UI_HARNESS=ON
 //         cmake --build build --target VoxMorphUiShot
@@ -713,6 +713,7 @@ int main (int argc, char** argv)
         juce::MidiBuffer midi;
         double ph = 0.0;
         juce::Random rnd (7);
+        double vf0 = 140.0, vF1 = 730.0, vF2 = 1090.0, vF3 = 2440.0;
         auto feed = [&] (int blocks)
         {
             for (int blk = 0; blk < blocks; ++blk)
@@ -722,10 +723,10 @@ int main (int argc, char** argv)
                     double s = 0.0;
                     for (int k = 1; k <= 30; ++k)
                     {
-                        const double f = 140.0 * k;
-                        s += (1.0 / (1.0 + std::pow ((f -  730.0) /  90.0, 2.0))
-                            + 0.5 / (1.0 + std::pow ((f - 1090.0) / 110.0, 2.0))
-                            + 0.3 / (1.0 + std::pow ((f - 2440.0) / 160.0, 2.0)))
+                        const double f = vf0 * k;
+                        s += (1.0 / (1.0 + std::pow ((f - vF1) /  90.0, 2.0))
+                            + 0.5 / (1.0 + std::pow ((f - vF2) / 110.0, 2.0))
+                            + 0.3 / (1.0 + std::pow ((f - vF3) / 160.0, 2.0)))
                              * std::sin (juce::MathConstants<double>::twoPi * f * ph);
                     }
                     const float v = 0.28f * (float) s + 0.004f * (rnd.nextFloat() - 0.5f);
@@ -965,6 +966,38 @@ int main (int argc, char** argv)
                 }
                 shoot (*ed, outDir.getChildFile ("viz_lane_shifted.png"));
             }
+            // ---- a formant that cannot be measured is not drawn on a default --
+            // v0.48.0. On a high voice F1 is the first casualty: once f0 is up
+            // near where F1 sits there is no separate peak left, the tracker
+            // falls back to its band default, and the old lane drew a confident
+            // dot on that constant. Measured on a real 251-317 Hz voice, F1 read
+            // 495 Hz (= defR[0]) on every vowel. Here: an /i/-like vowel at
+            // f0 300 with F1 also at 300, which is exactly that situation.
+            {
+                vf0 = 300.0; vF1 = 300.0; vF2 = 2300.0; vF3 = 3100.0;
+                feed (150);
+                const float c1 = proc.uiFmtConf[0].load(), c3 = proc.uiFmtConf[2].load();
+                std::printf ("  high voice (f0 300, F1 300): conf F1=%.2f F2=%.2f F3=%.2f, "
+                             "F1 published as %.0f Hz\n",
+                             c1, proc.uiFmtConf[1].load(), c3, proc.uiFmtIn[0].load());
+                check (c1 < 0.15f, "F1 reports itself as not measured on a high voice");
+                check (c3 > 0.5f,  "F3 is still measured (the flag is per formant)");
+
+                const auto img = render (*ed);
+                const auto inM = rowMarkers (img, 0.34f, ak::seriesIn);
+                std::printf ("  markers drawn: %d\n", (int) inM.size());
+                for (auto x : inM) std::printf ("    x=%.0f -> %.0f Hz\n", x, hzAt (x - laneArea.getX()));
+                // f0 and the upper formants stay; F1 must NOT be drawn on 495 Hz
+                const float f1x = vmAxis::xFor (sp, proc.uiFmtIn[0].load()) + laneArea.getX();
+                bool drawnOnDefault = false;
+                for (auto x : inM) if (std::abs (x - (double) f1x) < 4.0) drawnOnDefault = true;
+                check (! drawnOnDefault,
+                       "no marker is drawn at the F1 fallback constant");
+                shoot (*ed, outDir.getChildFile ("viz_lane_highvoice.png"));
+                vf0 = 140.0; vF1 = 730.0; vF2 = 1090.0; vF3 = 2440.0;
+                feed (60);
+            }
+
             setP ("pitch", 0.0f);
             feed (30);
         }
