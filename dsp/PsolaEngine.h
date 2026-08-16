@@ -1072,6 +1072,9 @@ private:
         vi.f2Hz = trackF[1] > 0.0f ? trackF[1] / fr1 : -1.0f;
         vi.f3Hz = trackF[2] > 0.0f ? trackF[2] / fr1 : -1.0f;
         vi.pitchConf = pitchConf;
+        // The coordinate is height(F1) + frontness(F2/F1), so it is only as
+        // real as F1 and F2 are. Pass the weaker of the two.
+        vi.formantConf = std::min (fmtConf[0], fmtConf[1]);
         vi.voiced    = voiced;
         vaw.process (vi);
     }

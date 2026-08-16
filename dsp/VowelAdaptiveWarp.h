@@ -50,6 +50,20 @@ public:
         float f3Hz = -1.0f;      //  formant ratio); <= 0 = not tracked
         float pitchConf = 0.0f;  // YIN clarity 0..1
         bool  voiced = false;
+        // How much of f1Hz / f2Hz above is an actual MEASUREMENT rather than
+        // the tracker's hold-or-default path (PsolaEngine::formantConfidence,
+        // 0..1). The vowel coordinate is built from F1 and F2/F1, so when
+        // those are constants the coordinate is a constant too -- and it was
+        // still driving the warp at full strength. Default 1 keeps any other
+        // caller on the previous behaviour.
+        //
+        // DELIBERATELY LAST. Callers aggregate-initialise this struct
+        // ({ f1, f2, f3, conf, voiced }), so inserting a field in the middle
+        // silently shifts every one of them -- putting it before `voiced`
+        // made offline_test's robustness case pass `true` into formantConf
+        // and leave voiced false, which read as "the estimator stopped
+        // working" rather than "the test was mis-initialised".
+        float formantConf = 1.0f;
     };
 
     void prepare (double sampleRate, int controlIntervalSamples)
@@ -113,8 +127,22 @@ public:
                         && in.f2Hz > 1.18f * in.f1Hz
                         && in.f3Hz > 1.08f * in.f2Hz;
 
+        // How much of the formant pair is real. Same two thresholds the
+        // VISUALIZER draws with, so what the user sees and what the DSP acts
+        // on cannot disagree: nothing below 0.15, full effect from 0.5.
+        //
+        // Why this exists: measured on a real 251-317 Hz voice, F1 came back
+        // as 495 Hz -- the band's default constant -- on every one of /a/
+        // /i/ /u/ /e/, and F2 sat near 1900 Hz on all of them regardless of
+        // the vowel. The estimator was not distinguishing the vowels at all,
+        // yet AEIOU Character applied its per-vowel offsets at full strength
+        // from that. Scaling by the confidence makes the feature fade out
+        // where its input is not a measurement, instead of confidently
+        // shaping the wrong vowel.
+        const float fGate = std::clamp ((in.formantConf - 0.15f) / 0.35f, 0.0f, 1.0f);
+
         float gate = 0.0f;
-        if (valid && amount > 1.0e-4f)
+        if (valid && amount > 1.0e-4f && fGate > 0.0f)
         {
             // ---- continuous vowel coordinate (log-frequency domain) ----
             // height    ~ openness, mainly log F1
@@ -135,7 +163,7 @@ public:
 
             // ---- confidence gate (all factors smooth 0..1, no hard edges)
             const float pc = std::clamp ((in.pitchConf - 0.15f) / 0.35f, 0.0f, 1.0f);
-            gate = amount * pc * stab;
+            gate = amount * pc * stab * fGate;
         }
         else
         {

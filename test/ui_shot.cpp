@@ -966,6 +966,45 @@ int main (int argc, char** argv)
                 }
                 shoot (*ed, outDir.getChildFile ("viz_lane_shifted.png"));
             }
+            // ---- a short unvoiced gap must not wipe the formant markers ----
+            // v0.48.1. The spectral layer only runs on voiced grains, so a
+            // consonant or a breath drops formantsValid() for a moment. The
+            // markers used to blink out there while f0 sat still, which made
+            // them unreadable in normal speech.
+            {
+                // Count by SATURATION, not by an exact colour match: a fading
+                // marker is seriesIn at partial alpha over the card, which is
+                // nowhere near seriesIn itself. Counting exact matches
+                // reported "0 markers" for a lane that was visibly still
+                // showing all three -- the same trap the vowel bars hit.
+                auto markerRuns = [&] (const juce::Image& img)
+                {
+                    const int y0 = laneArea.getY() + (int) (laneArea.getHeight() * 0.34f) - 5;
+                    int runs = 0; bool in = false;
+                    for (int x = laneArea.getX(); x < laneArea.getRight() - 60; ++x)
+                    {
+                        int n = 0;
+                        for (int y = y0; y < y0 + 10; ++y)
+                            if (saturated (img.getPixelAt (x, y))) ++n;
+                        if (n >= 3) { if (! in) ++runs; in = true; } else in = false;
+                    }
+                    return runs;
+                };
+                const int before = markerRuns (render (*ed));
+                for (int blk = 0; blk < 12; ++blk)     // ~0.15 s of silence
+                {
+                    buf.clear();
+                    proc.processBlock (buf, midi);
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (12);
+                }
+                const int during = markerRuns (render (*ed));
+                std::printf ("  markers before a 0.15 s gap: %d, during: %d\n", before, during);
+                check (before >= 3, "markers were up before the gap");
+                check (during >= before - 1,
+                       "a short unvoiced gap does not wipe the formant markers");
+                feed (40);                              // back to the vowel
+            }
+
             // ---- a formant that cannot be measured is not drawn on a default --
             // v0.48.0. On a high voice F1 is the first casualty: once f0 is up
             // near where F1 sits there is no separate peak left, the tracker

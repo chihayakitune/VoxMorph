@@ -396,8 +396,17 @@ private:
             wantOut[i + 1] = fv ? proc.uiFmtOut[i].load (std::memory_order_relaxed) : 0.0f;
             const bool mg = fv && proc.uiFmtMerged[i].load (std::memory_order_relaxed);
             if (mg != merged[i + 1]) { merged[i + 1] = mg; moved = true; }
-            const float cf = fv ? proc.uiFmtConf[i].load (std::memory_order_relaxed) : 0.0f;
-            if (std::abs (cf - conf[i + 1]) > 0.01f) { conf[i + 1] = cf; moved = true; }
+            // Hold the confidence through a dropout rather than snapping it
+            // to 0: the spectral layer only runs on voiced grains, so every
+            // consonant and every breath makes formantsValid() false for a
+            // moment. Zeroing it there is what made F1-F3 blink out while f0
+            // sat still -- f0 never blinks because voiced detection does not.
+            // The alpha release below is what actually fades them.
+            if (fv)
+            {
+                const float cf = proc.uiFmtConf[i].load (std::memory_order_relaxed);
+                if (std::abs (cf - conf[i + 1]) > 0.01f) { conf[i + 1] = cf; moved = true; }
+            }
         }
 
         for (int i = 0; i < kN; ++i)
@@ -410,11 +419,14 @@ private:
                 moved = glide (hzIn [i], wantIn [i]) || moved;
                 moved = glide (hzOut[i], wantOut[i]) || moved;
             }
-            // fade rather than blink: speech is full of short unvoiced gaps,
-            // and a marker that vanishes on every consonant is unreadable
+            // Fade rather than blink, and fade SLOWLY: speech is full of
+            // short unvoiced gaps, and at 0.12 per frame (~0.3 s) the
+            // formant markers were gone before they could be read. Attack
+            // stays quick so a new vowel appears at once.
             const float target = live ? 1.0f : 0.0f;
+            const float rate   = target > alpha[i] ? 0.25f : kFadeOut;
             if (std::abs (target - alpha[i]) > 0.004f)
-            { alpha[i] += 0.12f * (target - alpha[i]); moved = true; }
+            { alpha[i] += rate * (target - alpha[i]); moved = true; }
             else if (alpha[i] != target)
             { alpha[i] = target; moved = true; if (target == 0.0f) { hzIn[i] = hzOut[i] = 0.0f; } }
         }
@@ -514,12 +526,16 @@ private:
             // from a peak recently but is now being held, which is worth
             // showing as long as it is shown as held: hollow, and labelled
             // with a question mark.
-            if (conf[i] < kConfHide) continue;
+            // A smooth gate, not a step: crossing the threshold should fade
+            // the marker, not switch it off between two frames.
+            const float cg = juce::jlimit (0.0f, 1.0f,
+                                (conf[i] - kConfHide) / (kConfSolid - kConfHide));
+            if (alpha[i] * cg < 0.02f) continue;
             const bool solid = conf[i] >= kConfSolid;
             if (! vmAxis::visible (hzIn[i]) && ! vmAxis::visible (hzOut[i])) continue;
             const float xi = vmAxis::xFor (sp, hzIn[i]);
             const float xo = vmAxis::xFor (sp, hzOut[i]);
-            const float a  = alpha[i];
+            const float a  = alpha[i] * cg;
 
             g.setGradientFill (juce::ColourGradient (ak::seriesIn .withAlpha (0.55f * a), xi, yIn,
                                                      ak::seriesOut.withAlpha (0.55f * a), xo, yOut,
@@ -596,6 +612,10 @@ private:
     // a smoothed proportion of recent grains that found a peak, so anything
     // in between genuinely is intermittent.
     static constexpr float kConfSolid = 0.5f, kConfHide = 0.15f;
+    // ~0.75 s to fade out at 30 Hz. Slow on purpose: these markers are read,
+    // not glanced at, and the engine's own formant tracking drops out on
+    // every unvoiced moment.
+    static constexpr float kFadeOut = 0.045f;
     bool  merged[kN] = { false, false, false, false };
     float conf[kN]   = { 1.0f, 0.0f, 0.0f, 0.0f };   // f0 is always measured
     float hzIn[kN]  = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -646,7 +666,12 @@ public:
             "なぜその効き方をしているのかが分かります。表示にはFORMANTセクションの"
             "AEIOU Characterがオンで、Amountが0より大きいことが必要です(母音の推定自体が"
             "この機能の一部で、オフのときは動作しません)。声を出すのをやめると、推定が"
-            "無意味になるため約1秒かけて均等(ニュートラル)へ戻ります。"));
+            "無意味になるため約1秒かけて均等(ニュートラル)へ戻ります。"
+            "\n\n声を出しているのに「vowel not measurable at this pitch」と出る場合は、"
+            "その声のF1/F2が測れていない状態です(高い声ほど起きます: 基音が高いと"
+            "フォルマントの位置を分離できるだけの倍音が残りません)。v0.49.0以降、この状態では"
+            "AEIOU Characterは補正を適用しません。測れていない母音に自信を持って補正するより、"
+            "何もしない方が正しいという判断です。"));
         startTimerHz (30);
     }
 
@@ -691,6 +716,14 @@ private:
             if (std::abs (w[i] - sm[i]) > 0.0015f) { sm[i] += k * (w[i] - sm[i]); moved = true; }
             else                                     sm[i] = w[i];
         }
+
+        // Voiced, the feature on, and still no usable vowel: that is not
+        // "nobody is speaking", it is "this voice's formants cannot be
+        // measured", and since v0.49.0 it also means AEIOU Character is
+        // applying nothing. Neutral bars alone would read as silence.
+        const bool voicedNow = proc.uiF0In.load (std::memory_order_relaxed) > 20.0f;
+        const bool stuck = live && voicedNow && ! good;
+        if (stuck != unmeasurable) { unmeasurable = stuck; moved = true; }
 
         const float fadeTo = good ? 1.0f : 0.55f;
         if (std::abs (fadeTo - fade) > 0.002f) { fade += 0.15f * (fadeTo - fade); moved = true; }
@@ -780,6 +813,21 @@ private:
                         juce::Justification::centred, false);
         }
 
+        // ---- voiced, but the vowel cannot be measured --------------------
+        if (active && unmeasurable)
+        {
+            auto plate = juce::Rectangle<float> (juce::jmin (lane.getWidth(), 210.0f), 30.0f)
+                             .withCentre (lane.getCentre());
+            g.setColour (juce::Colour (0xe8ffffff));
+            g.fillRoundedRectangle (plate, 10.0f);
+            g.setColour (ak::line);
+            g.drawRoundedRectangle (plate.reduced (0.5f), 10.0f, 1.0f);
+            g.setColour (ak::heading);
+            g.setFont (ak::font (10.5f));
+            g.drawFittedText ("vowel not measurable\nat this pitch", plate.toNearestInt(),
+                              juce::Justification::centred, 2);
+        }
+
         // ---- the feature is off: say so, on the empty tracks --------------
         if (! active)
         {
@@ -801,6 +849,7 @@ private:
     float sm[kV] = { kNeutral, kNeutral, kNeutral, kNeutral, kNeutral };
     float fade = 0.55f;
     bool  active = false;
+    bool  unmeasurable = false;
 };
 
 // ---------------------------------------------------------------------------
