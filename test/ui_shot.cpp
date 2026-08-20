@@ -1159,6 +1159,99 @@ int main (int argc, char** argv)
         shoot (*ed, outDir.getChildFile ("viz_1180x920.png"));
     }
 
+    // ---- Pulse Smoothing (v0.50.0) ----------------------------------------
+    // A parameter that reaches the engine is the only kind worth having, so
+    // this is driven end to end: build a slightly creaky voice (alternating
+    // pulse amplitudes, which is what a real voice does and what an upshift
+    // turns into a growl at the old pitch), push it through processBlock at
+    // +9 st with the switch on and off, and compare the half-integer
+    // harmonic content of the two outputs.
+    {
+        std::printf ("\n== Pulse Smoothing ==\n");
+        auto* ps = proc.apvts.getParameter ("pulsesmooth");
+        check (ps != nullptr, "pulsesmooth parameter exists");
+        if (ps != nullptr)
+        {
+            check (ps->getDefaultValue() > 0.5f, "Pulse Smoothing defaults to ON");
+            // A toggle row carries its name on the BUTTON, not on a Label --
+            // matching only Labels reported the row missing when it was
+            // there. (The ASMR audit above already matches both; this one
+            // did not.)
+            int rows = 0;
+            walk (ed.get(), [&] (juce::Component* c)
+            {
+                if (auto* l = dynamic_cast<juce::Label*> (c))
+                    if (l->getText() == "Pulse Smoothing") ++rows;
+                if (auto* b = dynamic_cast<juce::Button*> (c))
+                    if (b->getButtonText() == "Pulse Smoothing") ++rows;
+            });
+            std::printf ("  controls named \"Pulse Smoothing\": %d\n", rows);
+            check (rows >= 1, "a row is bound to it");
+
+            auto run = [&] (bool on)
+            {
+                proc.reset();
+                auto* pp = proc.apvts.getParameter ("pitch");
+                pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (9.0f)); pp->endChangeGesture();
+                ps->beginChangeGesture(); ps->setValueNotifyingHost (on ? 1.0f : 0.0f); ps->endChangeGesture();
+                juce::AudioBuffer<float> b (2, 512);
+                juce::MidiBuffer m;
+                std::vector<float> out;
+                double ph = 0.0; int pulse = 0;
+                for (int blk = 0; blk < 120; ++blk)
+                {
+                    for (int i = 0; i < 512; ++i)
+                    {
+                        // 120 Hz pulse train whose pulses alternate in
+                        // amplitude by 25 % -- a mild creak
+                        ph += 120.0 / 48000.0;
+                        if (ph >= 1.0) { ph -= 1.0; ++pulse; }
+                        const double env = std::exp (-ph * 26.0);
+                        const float amp = (pulse & 1) ? 0.75f : 1.0f;
+                        const float v = (float) (0.35 * amp * env * std::sin (juce::MathConstants<double>::twoPi * 3.0 * ph));
+                        b.setSample (0, i, v);  b.setSample (1, i, v);
+                    }
+                    proc.processBlock (b, m);
+                    if (blk > 40)
+                        out.insert (out.end(), b.getReadPointer (0), b.getReadPointer (0) + 512);
+                }
+                return out;
+            };
+            const auto off = run (false), on = run (true);
+            // half-integer harmonics of the OUTPUT pitch (120 * 2^(9/12) = 202 Hz)
+            auto subIndex = [] (const std::vector<float>& x)
+            {
+                const int N = 8192;
+                if ((int) x.size() < N) return 0.0;
+                std::vector<float> re (x.end() - N, x.end()), im ((size_t) N, 0.0f);
+                for (int i = 0; i < N; ++i)
+                    re[(size_t) i] *= 0.5f - 0.5f * std::cos (2.0f * (float) M_PI * i / N);
+                PsolaEngine::fftForViz (re.data(), im.data(), N);
+                const double f0 = 120.0 * std::pow (2.0, 9.0 / 12.0), fs = 48000.0;
+                double h = 0.0, sub = 0.0;
+                for (int m = 2; m <= 12; ++m)
+                    for (int half = 0; half < 2; ++half)
+                    {
+                        const double hz = f0 * (m + 0.5 * half);
+                        const int b0 = (int) ((hz - 25) * N / fs), b1 = (int) ((hz + 25) * N / fs);
+                        double pk = 0;
+                        for (int k = std::max (1, b0); k <= std::min (N / 2, b1); ++k)
+                            pk = std::max (pk, (double) (re[(size_t) k] * re[(size_t) k]
+                                                       + im[(size_t) k] * im[(size_t) k]));
+                        (half ? sub : h) += pk;
+                    }
+                return 10.0 * std::log10 ((sub + 1e-20) / (h + 1e-20));
+            };
+            const double sOff = subIndex (off), sOn = subIndex (on);
+            std::printf ("  subharmonic index: off %.2f dB, on %.2f dB (change %+.2f)\n",
+                         sOff, sOn, sOn - sOff);
+            check (sOn < sOff - 1.0,
+                   "Pulse Smoothing actually reduces the half-integer harmonics");
+            auto* pp = proc.apvts.getParameter ("pitch");
+            pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture();
+        }
+    }
+
     // ---- .vmprofile round-trip, including the v0.40.0 texture fields ----
     // profileToXml / profileFromXml live in PluginEditor.h and need JUCE, so
     // offline_test cannot reach them; this is the only place they get tested.

@@ -142,13 +142,21 @@ public:
         // interpolation. Voiced, non-robot, upshift only.
         bool  grainBlend = false;
 
-        // EXPERIMENTAL pulse-pair averaging (offline A/B, internal Beta).
-        // Lightly creaky low voices carry a period-2 alternation (pulse_n =
-        // common + (-1)^n * alt); after a x2 upshift that alternation stays
-        // at the INPUT rate and is heard as the old pitch. Averaging each
-        // grain 50/50 with the PREVIOUS pulse cancels the alternating part
-        // exactly while keeping the common pulse (the voice's body).
-        // Voiced, non-robot, upshift only. Overrides grainBlend.
+        // Pulse-pair averaging. Lightly creaky low voices carry a period-2
+        // alternation (pulse_n = common + (-1)^n * alt); after a large upshift
+        // that alternation stays at the INPUT rate and is heard as a growl at
+        // the old pitch. Averaging each grain 50/50 with the PREVIOUS pulse
+        // cancels the alternating part exactly while keeping the common pulse
+        // (the voice's body). Voiced, non-robot, upshift only (Ts < 0.8 P,
+        // i.e. above about +3.9 st). Overrides grainBlend.
+        //
+        // v0.50.0: promoted out of the internal-Beta hooks and exposed as
+        // "Pulse Smoothing", ON by default in the plugin. Measured on a real
+        // take at +9 st: half-integer harmonic content -14.9 -> -19.2 dB
+        // overall, and -14.3 -> -22.0 dB in the passage the user identified
+        // by ear as a growl. THIS default stays false so the engine's own
+        // tests and any direct caller keep the previous behaviour; the
+        // PLUGIN parameter is what defaults to on.
         bool  grainAvg = false;
 
         // GCI Grain Sync: align grain centres to the glottal closure

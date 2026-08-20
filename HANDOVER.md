@@ -1,6 +1,6 @@
 # VoxMorph 開発引き継ぎ書 (AIセッション用)
 
-最終更新: v0.49.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+最終更新: v0.50.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
 
 ## プロジェクト概要
 
@@ -42,7 +42,7 @@
 
 ## 主要パラメータ(内部ID)
 
-pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, resonance(Formant Definition, -100〜+100%・既定0), vadapt/vamount/vcharacter(AEIOU Character, 既定オフ/60%/Natural)+Custom15値(va_{a,i,u,e,o}_f{1,2,3}), range(抑揚)/center, breath2(Beta), air(Natural Air, 0〜1.5・標準経路常時使用), airshine(Air Shine, >6kHz抜け感0〜6dB), 【deprecated no-op: airband/air2/air2low=旧セッション互換のため登録のみ】, gci(GCI同期), hifreq/hipitch/hiformant(High Rangeガード), tilt, jitter, robot/robotHz, lowvoice, lowlat(Legacy Low Latency、BETAウィンドウ), perfmode(Performance Mode), pitchfloor, automute, gate(ノイズゲート), asmrx/asmry(ASMR位置), asmrbin(Binaural Cues・既定オフ)/asmrdist(距離量%・既定100)/asmrair(空気吸収%・既定0)/asmrroom(ルーム%・既定0)/asmrsize(ルームサイズ%・既定50)/asmrwidth(ステレオ幅%・既定100)/asmrorbit(オービットHz・既定0)/asmrdepth(オービット半径%・既定60) 【v0.45.0。**全て既定値=その段がスキップされる値**】, mix, gain
+pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, resonance(Formant Definition, -100〜+100%・既定0), vadapt/vamount/vcharacter(AEIOU Character, 既定オフ/60%/Natural)+Custom15値(va_{a,i,u,e,o}_f{1,2,3}), range(抑揚)/center, breath2(Beta), air(Natural Air, 0〜1.5・標準経路常時使用), airshine(Air Shine, >6kHz抜け感0〜6dB), 【deprecated no-op: airband/air2/air2low=旧セッション互換のため登録のみ】, gci(GCI同期), hifreq/hipitch/hiformant(High Rangeガード), tilt, jitter, robot/robotHz, lowvoice, lowlat(Legacy Low Latency、BETAウィンドウ), perfmode(Performance Mode), pitchfloor, **pulsesmooth(Pulse Smoothing・既定ON、+3.9st超の上方シフトでのみ動作)**, automute, gate(ノイズゲート), asmrx/asmry(ASMR位置), asmrbin(Binaural Cues・既定オフ)/asmrdist(距離量%・既定100)/asmrair(空気吸収%・既定0)/asmrroom(ルーム%・既定0)/asmrsize(ルームサイズ%・既定50)/asmrwidth(ステレオ幅%・既定100)/asmrorbit(オービットHz・既定0)/asmrdepth(オービット半径%・既定60) 【v0.45.0。**全て既定値=その段がスキップされる値**】, mix, gain
 
 ## 重要な設計判断・経緯
 
@@ -61,6 +61,22 @@ pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, resonan
 - **v0.22.1: グレイン経路A/B実験フック+実験レポート**。低音+12stゴーストの系統実験(詳細=`GRAIN_AB_REPORT.md`)。結論: ①グレイン幅は主因でない(現行適応則がほぼ最適、0.5Pでも+1.5dB/body-13%) ②GCIは無関係(ONでむしろ悪化) ③再利用パターンの乱れとghostが強相関(-0.84) ④**可聴ゴーストの主因は有声/無声判定**: 入力の周期倍加区間(53Hz<通常モード下限60Hz)と減衰テールが無声判定→無声経路はピッチ変換しないため旧ピッチ素通し。**Low Voice Mode ONで解消方向**(+blend/avgで総合-26.9dB)。実験フック(Params: grainHalfP/grainBlend/grainAvg、全て既定オフ=bit-identical、UI非公開)と PSOLA_GRAIN_LOG(コンパイル時計測、プラグイン非影響)を追加。grainBlend=分数位置パルスクロスフェード(全シフトで艶↑・AM半減・middle ghost -48→-51dB)は実声試聴後に既定化を検討
 - **v0.22.0: Natural Air v2 スペクトルクリーンアップ(Phase 2先行)**。ユーザー実録(KITUNE、44.1kHz、+12st)で切り分け: middleレンジはair分離段階のF0周期漏れ(air完全オフ比+4.8dB)、**lowレンジのゴースト(-21.9dB)はair完全オフでも同値=グレイン再合成経路由来(+12stではグレイン幅が入力1周期を超え、奇数次入力倍音が出力倍音の中間に残る)で本件では未解決・別課題**。対策(ユーザー指示の方式2を採用): noiseBufは出力までDサンプル遅延の余裕があるため、1024点FFT/hop512/周期Hann OLA(ユニティ再構成)を**追加レイテンシゼロ**で挿入し(processAirFx)、有声時に入力F0整数倍近傍(6kHz以下のみ、幅±max(1, 2%C)を間隔の35%でキャップ)のビンを倍音間フロア(隣接中点magの小さい方×1.4)へクランプ。>6kHzは不変=**Air Shine完全維持**。f0<~130Hz(倍音間隔<3bin)はクランプ無効(低域はlowCons/クレストガードが担当)。Low Latencyモード(D<窓長)は従来どおり生バイパス+airFxHopは追従のみ。方式1(定常母音でBand0-2に上限)はairband=4000代理で比較→ゴースト低減は同等(-48.0 vs -47.8)だが中低域エアを構造的に失うため**不採用**。実測(KITUNE_middle入力をエンジン通し、+12st): air経路ghost -43.2→**-47.8dB**(air0=-48.0と一致)、6-16k・Shine特性・レベル不変。offline_testに+12st持続母音ゴースト回帰(ghostDb、fftForViz流用)追加。CPUオフライン代理: v2計1.90%(legacy 0.94%、クリーンアップ分+0.12%)。※ユーザー音声ファイルはローカル解析のみ、リポジトリ非収載
 - **v0.21.0: 低音ゴースト修正 + Air Shine**。ユーザー実声評価(v0.20.0): ウィスパー良好・ビブラート/グライドの中域ゴースト大幅改善、ただし**低い「あー」持続で旧ピッチゴースト**、高域の抜けはさらに強化したい。①原因=period doubling/交互周期/軽いフライの倍音漏れは**2Pで相関しPでは弱い**ため非周期と誤認(offline再現: サブハーモニック-15%でb1のkeepが0.99まで上昇)。対策: 漏れ判定の候補ラグを{P, 2P, P/2}に拡張(各±2%、ストライド2+±1精密化、分母エネルギーはprefix和でO(1))。②さらに**クレストファクタガード**: ランダム周期ジッタのパルス残差は「どのラグでも無相関=技術的には非周期」だが旧ピッチに聴こえる。息ノイズ(ガウス的、crest~3.5)に対しパルス残差はcrest≫6で明確分離→crest4.5-7でkeepをフェードアウト(90Hz定常のrel diff 0.042→0.006)。③低F0(<130Hz)ではb0/b1のkeep上昇レートを減速(lowCons)。検証: サブハーモニックb1 keep 0.99→0.14、全既存回帰PASS維持。**Air Shine(airshineパラメータ、0〜6dB、既定0)**: v2専用、最上段バンド(>6kHz)の**noiseBuf再加算ゲインのみ**を持ち上げる(harmBuf側の減算・中低域は不変)。breathy実測: +6dBで6-16k帯域比0.0176→0.0291、1-4k・RMSはほぼ不変。CPUオフライン代理計測: legacy 0.97%→v2 1.78%(+0.8%/コア)
+
+- **v0.50.0: Pulse Smoothing を公開(既定ON)+ ゴロゴロ音の原因特定 + 無声↔有声クロスフェードは「不要」と判定**(ユーザー試聴とデータに基づく)。
+  - **①ユーザーが指摘した「17〜18秒のゴロゴロ音」の正体**: スペクトログラムで**原音の倍音の"間"に余分な線が立っている**=周期倍加(f0/2の副次成分)。原音はこの区間で**f0が74Hzまで落ちるクリーク/フライ**で、パルスが1つおきに強弱している。**+9st上げるとその交互成分だけが元のピッチの位置に取り残され、新しい声の下で唸る**
+  - **②`grainAvg` を "Pulse Smoothing" として公開、既定ON**(ユーザーがA/B試聴で選択)。各グレインを1つ前のパルスと50/50平均して交互成分を打ち消す。**`Ts < 0.8P`(≒+3.9st超)でしか動作しない**ので、小さい変換の音は従来と完全に同一
+    - 実測(この実声、+9st): 半整数倍音の量が**全体 -14.9→-19.2dB**、**指摘区間 -14.3→-22.0dB(-7.7dB)**
+    - **エンジンの `Params::grainAvg` 既定は false のまま**にしてある。offline_test/bitexactやエンジン直利用は不変で、**プラグインのパラメータだけが既定ON**。したがって**大きな上方シフトを使う既存セッションは音が変わる**(ユーザー合意済み)
+    - `test/ui_shot.cpp` に**エンドツーエンド回帰**を追加: 交互振幅を持つ合成クリーク声を実際にprocessBlockへ通し、ON/OFFで半整数倍音が**-8.3dB**変わることを確認(パラメータがエンジンまで届いていることの検証)
+    - **罠**: トグル行の名前は Label ではなく **Button 側**に載る。Labelだけを探して「行が無い」と誤検出した(ASMRの監査は両方見ていたが、こちらは見ていなかった)
+  - **③無声↔有声クロスフェードは実装しない**。遷移点のスペクトルフラックスを、**3系統の同じ時刻**で測って比較:
+    | | 立ち上がり/対照 | 語尾/対照 |
+    |---|---|---|
+    | **原音** | 2.23倍 | **4.60倍** |
+    | VoxMorph | 2.35倍 | 3.18倍 |
+    | VOIDOL3 | 1.19倍 | 1.91倍 |
+    **原音自身の跳ねが最も大きく、VoxMorphはそれをほぼ素通ししているだけ**。VoxMorph固有の不具合ではないので、クロスフェードを入れることは「不具合修正」ではなく**入力より滑らかにするという設計判断**になる。やるなら目的を変えて再検討すること
+  - **残差はどこにあるか**: 定常有声部のフラックスが 原音0.080 / VoxMorph0.110 / VOIDOL3 0.169。**VoxMorphは原音より+37%不安定**(遷移部ではなくここ)。VOIDOL3は定常部が最も不安定なのに遷移部が最も滑らか=**作り直している**ことの裏返し
 
 - **2026-08-20 調査: 「Voidol3より声が荒い/ざらざらする」の切り分け**(ユーザー報告、同一発話110秒・Pitch+9/Formant+2で3系統を比較。音源はローカルのみ)。**コード変更なし・測定のみ**。
   - **標準的な声質指標では VoxMorph の方が明確にきれい**だった。ジッタ **2.63% vs 6.03%**、シマー **6.29% vs 19.92%**、HNR **19.8 vs 10.9dB**、倍音の山谷 **17.0 vs 15.8dB**、副次成分 **-14.9 vs -12.9dB**(すべて VoxMorph / VOIDOL3)。**「ノイズが多い」という説明は信号上は成立しない**

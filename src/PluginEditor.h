@@ -6586,6 +6586,21 @@ private:
         // no matter what else asks for a recoloured copy.
         cardAdvanced = &newCard ("ADVANCED", "ui_mark_M_Advanced_png",
                                  ak::headBlue, ak::markBlue);
+        toggle (*cardAdvanced, "pulsesmooth", "Pulse Smoothing",
+            tip ("Removes the low growl that a large upward shift can add. Voices are rarely "
+                 "perfectly regular - most have a slight alternation between one glottal pulse "
+                 "and the next - and when the pitch is raised a lot, that alternation stays "
+                 "behind at the ORIGINAL pitch and is heard as a rumble underneath the new "
+                 "voice. This averages each pulse with the one before it, which cancels the "
+                 "alternating part and leaves the voice's own body untouched. It only does "
+                 "anything above about +4 semitones, so smaller shifts sound exactly as before. "
+                 "Turn it off if you want the raw grain behaviour back.",
+                 "大きく上げたときに乗る低い唸り(ゴロゴロ音)を取り除きます。声は完全に規則的では"
+                 "なく、多くの場合で声門パルスが1つおきにわずかに強弱します。ピッチを大きく上げると"
+                 "その強弱だけが元のピッチの位置に取り残され、新しい声の下に唸りとして聞こえます。"
+                 "各パルスを1つ前のパルスと平均することで、この交互成分だけを打ち消し、声の芯は"
+                 "そのまま残します。おおよそ+4半音より上でしか動作しないので、小さい変換の音は"
+                 "従来と完全に同じです。元のグレイン動作に戻したい場合はオフにしてください。"));
         toggle (*cardAdvanced, "lowvoice", "Low Voice Mode",
             tip ("Extends pitch tracking for very low voices and vocal fry. It may retain more of "
                  "the original low-period texture depending on the voice.",

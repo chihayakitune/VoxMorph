@@ -117,6 +117,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::ParameterID { "gci", 1 }, "GCI Grain Sync", false));
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "lowvoice", 1 }, "Low Voice Mode", false));
+    // Pulse Smoothing (v0.50.0). ON by default: it only engages on upward
+    // shifts beyond ~3.9 st, and there it removes the period-2 pulse
+    // alternation that a slightly creaky voice turns into a growl at the OLD
+    // pitch. Measured on a real take at +9 st, the half-integer harmonic
+    // content drops 4.3 dB overall and 7.7 dB in the worst passage.
+    //
+    // NOTE this default changes the sound of existing sessions that use a
+    // large upshift. That is deliberate and was the user's call after an A/B;
+    // the engine's own Params default stays false so offline_test, bitexact
+    // and any direct user of PsolaEngine are unaffected.
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "pulsesmooth", 1 }, "Pulse Smoothing", true));
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "automute", 1 }, "Auto-Mute on Feedback", true));
     // Legacy Low Latency (v0.31.0: moved to the BETA window, id unchanged).
@@ -250,6 +262,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pJitter    = apvts.getRawParameterValue ("jitter");
     pRobot     = apvts.getRawParameterValue ("robot");
     pLowVoice  = apvts.getRawParameterValue ("lowvoice");
+    pPulseSmooth = apvts.getRawParameterValue ("pulsesmooth");
     pFloor     = apvts.getRawParameterValue ("pitchfloor");
     pAutoMute  = apvts.getRawParameterValue ("automute");
     pLowLat    = apvts.getRawParameterValue ("lowlat");
@@ -557,6 +570,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.jitter        = pJitter->load();
     p.robotize      = pRobot->load() > 0.5f;
     p.lowVoice      = pLowVoice->load() > 0.5f;
+    p.grainAvg      = pPulseSmooth->load() > 0.5f;
     p.pitchFloorHz  = pLowOn->load() > 0.5f ? pFloor->load() : 0.0f;
     p.lowLatency    = pLowLat->load() > 0.5f;
     p.robotHz       = pRobotHz->load();

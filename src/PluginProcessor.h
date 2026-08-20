@@ -420,6 +420,7 @@ private:
     std::atomic<float>* pJitter    = nullptr;
     std::atomic<float>* pRobot     = nullptr;
     std::atomic<float>* pLowVoice  = nullptr;
+    std::atomic<float>* pPulseSmooth = nullptr;
     std::atomic<float>* pFloor     = nullptr;
     std::atomic<float>* pAutoMute  = nullptr;
     std::atomic<float>* pLowLat    = nullptr;   // Legacy Low Latency (Beta)
