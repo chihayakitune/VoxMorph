@@ -129,12 +129,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     // and any direct user of PsolaEngine are unaffected.
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "pulsesmooth", 1 }, "Pulse Smoothing", true));
-    // Pulse Body (v0.52.0, BETA window). 0 = the v0.51.0 grain width, so it
-    // costs existing sessions nothing. See the Params comment in
-    // PsolaEngine.h for the measurement: it is the grain WIDTH, not the peak
-    // alignment, that makes a big upshift come out one-sided.
+    // Pulse Body (v0.52.0). Default raised to 0.75 in v0.53.0 after the user
+    // A/B'd the four settings: that is the value where the output waveform's
+    // positive/negative peak ratio lands on the original recording's (1.007
+    // against 1.046), and the user chose it knowing the low end costs about
+    // 2 dB. See the Params comment in PsolaEngine.h.
+    //
+    // NOTE this changes the sound of existing sessions that use a large
+    // upshift, exactly as the Pulse Smoothing default did in v0.50.0, and for
+    // the same reason: it is the setting the user picked by ear. The engine's
+    // own Params default stays 0 so offline_test, bitexact and any direct
+    // user of PsolaEngine keep the old behaviour.
     layout.add (std::make_unique<P> (juce::ParameterID { "pulsebody", 1 }, "Pulse Body",
-                juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
+                juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.75f));
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "automute", 1 }, "Auto-Mute on Feedback", true));
     // Legacy Low Latency (v0.31.0: moved to the BETA window, id unchanged).

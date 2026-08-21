@@ -1268,24 +1268,18 @@ int main (int argc, char** argv)
         check (pb != nullptr, "pulsebody parameter exists");
         if (pb != nullptr)
         {
-            check (pb->getDefaultValue() < 0.001f, "Pulse Body defaults to 0");
+            check (std::abs (pb->getDefaultValue() - 0.75f) < 0.01f,
+                   "Pulse Body defaults to 0.75 (the value the user chose by ear)");
             int rows = 0;
-            auto beta = std::make_unique<BetaPanel> (proc);
-            walk (beta.get(), [&] (juce::Component* c)
+            walk (ed.get(), [&] (juce::Component* c)
             {
                 if (auto* l = dynamic_cast<juce::Label*> (c))
                     if (l->getText() == "Pulse Body") ++rows;
                 if (auto* b = dynamic_cast<juce::Button*> (c))
                     if (b->getButtonText() == "Pulse Body") ++rows;
             });
-            std::printf ("  controls named \"Pulse Body\" in the BETA panel: %d\n", rows);
-            check (rows >= 1, "a row is bound to it");
-            int outside = 0;
-            for (int i = 0; i < beta->getNumChildComponents(); ++i)
-                if (! beta->getLocalBounds().contains (beta->getChildComponent (i)->getBounds()))
-                    ++outside;
-            std::printf ("  BETA children outside the panel: %d\n", outside);
-            check (outside == 0, "the new row still fits inside the BETA window");
+            std::printf ("  controls named \"Pulse Body\": %d\n", rows);
+            check (rows >= 1, "a row is bound to it on the MAIN tab");
 
             auto run = [&] (float body)
             {

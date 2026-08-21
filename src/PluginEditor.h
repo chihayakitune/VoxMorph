@@ -5280,30 +5280,6 @@ public:
                    "合成的に聞こえる場合は0のままにしてください。"));
         addAndMakeVisible (*breathRow);
 
-        // Pulse Body (v0.52.0). The measurement is in PsolaEngine.h; the
-        // short version is that a big upshift narrows the grain until it cuts
-        // the glottal pulse off partway through, and this hands the tail back.
-        bodyRow = std::make_unique<ParamRow> (proc, "pulsebody", ParamRow::Kind::slider,
-            "Pulse Body",
-            vmTip ("EXPERIMENTAL. Makes a large upward shift keep more of each glottal pulse. "
-                   "To stop a raised voice sounding like two voices at once, the engine has to "
-                   "cut a shorter slice out of the input the further up you go - and at +9 "
-                   "semitones that slice ends before the pulse has finished closing, so the "
-                   "output waveform is a sharper, more one-sided spike than your own voice ever "
-                   "was. Raising this hands the missing tail back; measured on a real take, 0.75 "
-                   "puts the waveform's shape back exactly where the original recording was. It "
-                   "may read as smoother and rounder, or as softer and less present - that is "
-                   "the judgement this control exists for. It does nothing on downward shifts. "
-                   "0 = the previous behaviour.",
-                   "大きく上げたときに、声門パルスをより多く残すようにします。"
-                   "ピッチを上げるほど「二重声」を避けるためにグレインを短く切る必要があり、"
-                   "+9半音では声門が閉じ切る前でパルスが切れてしまいます。その結果、出力波形は"
-                   "元の声よりも鋭く、上下非対称なスパイクになります。この値を上げると切れていた"
-                   "後半が戻ります。実声で測ったところ、0.75で波形の非対称性が原音とほぼ同じに"
-                   "なりました。滑らか・丸くなったと感じるか、柔らかすぎて前に出ないと感じるかは"
-                   "好みの判断です。下げ方向のシフトでは何もしません。0=従来どおり。"));
-        addAndMakeVisible (*bodyRow);
-
         // Legacy Low Latency (moved here in v0.31.0, parameter id "lowlat"
         // unchanged). This is the OLD approach to latency: it shortens the
         // engine's lookahead and narrows its analysis, so it costs quality.
@@ -5338,7 +5314,7 @@ public:
         };
         addAndMakeVisible (closeBtn);
 
-        setSize (600, 314);
+        setSize (600, 280);
         sendLookAndFeelChange();
     }
 
@@ -5354,8 +5330,6 @@ public:
         r.removeFromTop (4);
         breathRow->setBounds (r.removeFromTop (30));
         r.removeFromTop (4);
-        bodyRow->setBounds (r.removeFromTop (30));
-        r.removeFromTop (4);
         lowLatRow->setBounds (r.removeFromTop (28));
         closeBtn.setBounds (r.removeFromBottom (30).removeFromRight (100).reduced (0, 2));
     }
@@ -5367,7 +5341,7 @@ private:
     juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
     juce::TooltipWindow  tips { this, 400 };
     juce::Label heading, note;
-    std::unique_ptr<ParamRow> gciRow, breathRow, bodyRow, lowLatRow;
+    std::unique_ptr<ParamRow> gciRow, breathRow, lowLatRow;
     juce::TextButton closeBtn { "Close" };
 };
 
@@ -6627,6 +6601,23 @@ private:
                  "各パルスを1つ前のパルスと平均することで、この交互成分だけを打ち消し、声の芯は"
                  "そのまま残します。おおよそ+4半音より上でしか動作しないので、小さい変換の音は"
                  "従来と完全に同じです。元のグレイン動作に戻したい場合はオフにしてください。"));
+        slider (*cardAdvanced, "pulsebody", "Pulse Body",
+            tip ("How much of each glottal pulse survives a large upward shift. To stop a raised "
+                 "voice sounding like two voices at once, the engine cuts a shorter slice out of "
+                 "your voice the further up you go - and past about +7 semitones that slice ends "
+                 "before the pulse has finished closing, so the output waveform is a sharper, "
+                 "more one-sided spike than your own voice ever was. Raising this hands the "
+                 "missing tail back; measured on a real take, 0.75 (the default) puts the "
+                 "waveform's shape exactly where the original recording was. It costs about 2 dB "
+                 "of low end, so higher settings sound brighter and thinner. It does nothing on "
+                 "downward shifts. 0 = the behaviour before v0.52.0.",
+                 "大きく上げたときに、声門パルスをどれだけ残すか。ピッチを上げるほど「二重声」を"
+                 "避けるためにグレインを短く切る必要があり、+7半音あたりから声門が閉じ切る前で"
+                 "パルスが切れます。その結果、出力波形は元の声より鋭く上下非対称なスパイクに"
+                 "なります。この値を上げると切れていた後半が戻ります。実声で測ったところ、"
+                 "既定の0.75で波形の非対称性が原音とほぼ同じになりました。低域が約2dB減るため、"
+                 "上げるほど明るく細い音になります。下げ方向のシフトでは何もしません。"
+                 "0=v0.52.0より前の動作。"));
         toggle (*cardAdvanced, "lowvoice", "Low Voice Mode",
             tip ("Extends pitch tracking for very low voices and vocal fry. It may retain more of "
                  "the original low-period texture depending on the voice.",
