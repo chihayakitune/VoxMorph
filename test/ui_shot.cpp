@@ -1252,6 +1252,114 @@ int main (int argc, char** argv)
         }
     }
 
+    // ---- Pulse Body (v0.52.0) ---------------------------------------------
+    // Two things have to hold: 0 is the OLD sound to the sample (so nobody's
+    // session changes when they update), and raising it actually rounds the
+    // waveform out. The second is measured the way the real investigation
+    // was -- per-period positive/negative peak ratio -- because that is the
+    // quantity the control exists to move.
+    //
+    // The source here is a deliberately ONE-SIDED pulse train (fast attack,
+    // slow decay), because a symmetric test tone has no pulse shape to lose
+    // and would report success no matter what the engine did.
+    {
+        std::printf ("\n== Pulse Body ==\n");
+        auto* pb = proc.apvts.getParameter ("pulsebody");
+        check (pb != nullptr, "pulsebody parameter exists");
+        if (pb != nullptr)
+        {
+            check (pb->getDefaultValue() < 0.001f, "Pulse Body defaults to 0");
+            int rows = 0;
+            auto beta = std::make_unique<BetaPanel> (proc);
+            walk (beta.get(), [&] (juce::Component* c)
+            {
+                if (auto* l = dynamic_cast<juce::Label*> (c))
+                    if (l->getText() == "Pulse Body") ++rows;
+                if (auto* b = dynamic_cast<juce::Button*> (c))
+                    if (b->getButtonText() == "Pulse Body") ++rows;
+            });
+            std::printf ("  controls named \"Pulse Body\" in the BETA panel: %d\n", rows);
+            check (rows >= 1, "a row is bound to it");
+            int outside = 0;
+            for (int i = 0; i < beta->getNumChildComponents(); ++i)
+                if (! beta->getLocalBounds().contains (beta->getChildComponent (i)->getBounds()))
+                    ++outside;
+            std::printf ("  BETA children outside the panel: %d\n", outside);
+            check (outside == 0, "the new row still fits inside the BETA window");
+
+            auto run = [&] (float body)
+            {
+                // NOT proc.reset() -- the processor does not override it, so
+                // it is JUCE's no-op and the engine's ring buffers survive
+                // into the next run. prepareToPlay is what actually clears
+                // them, and without it "same parameters -> same samples" is
+                // not even true of the unchanged engine.
+                proc.prepareToPlay (48000.0, 512);
+                auto* pp = proc.apvts.getParameter ("pitch");
+                pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (9.0f)); pp->endChangeGesture();
+                pb->beginChangeGesture(); pb->setValueNotifyingHost (body); pb->endChangeGesture();
+                juce::AudioBuffer<float> b (2, 512);
+                juce::MidiBuffer m;
+                std::vector<float> out;
+                double ph = 0.0;
+                for (int blk = 0; blk < 120; ++blk)
+                {
+                    for (int i = 0; i < 512; ++i)
+                    {
+                        ph += 130.0 / 48000.0;
+                        if (ph >= 1.0) ph -= 1.0;
+                        // sharp rise, long decay: a caricature of a glottal
+                        // pulse, one-sided on purpose
+                        const double v = std::exp (-ph * 14.0) - 0.35 * std::exp (-ph * 3.0);
+                        const float x = (float) (0.35 * v);
+                        b.setSample (0, i, x);  b.setSample (1, i, x);
+                    }
+                    proc.processBlock (b, m);
+                    if (blk > 40)
+                        out.insert (out.end(), b.getReadPointer (0), b.getReadPointer (0) + 512);
+                }
+                return out;
+            };
+            // ratio of the largest positive to the largest negative excursion
+            // inside each output period, median over periods
+            auto asym = [] (const std::vector<float>& x)
+            {
+                const double f0 = 130.0 * std::pow (2.0, 9.0 / 12.0);
+                const int P = (int) std::lround (48000.0 / f0);
+                std::vector<double> r;
+                for (size_t a = 0; a + (size_t) P < x.size(); a += (size_t) P)
+                {
+                    float hi = -1e9f, lo = 1e9f;
+                    for (int k = 0; k < P; ++k) { hi = std::max (hi, x[a + (size_t) k]); lo = std::min (lo, x[a + (size_t) k]); }
+                    if (hi > 1e-5f && lo < -1e-5f) r.push_back ((double) hi / (double) -lo);
+                }
+                if (r.empty()) return 1.0;
+                std::sort (r.begin(), r.end());
+                return r[r.size() / 2];
+            };
+            const auto zero = run (0.0f), zero2 = run (0.0f), wide = run (0.75f);
+            size_t diff = 0;
+            for (size_t i = 0; i < std::min (zero.size(), zero2.size()); ++i)
+                if (zero[i] != zero2[i]) ++diff;
+            check (diff == 0 && ! zero.empty(), "Pulse Body 0 is repeatable to the sample");
+            size_t moved = 0;
+            for (size_t i = 0; i < std::min (zero.size(), wide.size()); ++i)
+                if (zero[i] != wide[i]) ++moved;
+            check (moved > zero.size() / 10, "Pulse Body 0.75 actually changes the output");
+            const double a0 = asym (zero), a1 = asym (wide);
+            std::printf ("  peak ratio: body 0 = %.3f, body 0.75 = %.3f\n", a0, a1);
+            // Deliberately loose: the exact numbers belong to THIS generator,
+            // and the real measurement lives on the user's recording (see
+            // HANDOVER v0.52.0). All this has to catch is the lever being
+            // wired backwards or not at all.
+            check (std::abs (a1 - 1.0) < std::abs (a0 - 1.0),
+                   "Pulse Body moves the waveform toward symmetry");
+            auto* pp = proc.apvts.getParameter ("pitch");
+            pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture();
+            pb->beginChangeGesture(); pb->setValueNotifyingHost (0.0f); pb->endChangeGesture();
+        }
+    }
+
     // ---- .vmprofile round-trip, including the v0.40.0 texture fields ----
     // profileToXml / profileFromXml live in PluginEditor.h and need JUCE, so
     // offline_test cannot reach them; this is the only place they get tested.

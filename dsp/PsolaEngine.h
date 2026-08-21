@@ -22,6 +22,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
+#include <array>
 #include "VowelAdaptiveWarp.h"
 
 #ifndef M_PI
@@ -167,6 +168,55 @@ public:
         // classic alignment automatically where no clear epochs exist;
         // off = identical to previous versions.
         bool  gciSync     = false;
+
+        // Pulse Body (v0.52.0). How much of the input glottal pulse a
+        // voiced grain is allowed to keep when the pitch is shifted UP.
+        //
+        // WHY: measured against the same take, the output waveform is far
+        // more one-sided than the input it came from -- per-period
+        // positive/negative peak ratio 1.46 against the original's 1.05 on a
+        // +9 st render. The cause is NOT the peak alignment, which was the
+        // standing theory: rendering the same file at pitch 0 reproduces the
+        // input's ratio exactly (1.048 vs 1.046), so laying grains on their
+        // peaks is innocent. It is the grain WIDTH. The width is capped at
+        // 1.25x the OUTPUT spacing so that a big upshift cannot pull a second
+        // pulse into the grain and sound like two voices (v0.3.2); at +9 st
+        // that cap is 0.74 input periods, which cuts the pulse off partway
+        // through its return phase and leaves only the sharp one-way spike.
+        //
+        // HOW: 0 keeps the v0.51.0 rule exactly. 1 lets the half-width grow
+        // to a full input period, which is the textbook PSOLA choice -- the
+        // Hann window then has its zeros exactly on the neighbouring pulses,
+        // so they contribute nothing even though they are inside the span.
+        // Values in between interpolate. Only voiced upshifts are affected;
+        // the existing lookahead cap still applies on top.
+        //
+        // MEASURED on the 110 s take at +9 st (0 -> 1): peak ratio
+        // 1.46 -> 1.00 (the original is 1.05), robust crest 5.99 -> 5.45 dB
+        // (original 5.56, VOIDOL3 7.27), and the half-integer residue that
+        // Pulse Smoothing exists to remove stays put, -25.8 -> -25.3 dB, i.e.
+        // the doubling the cap guards against does NOT come back inside this
+        // range. Whether the rounder waveform sounds better is a listening
+        // call, which is why the default is still the old behaviour.
+        float pulseBody = 0.0f;   // 0..1, 0 = v0.51.0 grain width
+
+        // EXPERIMENTAL phase dispersion (offline A/B, internal Beta -- NOT
+        // exposed in the plugin UI). A cascade of second-order all-pass
+        // sections spread across the speech band: it cannot change the
+        // magnitude spectrum at all, only when each frequency arrives, which
+        // is what turns a spike into a chirp.
+        //
+        // Kept as a hook, not shipped, because it was measured and lost. On
+        // the same +9 st render, an EXACT magnitude-preserving dispersion
+        // (whole-file FFT, so no filter-design error at all) needs about
+        // 4 ms of spread -- one entire output period -- to bring the peak
+        // ratio from 1.46 down to 1.11, and even destroying the phase
+        // completely only reaches 1.02. Anything gentle enough to be safe
+        // (0.25-1 ms) moves it to 1.42-1.35, i.e. nowhere. Pulse Body above
+        // reaches 1.00 with no smearing at all, so that is the lever that
+        // ships. Do not re-derive this one from theory: the theory says it
+        // should work, and the file says it does not.
+        float pulseDisperse = 0.0f;   // 0..1, 0 = off
     };
 
     void prepare (double sampleRate)
@@ -209,6 +259,8 @@ public:
         voiced      = false;
         sinceDetect = 0;
         tiltLp      = 0.0f;
+        dispS1.fill (0.0f);  dispS2.fill (0.0f);
+        buildDisperse();
         tiltK       = 1.0f - std::exp ((float) (-2.0 * M_PI * 1000.0 / fs));
 
         lastGci = -1;
@@ -331,6 +383,8 @@ public:
         grainHalfPOv   = std::clamp (q.grainHalfP, 0.0f, 1.5f);
         grainBlendOn   = q.grainBlend;
         grainAvgOn     = q.grainAvg;
+        pulseBodyAmt   = std::clamp (q.pulseBody, 0.0f, 1.0f);
+        setDisperse (std::clamp (q.pulseDisperse, 0.0f, 1.0f));
         hiFreq         = (q.hiRangeHz > 20.0f) ? std::clamp (q.hiRangeHz, 100.0f, 600.0f) : 0.0f;
         hiPAmt         = std::clamp (q.hiPitchAmt,   0.0f, 1.0f);
         hiFAmt         = std::clamp (q.hiFormantAmt, 0.0f, 1.0f);
@@ -412,6 +466,7 @@ public:
             std::fill (accBuf.begin(),  accBuf.end(),  0.0f);
             std::fill (normBuf.begin(), normBuf.end(), 0.0f);
             std::fill (noiseFx.begin(), noiseFx.end(), 0.0f);
+            dispS1.fill (0.0f);  dispS2.fill (0.0f);
             nextMarkF  = (double) (writePos + D);
             lastInMark = (double) writePos;
             voiced = false;
@@ -606,6 +661,9 @@ public:
                 tiltLp += tiltK * (wet - tiltLp);
                 wet = gLow * tiltLp + gHigh * (wet - tiltLp);
             }
+
+            if (dispOn)   // Pulse Softness: phase only, magnitude untouched
+                wet = disperse (wet);
 
             if (doDry)
             {
@@ -1240,7 +1298,17 @@ private:
         // (Low Voice Mode, down to 40 Hz) fit inside the lookahead window.
         float baseHalf = v ? std::min (P, capHalfCur) : 256.0f;
         if (v)
-            baseHalf = std::min (baseHalf, std::max (48.0f, 1.25f * Ts));
+        {
+            const float narrow = std::max (48.0f, 1.25f * Ts);
+            // Pulse Body: slide the upshift cap from that narrow width back
+            // toward one whole input period. Written so amount 0 takes the
+            // identical branch it always did -- no interpolation, no extra
+            // arithmetic on the value that ships.
+            if (pulseBodyAmt > 0.0f && narrow < baseHalf)
+                baseHalf = narrow + pulseBodyAmt * (baseHalf - narrow);
+            else
+                baseHalf = std::min (baseHalf, narrow);
+        }
         if (v && grainHalfPOv > 0.01f)                  // experimental A/B
             baseHalf = std::min (grainHalfPOv * P, capHalfCur);
         const int Hout = (int) std::clamp (baseHalf / f, 32.0f, (float) houtCapCur);
@@ -1933,6 +2001,58 @@ private:
     // + cleanup window). While it is 0 every air buffer is known to be all
     // zeros, so the clear / FFT / re-addition stages are skipped outright.
     int     airTail   = 0;
+
+    // ---------------- Pulse Softness (all-pass phase dispersion) ---------
+    // Second-order all-pass section k:
+    //     H(z) = (a2 + a1 z^-1 + z^-2) / (1 + a1 z^-1 + a2 z^-2)
+    // with a1 = -2 r cos(theta), a2 = r^2. |H| = 1 at every frequency for
+    // any r < 1; the group delay has a peak at theta whose height grows with
+    // r, and at r = 0 the section degenerates to a plain two-sample delay.
+    void buildDisperse()
+    {
+        // The band is fixed in Hz (not scaled by the shift): what has to be
+        // spread out is the OUTPUT pulse, and the ear's sensitivity to a
+        // sharp transient sits in the same few kHz whatever the pitch is.
+        const double lo = 200.0, hi = 7000.0;
+        const double r  = (double) kDispRMax * (double) dispAmt;
+        for (int k = 0; k < kDispN; ++k)
+        {
+            const double t  = (double) k / (double) (kDispN - 1);
+            const double fc = lo * std::pow (hi / lo, t);
+            const double th = 2.0 * M_PI * std::min (fc / (fs > 0.0 ? fs : 48000.0), 0.45);
+            dispA1[(size_t) k] = (float) (-2.0 * r * std::cos (th));
+            dispA2[(size_t) k] = (float) (r * r);
+        }
+    }
+
+    void setDisperse (float amt)
+    {
+        if (amt != dispAmt) { dispAmt = amt; buildDisperse(); }
+        dispOn = amt > 0.0005f;
+    }
+
+    inline float disperse (float x)
+    {
+        for (int k = 0; k < kDispN; ++k)
+        {
+            const float a1 = dispA1[(size_t) k], a2 = dispA2[(size_t) k];
+            const float y  = a2 * x + dispS1[(size_t) k];
+            // transposed direct form II; the +1e-25 is the usual denormal
+            // guard for a recursive section that keeps running through
+            // silence (offline builds have no ScopedNoDenormals around them)
+            dispS1[(size_t) k] = a1 * x - a1 * y + dispS2[(size_t) k] + 1.0e-25f;
+            dispS2[(size_t) k] = x - a2 * y;
+            x = y;
+        }
+        return x;
+    }
+
+    static constexpr int   kDispN    = 20;
+    static constexpr float kDispRMax = 0.80f;
+    std::array<float, kDispN> dispA1 {}, dispA2 {}, dispS1 {}, dispS2 {};
+    float dispAmt = 0.0f;
+    bool  dispOn  = false;
+    float pulseBodyAmt = 0.0f;        // Pulse Body (0 = v0.51.0 width)
 
     float grainHalfPOv = 0.0f;            // experimental width override (0 = off)
     bool  grainBlendOn = false;           // experimental pulse-grain crossfade

@@ -129,6 +129,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     // and any direct user of PsolaEngine are unaffected.
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "pulsesmooth", 1 }, "Pulse Smoothing", true));
+    // Pulse Body (v0.52.0, BETA window). 0 = the v0.51.0 grain width, so it
+    // costs existing sessions nothing. See the Params comment in
+    // PsolaEngine.h for the measurement: it is the grain WIDTH, not the peak
+    // alignment, that makes a big upshift come out one-sided.
+    layout.add (std::make_unique<P> (juce::ParameterID { "pulsebody", 1 }, "Pulse Body",
+                juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "automute", 1 }, "Auto-Mute on Feedback", true));
     // Legacy Low Latency (v0.31.0: moved to the BETA window, id unchanged).
@@ -263,6 +269,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pRobot     = apvts.getRawParameterValue ("robot");
     pLowVoice  = apvts.getRawParameterValue ("lowvoice");
     pPulseSmooth = apvts.getRawParameterValue ("pulsesmooth");
+    pPulseBody   = apvts.getRawParameterValue ("pulsebody");
     pFloor     = apvts.getRawParameterValue ("pitchfloor");
     pAutoMute  = apvts.getRawParameterValue ("automute");
     pLowLat    = apvts.getRawParameterValue ("lowlat");
@@ -571,6 +578,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.robotize      = pRobot->load() > 0.5f;
     p.lowVoice      = pLowVoice->load() > 0.5f;
     p.grainAvg      = pPulseSmooth->load() > 0.5f;
+    p.pulseBody     = pPulseBody->load();
     p.pitchFloorHz  = pLowOn->load() > 0.5f ? pFloor->load() : 0.0f;
     p.lowLatency    = pLowLat->load() > 0.5f;
     p.robotHz       = pRobotHz->load();
