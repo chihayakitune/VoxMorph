@@ -1254,12 +1254,29 @@ private:
         // the fractional pulse offset. Only meaningful while pulses are
         // being reused (upshift); the future-side partner is used only when
         // it is fully inside the received input.
-        double cB = 0.0;
-        float  wB = 0.0f;
+        // v0.51.0: THREE pulses (0.25 / 0.5 / 0.25) rather than two. The pair
+        // average cancels a period-2 alternation exactly only while the pitch
+        // is still; measured on 110 s of real speech at +9 st, the residue
+        // splits by how fast f0 is moving -- -25.2 dB where it is steady and
+        // -12.0 dB where it is gliding, and the user hears the difference as
+        // a faint return of the growl. A three-tap average is a wider
+        // low-pass along the pulse index, so it also suppresses the patterns
+        // a glide leaves behind: -22.3 dB overall against -20.8, and better
+        // in BOTH the steady (-27.2) and moving (-12.8) halves.
+        //
+        // Rejected on measurement, recorded so it is not retried: rescaling
+        // the partner's time base by the period ratio (c - cB) / P, on the
+        // theory that a glide makes the previous period a different length.
+        // It is worse (-20.3 for two taps, -21.6 for three) -- the pulse
+        // SHAPE is set by the vocal tract, not by the period, so stretching
+        // it just detunes the formants of the partner.
+        double cB = 0.0, cC = 0.0;
+        float  wB = 0.0f, wC = 0.0f;
         if (grainAvgOn && v && ! robotize && Ts < 0.8f * P)
         {
-            cB = alignToPeak (c - (double) P, P);   // past pulse: always here
-            wB = 0.5f;
+            cB = alignToPeak (c - (double) P, P);          // previous pulse
+            cC = alignToPeak (c - 2.0 * (double) P, P);    // the one before it
+            wB = 0.5f;  wC = 0.25f;
         }
         else if (grainBlendOn && v && ! robotize && Ts < 0.8f * P)
         {
@@ -1301,7 +1318,21 @@ private:
                     s2 = harmBuf[(size_t) (i2 & kMask)] * (1.0f - fr2)
                        + harmBuf[(size_t) ((i2 + 1) & kMask)] * fr2;
                 }
-                s = wA * s + wB * s2;
+                if (wC > 0.0f)                       // three-pulse average
+                {
+                    const double  ip3 = cC + jf;
+                    const int64_t i3  = (int64_t) std::floor (ip3);
+                    float s3 = 0.0f;
+                    if (i3 >= 0 && i3 + 1 < writePos)
+                    {
+                        const float fr3 = (float) (ip3 - (double) i3);
+                        s3 = harmBuf[(size_t) (i3 & kMask)] * (1.0f - fr3)
+                           + harmBuf[(size_t) ((i3 + 1) & kMask)] * fr3;
+                    }
+                    s = 0.25f * s + 0.5f * s2 + 0.25f * s3;
+                }
+                else
+                    s = wA * s + wB * s2;
             }
             grainScratch[(size_t) (j + Hout)] = s;
         }
