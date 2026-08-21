@@ -6612,7 +6612,7 @@ private:
                  "voice escapes at the loudest moment of the attack - which is heard as a knock "
                  "or thump. This keeps the previous pitch through those few frames, but only "
                  "while the sound still looks like a voice, so consonants like S and SH are "
-                 "unaffected. Leave it on unless you want the old behaviour back.",
+                 "unaffected, and the pitch keeps being tracked through the hold so it does not go stale. Leave it on unless you want the old behaviour back.",
                  "句の頭で鳴る「ボコっ」という打撃音のような音を止めます。エンジンは1秒に何度も"
                  "「今聞こえているのは音程のある声かどうか」を判定していますが、その判定は音の"
                  "一部と少しずらした自分自身を比べる方式です。発声の立ち上がりでは音量が急に"
@@ -6621,7 +6621,7 @@ private:
                  "ピッチ変換をせずにそのまま通すので、立ち上がりのいちばん大きいところで"
                  "変換前の低い地声が一瞬漏れ、それが打撃音のように聞こえます。この機能は"
                  "その数フレームだけ直前の音程を保持します。ただし「まだ声に見える」間だけ"
-                 "なので、サ行などの子音には影響しません。従来の動作に戻したいとき以外は"
+                 "なので、サ行などの子音には影響しません。保持中も音程の追従は続けるため、古い音程に貼り付いたままにはなりません。従来の動作に戻したいとき以外は"
                  "オンのままにしてください。"));
         slider (*cardAdvanced, "pulsebody", "Pulse Body",
             tip ("How much of each glottal pulse survives a large upward shift. To stop a raised "

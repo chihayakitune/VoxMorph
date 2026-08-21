@@ -242,13 +242,34 @@ public:
         // scoped to the case that produces the thump.
         //
         // Gated on the frame still LOOKING voiced by its zero-crossing rate
-        // and still being loud, so a vowel handing over to a fricative goes
+        // and not having collapsed in level (NOT on the level rising -- a
+        // pure energy-trend gate was tried and did nothing), so a vowel
+        // handing over to a fricative goes
         // to the unvoiced path as it should -- holding there would impose a
         // pitch on noise, which is the metallic artefact Natural Air exists
         // to avoid. Zero crossings are the right test here precisely because
         // they do not care about periodicity, which is the measurement that
         // just failed.
         int onsetHold = 0;   // 0 = off, else max frames (1 frame = 512 samples)
+
+        // Track the period during an Onset Hold from a normalised
+        // correlation instead of freezing it (v0.55.0). false = v0.54.0.
+        //
+        // A frozen period is what makes a longer hold expensive: grains
+        // drift out of step with the input and the old-pitch residue Pulse
+        // Smoothing exists to remove comes back. Measured on the user's
+        // take, widening a frozen hold from three to six frames costs
+        // 1.85 dB of that residue -- worse than having no hold at all. With
+        // the period tracked, five frames cost nothing (-26.67 -> -26.60 dB)
+        // and still catch more dropouts.
+        //
+        // rho = <a,b>/sqrt(<a,a><b,b>) divides loudness back out, so a
+        // crescendo cannot break it the way YIN's plain difference is, and it
+        // is searched only within +-15 % of the period already tracked, so it
+        // cannot invent a new pitch. Its ARGMAX is what is used; its VALUE
+        // was tested as a rescue and as a release criterion and is useless
+        // for both -- see HANDOVER v0.55.0.
+        bool  holdTracksPeriod = false;
     };
 
     void prepare (double sampleRate)
@@ -267,6 +288,7 @@ public:
         normBuf.assign (kRing, 0.0f);
         tmp.assign ((size_t) (kDetN + maxLagLow + 4), 0.0f);
         tmpD.assign ((size_t) ((kDetN + maxLagLow) / 2 + 4), 0.0f);
+        sqPre.assign ((size_t) (kDetN + maxLagLow + 5), 0.0);
         grainScratch.assign ((size_t) (2 * maxHout + 2), 0.0f);
         holdCount = 0;
 
@@ -369,6 +391,24 @@ public:
     float airCombGain()  const { return gCmb; }        // low-f0 comb (debug)
     float pitchClarity() const { return pitchConf; }   // YIN clarity (debug)
 
+#ifdef PSOLA_DETECT_LOG
+    // offline instrumentation for the voicing decision: one row per
+    // detection frame, so a dropout can be read against the evidence that
+    // was available at the time. Enabled with -DPSOLA_DETECT_LOG.
+    struct DetectLogRow
+    {
+        double  t;            // input time of the frame's END, seconds
+        double  energy, lastVoicedE;
+        float   zcr, rho;     // rho = -1 when it was not computed
+        double  bestVal;      // YIN CMND value at the chosen lag
+        int     pick, lag;
+        float   f0Before, f0After;
+        bool    confident, voicedBefore, voicedAfter;
+        int     why;          // 0 none 1 lowVoiceHold 2 rescue 3 onsetHold 4 dropped
+    };
+    std::vector<DetectLogRow> detectLog;
+#endif
+
 #ifdef PSOLA_GRAIN_LOG
     // offline instrumentation (never compiled into the plugin): one row per
     // placed grain, for reuse counting and overlap-add diagnostics
@@ -417,6 +457,7 @@ public:
         grainAvgOn     = q.grainAvg;
         pulseBodyAmt   = std::clamp (q.pulseBody, 0.0f, 1.0f);
         onsetHoldN     = std::clamp (q.onsetHold, 0, 8);
+        trackInHold    = q.holdTracksPeriod;
         setDisperse (std::clamp (q.pulseDisperse, 0.0f, 1.0f));
         hiFreq         = (q.hiRangeHz > 20.0f) ? std::clamp (q.hiRangeHz, 100.0f, 600.0f) : 0.0f;
         hiPAmt         = std::clamp (q.hiPitchAmt,   0.0f, 1.0f);
@@ -845,6 +886,20 @@ private:
 
         const double confThr = lowVoice ? 0.62 : 0.45;   // fry is never "clean"
         const bool confident = (lag > 0) && ! (pick < 0 && bestVal > confThr);
+#ifdef PSOLA_DETECT_LOG
+        const bool  dlVoicedBefore = voiced;
+        const float dlF0Before = voiced && curP > 0.0f ? (float) (fs / curP) : 0.0f;
+        float dlRho = -1.0f;
+        auto dlPush = [&] (int why)
+        {
+            detectLog.push_back ({ (double) writePos / fs, energy, lastVoicedEnergy,
+                                   zcr, dlRho, bestVal, pick, lag, dlF0Before,
+                                   voiced && curP > 0.0f ? (float) (fs / curP) : 0.0f,
+                                   confident, dlVoicedBefore, voiced, why });
+        };
+#else
+        auto dlPush = [] (int) {};
+#endif
         if (! confident)
         {
             // Low Voice Mode: creaky/fry phonation is irregular, so the
@@ -855,21 +910,44 @@ private:
             {
                 ++holdCount;
                 pitchConf *= 0.8f;           // held pitch: decaying trust
+                dlPush (1);
                 return;                      // keep previous curP, stay voiced
             }
-            // Onset Hold: same idea, scoped to a rising level. See the
-            // Params comment -- this is the phrase-start thump.
-            if (onsetHoldN > 0 && voiced && holdCount < onsetHoldN
-                && zcr < 0.12f && energy > 0.06 * lastVoicedEnergy)
+            // Onset Hold: the circumstantial fallback. See the Params
+            // comment -- this is the phrase-start thump.
+            const bool holdGates = onsetHoldN > 0 && voiced && holdCount < onsetHoldN
+                                && zcr < 0.12f && energy > 0.06 * lastVoicedEnergy;
+            // Onset Rescue: keep holding only while there is still
+            // amplitude-invariant evidence of the tracked period. The
+            // normalised correlation divides loudness back out, so a
+            // crescendo cannot break it the way YIN's difference is broken.
+            //
+            // It earns its place as a RELEASE test, not as a rescue test.
+            // Measured over 241 drops on the user's take, rho does not
+            // separate an audible mis-drop from a legitimate consonant --
+            // the medians are 0.458 and 0.463. What it does do is end a hold
+            // that is running on nothing, which matters because the hold
+            // otherwise runs to its full budget almost every time.
+            float corrLag = 0.0f;
+#ifdef PSOLA_DETECT_LOG
+            if (holdGates) dlRho = bestNormCorr (span, &corrLag);
+#else
+            if (holdGates && trackInHold) bestNormCorr (span, &corrLag);
+#endif
+            if (holdGates)
             {
                 ++holdCount;
                 pitchConf *= 0.8f;
+                if (trackInHold && corrLag > 0.0f)   // see Params
+                    curP = (1.0f - kHoldTrack) * curP + kHoldTrack * corrLag;
+                dlPush (3);
                 return;
             }
             voiced = false;
             holdCount = 0;
             lastGci = -1;
             pitchConf = 0.0f;
+            dlPush (4);
             return;
         }
         holdCount = 0;
@@ -945,6 +1023,7 @@ private:
         const float smooth = (voiced && rel > 0.06f) ? 0.5f : smoothBase;
         curP  = voiced ? smooth * curP + (1.0f - smooth) * newP : newP;
         voiced = true;
+        dlPush (0);
 
         // GCI epoch tracking is unreliable while the pitch is really moving:
         // the lastGci + k*P prediction grid shears against the true epochs
@@ -2051,6 +2130,40 @@ private:
     // zeros, so the clear / FFT / re-addition stages are skipped outright.
     int     airTail   = 0;
 
+    // Largest normalised correlation within +-15 % of the tracked period.
+    // Full rate (the decimated copy is not accurate enough this close in),
+    // and the denominators come off a prefix sum of squares so only the dot
+    // product is O(N) per lag. Runs on failed frames only.
+    float bestNormCorr (int span, float* bestLag = nullptr)
+    {
+        const int lo = std::max (minLag, (int) std::lround (curP * 0.85f));
+        const int hi = std::min (effMaxLagCur, (int) std::lround (curP * 1.15f));
+        if (lo >= hi || hi + kDetN > span) return 0.0f;
+
+        sqPre[0] = 0.0;
+        for (int i = 0; i < span; ++i)
+            sqPre[(size_t) i + 1] = sqPre[(size_t) i] + (double) tmp[(size_t) i] * tmp[(size_t) i];
+        const double ea = sqPre[(size_t) kDetN];
+        if (ea <= 0.0) return 0.0f;
+
+        double best = 0.0; int bestTau = 0;
+        for (int tau = lo; tau <= hi; ++tau)
+        {
+            const double eb = sqPre[(size_t) (tau + kDetN)] - sqPre[(size_t) tau];
+            if (eb <= 0.0) continue;
+            double dot = 0.0;
+            const float* a = tmp.data();
+            const float* b = tmp.data() + tau;
+            for (int i = 0; i < kDetN; ++i) dot += (double) a[i] * (double) b[i];
+            // signed, deliberately: rho^2 would call a half-period shift
+            // "periodic" and lock an octave down
+            const double r = dot / std::sqrt (ea * eb + 1.0e-30);
+            if (r > best) { best = r; bestTau = tau; }
+        }
+        if (bestLag != nullptr && bestTau > 0) *bestLag = (float) bestTau;
+        return (float) best;
+    }
+
     // ---------------- Pulse Softness (all-pass phase dispersion) ---------
     // Second-order all-pass section k:
     //     H(z) = (a2 + a1 z^-1 + z^-2) / (1 + a1 z^-1 + a2 z^-2)
@@ -2103,6 +2216,9 @@ private:
     bool  dispOn  = false;
     float pulseBodyAmt = 0.0f;        // Pulse Body (0 = v0.51.0 width)
     int    onsetHoldN = 0;            // Onset Hold (0 = off)
+    bool   trackInHold = false;       // track the period while holding
+    static constexpr float kHoldTrack = 0.3f;   // measured: 0.3 > 0.6 > 0.9
+    std::vector<double> sqPre;        // prefix sum of squares for the above
     double lastVoicedEnergy = 0.0;    // energy of the last confident frame
 
     float grainHalfPOv = 0.0f;            // experimental width override (0 = off)

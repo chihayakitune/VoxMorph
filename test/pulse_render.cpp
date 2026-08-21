@@ -94,7 +94,7 @@ int main (int argc, char** argv)
 {
     if (argc < 6)
     {
-        std::fprintf (stderr, "usage: %s <in.wav> <out.wav> <pitchSt> <formantSt> <disperse> [smooth] [body] [onsetHold]\n", argv[0]);
+        std::fprintf (stderr, "usage: %s <in.wav> <out.wav> <pitchSt> <formantSt> <disperse> [smooth] [body] [onsetHold] [holdTracksPeriod]\n", argv[0]);
         return 2;
     }
     std::vector<float> in; double fs = 0.0;
@@ -107,6 +107,7 @@ int main (int argc, char** argv)
     p.grainAvg      = argc > 6 ? std::atoi (argv[6]) != 0 : true;   // plugin default
     p.pulseBody     = argc > 7 ? (float) std::atof (argv[7]) : 0.0f; // 0 = v0.51.0 width
     p.onsetHold     = argc > 8 ? std::atoi (argv[8]) : 0;            // 0 = off
+    p.holdTracksPeriod = argc > 9 ? std::atoi (argv[9]) != 0 : false;
 
     PsolaEngine e;
     e.prepare (fs);
@@ -120,7 +121,19 @@ int main (int argc, char** argv)
         e.process (in.data() + i, out.data() + i, c);
     }
     writeWav (argv[2], out, fs);
-    std::printf ("%s  %.0f Hz  %zu samples  pitch %+.1f  formant %+.1f  disperse %.2f  smooth %d  body %.2f  onsetHold %d\n",
-                 argv[2], fs, out.size(), p.pitchSemi, p.formantSemi, p.pulseDisperse, (int) p.grainAvg, p.pulseBody, p.onsetHold);
+#ifdef PSOLA_DETECT_LOG
+    {
+        FILE* lf = std::fopen ("/tmp/dlog.csv", "w");
+        std::fprintf (lf, "t,energy,lastVoicedE,zcr,rho,bestVal,pick,lag,f0Before,f0After,confident,vBefore,vAfter,why\n");
+        for (const auto& r : e.detectLog)
+            std::fprintf (lf, "%.6f,%.9g,%.9g,%.4f,%.4f,%.5f,%d,%d,%.2f,%.2f,%d,%d,%d,%d\n",
+                          r.t, r.energy, r.lastVoicedE, r.zcr, r.rho, r.bestVal, r.pick, r.lag,
+                          r.f0Before, r.f0After, (int) r.confident,
+                          (int) r.voicedBefore, (int) r.voicedAfter, r.why);
+        std::fclose (lf);
+    }
+#endif
+    std::printf ("%s  %.0f Hz  %zu samples  pitch %+.1f  formant %+.1f  disperse %.2f  smooth %d  body %.2f  onsetHold %d  track %d\n",
+                 argv[2], fs, out.size(), p.pitchSemi, p.formantSemi, p.pulseDisperse, (int) p.grainAvg, p.pulseBody, p.onsetHold, (int) p.holdTracksPeriod);
     return 0;
 }

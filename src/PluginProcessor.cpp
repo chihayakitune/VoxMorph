@@ -140,6 +140,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     // with the 60-140 Hz share down from -1.7 to -10.5 dB; over the whole
     // 110 s, dropouts inside voiced speech fall from 78 to 42 and the
     // periodicity imposed on fricatives does not move (0.222 -> 0.217).
+    // v0.55.0 widens the budget to 5 and tracks the period through it:
+    // dropouts 187 -> 171, audible ones 22 -> 20, old-pitch residue and
+    // fricative periodicity both unchanged.
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "onsethold", 1 }, "Onset Hold", true));
     // Pulse Body (v0.52.0). Default raised to 0.75 in v0.53.0 after the user
@@ -600,7 +603,11 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.lowVoice      = pLowVoice->load() > 0.5f;
     p.grainAvg      = pPulseSmooth->load() > 0.5f;
     p.pulseBody     = pPulseBody->load();
-    p.onsetHold     = pOnsetHold->load() > 0.5f ? 3 : 0;   // 3 frames = ~35 ms
+    // v0.55.0: 5 frames (~58 ms) with the period tracked through the hold.
+    // Frozen, a budget this long costs 1.85 dB of old-pitch residue; tracked,
+    // it costs nothing. See the Params comments in PsolaEngine.h.
+    p.onsetHold        = pOnsetHold->load() > 0.5f ? 5 : 0;
+    p.holdTracksPeriod = pOnsetHold->load() > 0.5f;
     p.pitchFloorHz  = pLowOn->load() > 0.5f ? pFloor->load() : 0.0f;
     p.lowLatency    = pLowLat->load() > 0.5f;
     p.robotHz       = pRobotHz->load();
