@@ -94,7 +94,7 @@ int main (int argc, char** argv)
 {
     if (argc < 6)
     {
-        std::fprintf (stderr, "usage: %s <in.wav> <out.wav> <pitchSt> <formantSt> <disperse> [smooth] [body]\n", argv[0]);
+        std::fprintf (stderr, "usage: %s <in.wav> <out.wav> <pitchSt> <formantSt> <disperse> [smooth] [body] [onsetHold]\n", argv[0]);
         return 2;
     }
     std::vector<float> in; double fs = 0.0;
@@ -106,6 +106,7 @@ int main (int argc, char** argv)
     p.pulseDisperse = (float) std::atof (argv[5]);
     p.grainAvg      = argc > 6 ? std::atoi (argv[6]) != 0 : true;   // plugin default
     p.pulseBody     = argc > 7 ? (float) std::atof (argv[7]) : 0.0f; // 0 = v0.51.0 width
+    p.onsetHold     = argc > 8 ? std::atoi (argv[8]) : 0;            // 0 = off
 
     PsolaEngine e;
     e.prepare (fs);
@@ -119,7 +120,7 @@ int main (int argc, char** argv)
         e.process (in.data() + i, out.data() + i, c);
     }
     writeWav (argv[2], out, fs);
-    std::printf ("%s  %.0f Hz  %zu samples  pitch %+.1f  formant %+.1f  disperse %.2f  smooth %d  body %.2f\n",
-                 argv[2], fs, out.size(), p.pitchSemi, p.formantSemi, p.pulseDisperse, (int) p.grainAvg, p.pulseBody);
+    std::printf ("%s  %.0f Hz  %zu samples  pitch %+.1f  formant %+.1f  disperse %.2f  smooth %d  body %.2f  onsetHold %d\n",
+                 argv[2], fs, out.size(), p.pitchSemi, p.formantSemi, p.pulseDisperse, (int) p.grainAvg, p.pulseBody, p.onsetHold);
     return 0;
 }

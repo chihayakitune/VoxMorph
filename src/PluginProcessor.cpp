@@ -129,6 +129,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     // and any direct user of PsolaEngine are unaffected.
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "pulsesmooth", 1 }, "Pulse Smoothing", true));
+    // Onset Hold (v0.54.0). ON by default: it fixes a defect, not a taste.
+    // Voicing was dropping out for two or three frames in the middle of a
+    // phrase attack -- YIN's difference function reads a fast crescendo as
+    // aperiodic -- and the unvoiced path does not pitch-shift, so a burst of
+    // the speaker's own untransposed voice came through at the loudest point
+    // of the attack. The user heard it as a thump, "like hitting a desk".
+    // Measured on their take at +9 st: at the moment they pointed at, the
+    // output's dominant peak was 106 Hz (their own pitch) and is now 178 Hz,
+    // with the 60-140 Hz share down from -1.7 to -10.5 dB; over the whole
+    // 110 s, dropouts inside voiced speech fall from 78 to 42 and the
+    // periodicity imposed on fricatives does not move (0.222 -> 0.217).
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "onsethold", 1 }, "Onset Hold", true));
     // Pulse Body (v0.52.0). Default raised to 0.75 in v0.53.0 after the user
     // A/B'd the four settings: that is the value where the output waveform's
     // positive/negative peak ratio lands on the original recording's (1.007
@@ -277,6 +290,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pLowVoice  = apvts.getRawParameterValue ("lowvoice");
     pPulseSmooth = apvts.getRawParameterValue ("pulsesmooth");
     pPulseBody   = apvts.getRawParameterValue ("pulsebody");
+    pOnsetHold   = apvts.getRawParameterValue ("onsethold");
     pFloor     = apvts.getRawParameterValue ("pitchfloor");
     pAutoMute  = apvts.getRawParameterValue ("automute");
     pLowLat    = apvts.getRawParameterValue ("lowlat");
@@ -586,6 +600,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.lowVoice      = pLowVoice->load() > 0.5f;
     p.grainAvg      = pPulseSmooth->load() > 0.5f;
     p.pulseBody     = pPulseBody->load();
+    p.onsetHold     = pOnsetHold->load() > 0.5f ? 3 : 0;   // 3 frames = ~35 ms
     p.pitchFloorHz  = pLowOn->load() > 0.5f ? pFloor->load() : 0.0f;
     p.lowLatency    = pLowLat->load() > 0.5f;
     p.robotHz       = pRobotHz->load();

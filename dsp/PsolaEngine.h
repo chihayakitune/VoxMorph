@@ -217,6 +217,38 @@ public:
         // ships. Do not re-derive this one from theory: the theory says it
         // should work, and the file says it does not.
         float pulseDisperse = 0.0f;   // 0..1, 0 = off
+
+        // Onset Hold (v0.54.0). How many detection frames the engine may
+        // keep the previous pitch through a confidence dip WHILE THE LEVEL
+        // IS STILL RISING. 0 = the previous behaviour.
+        //
+        // WHY: the user reported a thump - "boko", like something hitting a
+        // desk - at the start of every phrase, and it is exactly that. Traced
+        // on their own take at +9 st: the engine locks the attack correctly
+        // (output 188, 195 Hz), then for about 30 ms in the middle of the
+        // crescendo the output peak drops to 106 Hz -- the speaker's OWN
+        // pitch, unshifted, at the loudest point of the attack -- and then
+        // returns to 182 Hz. The grain log shows two unvoiced grains sitting
+        // between voiced ones. Voicing dropped out mid-attack, and the
+        // unvoiced path does not pitch-shift, so a burst of the untransposed
+        // low voice comes through at full level.
+        //
+        // It drops out because YIN's difference function compares a frame
+        // with a lag-shifted copy of itself, and during a fast crescendo the
+        // two have visibly different amplitudes even when the waveform is
+        // perfectly periodic. The frame looks aperiodic, confidence fails,
+        // and the engine falls back. Low Voice Mode already has a hold for
+        // its own reason (fry is never clean); this is the same remedy
+        // scoped to the case that produces the thump.
+        //
+        // Gated on the frame still LOOKING voiced by its zero-crossing rate
+        // and still being loud, so a vowel handing over to a fricative goes
+        // to the unvoiced path as it should -- holding there would impose a
+        // pitch on noise, which is the metallic artefact Natural Air exists
+        // to avoid. Zero crossings are the right test here precisely because
+        // they do not care about periodicity, which is the measurement that
+        // just failed.
+        int onsetHold = 0;   // 0 = off, else max frames (1 frame = 512 samples)
     };
 
     void prepare (double sampleRate)
@@ -384,6 +416,7 @@ public:
         grainBlendOn   = q.grainBlend;
         grainAvgOn     = q.grainAvg;
         pulseBodyAmt   = std::clamp (q.pulseBody, 0.0f, 1.0f);
+        onsetHoldN     = std::clamp (q.onsetHold, 0, 8);
         setDisperse (std::clamp (q.pulseDisperse, 0.0f, 1.0f));
         hiFreq         = (q.hiRangeHz > 20.0f) ? std::clamp (q.hiRangeHz, 100.0f, 600.0f) : 0.0f;
         hiPAmt         = std::clamp (q.hiPitchAmt,   0.0f, 1.0f);
@@ -740,6 +773,12 @@ private:
 
         double energy = 0.0;
         for (int i = 0; i < kDetN; ++i) energy += (double) tmp[(size_t)i] * tmp[(size_t)i];
+        // zero-crossing rate of the analysis frame: a cheap voiced/unvoiced
+        // test that is independent of the periodicity measure above
+        int zc = 0;
+        for (int i = 1; i < kDetN; ++i)
+            if ((tmp[(size_t)i] >= 0.0f) != (tmp[(size_t)(i-1)] >= 0.0f)) ++zc;
+        const float zcr = (float) zc / (float) kDetN;
         if (energy / kDetN < 1.0e-8)
         { voiced = false; holdCount = 0; lastGci = -1; pitchConf = 0.0f; return; }
 
@@ -818,6 +857,15 @@ private:
                 pitchConf *= 0.8f;           // held pitch: decaying trust
                 return;                      // keep previous curP, stay voiced
             }
+            // Onset Hold: same idea, scoped to a rising level. See the
+            // Params comment -- this is the phrase-start thump.
+            if (onsetHoldN > 0 && voiced && holdCount < onsetHoldN
+                && zcr < 0.12f && energy > 0.06 * lastVoicedEnergy)
+            {
+                ++holdCount;
+                pitchConf *= 0.8f;
+                return;
+            }
             voiced = false;
             holdCount = 0;
             lastGci = -1;
@@ -825,6 +873,7 @@ private:
             return;
         }
         holdCount = 0;
+        lastVoicedEnergy = energy;
 
         // octave guard: resist sudden DOWNWARD period jumps (subharmonics),
         // but always allow upward corrections back to the pulse rate —
@@ -2053,6 +2102,8 @@ private:
     float dispAmt = 0.0f;
     bool  dispOn  = false;
     float pulseBodyAmt = 0.0f;        // Pulse Body (0 = v0.51.0 width)
+    int    onsetHoldN = 0;            // Onset Hold (0 = off)
+    double lastVoicedEnergy = 0.0;    // energy of the last confident frame
 
     float grainHalfPOv = 0.0f;            // experimental width override (0 = off)
     bool  grainBlendOn = false;           // experimental pulse-grain crossfade

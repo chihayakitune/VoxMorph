@@ -6601,6 +6601,28 @@ private:
                  "各パルスを1つ前のパルスと平均することで、この交互成分だけを打ち消し、声の芯は"
                  "そのまま残します。おおよそ+4半音より上でしか動作しないので、小さい変換の音は"
                  "従来と完全に同じです。元のグレイン動作に戻したい場合はオフにしてください。"));
+        toggle (*cardAdvanced, "onsethold", "Onset Hold",
+            tip ("Stops a thump at the start of phrases. The engine has to decide, many times a "
+                 "second, whether what it is hearing is a pitched voice or not - and the test it "
+                 "uses compares a slice of sound with a slightly delayed copy of itself. During "
+                 "the swell at the start of a phrase the two slices differ in loudness even "
+                 "though the voice is perfectly steady, so the test fails for a few hundredths "
+                 "of a second and the engine treats your voice as unpitched. Unpitched sound is "
+                 "passed through WITHOUT the pitch change, so a burst of your own untransposed "
+                 "voice escapes at the loudest moment of the attack - which is heard as a knock "
+                 "or thump. This keeps the previous pitch through those few frames, but only "
+                 "while the sound still looks like a voice, so consonants like S and SH are "
+                 "unaffected. Leave it on unless you want the old behaviour back.",
+                 "句の頭で鳴る「ボコっ」という打撃音のような音を止めます。エンジンは1秒に何度も"
+                 "「今聞こえているのは音程のある声かどうか」を判定していますが、その判定は音の"
+                 "一部と少しずらした自分自身を比べる方式です。発声の立ち上がりでは音量が急に"
+                 "大きくなるため、声そのものは安定していても比較する2つの音量が食い違い、"
+                 "数十ミリ秒だけ判定に失敗して「音程の無い音」と見なされます。音程の無い音は"
+                 "ピッチ変換をせずにそのまま通すので、立ち上がりのいちばん大きいところで"
+                 "変換前の低い地声が一瞬漏れ、それが打撃音のように聞こえます。この機能は"
+                 "その数フレームだけ直前の音程を保持します。ただし「まだ声に見える」間だけ"
+                 "なので、サ行などの子音には影響しません。従来の動作に戻したいとき以外は"
+                 "オンのままにしてください。"));
         slider (*cardAdvanced, "pulsebody", "Pulse Body",
             tip ("How much of each glottal pulse survives a large upward shift. To stop a raised "
                  "voice sounding like two voices at once, the engine cuts a shorter slice out of "

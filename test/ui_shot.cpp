@@ -1354,6 +1354,112 @@ int main (int argc, char** argv)
         }
     }
 
+    // ---- Onset Hold (v0.54.0) ---------------------------------------------
+    // The defect: voicing dropped out for a few frames in the middle of a
+    // phrase attack, and the unvoiced path does not pitch-shift, so a burst
+    // of the UNTRANSPOSED input escaped at full level. The test drives a
+    // crescendo on purpose -- a steady tone never fails the confidence test,
+    // so a steady-tone test would pass either way and prove nothing.
+    {
+        std::printf ("\n== Onset Hold ==\n");
+        auto* oh = proc.apvts.getParameter ("onsethold");
+        check (oh != nullptr, "onsethold parameter exists");
+        if (oh != nullptr)
+        {
+            check (oh->getDefaultValue() > 0.5f, "Onset Hold defaults to ON");
+            int rows = 0;
+            walk (ed.get(), [&] (juce::Component* c)
+            {
+                if (auto* l = dynamic_cast<juce::Label*> (c))
+                    if (l->getText() == "Onset Hold") ++rows;
+                if (auto* b = dynamic_cast<juce::Button*> (c))
+                    if (b->getButtonText() == "Onset Hold") ++rows;
+            });
+            std::printf ("  controls named \"Onset Hold\": %d\n", rows);
+            check (rows >= 1, "a row is bound to it");
+
+            auto run = [&] (bool on)
+            {
+                proc.prepareToPlay (48000.0, 512);
+                auto* pp = proc.apvts.getParameter ("pitch");
+                pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (9.0f)); pp->endChangeGesture();
+                oh->beginChangeGesture(); oh->setValueNotifyingHost (on ? 1.0f : 0.0f); oh->endChangeGesture();
+                juce::AudioBuffer<float> b (2, 512);
+                juce::MidiBuffer m;
+                std::vector<float> out;
+                // A CLEAN harmonic stack never fails the confidence test,
+                // whatever envelope it is given -- measured, 0.048 stuck
+                // either way at every ramp from 12 to 90 ms. The defect needs
+                // a crescendo AND the period-to-period irregularity a real
+                // voice has, so the source here is a pulse train with 15 %
+                // jitter and shimmer. Freeze those numbers: they belong to
+                // this generator, which is why the check below compares the
+                // two runs instead of testing an absolute level.
+                juce::Random rng (20260821);
+                double ph = 0.0, amp = 1.0, per = 48000.0 / 110.0;
+                for (int blk = 0; blk < 90; ++blk)
+                {
+                    for (int i = 0; i < 512; ++i)
+                    {
+                        const double t = (blk * 512 + i) / 48000.0;
+                        ph += 1.0 / per;
+                        if (ph >= 1.0)
+                        {
+                            ph -= 1.0;
+                            per = 48000.0 / 110.0 * (1.0 + 0.15 * (rng.nextDouble() * 2.0 - 1.0));
+                            amp = 1.0 + 0.45 * (rng.nextDouble() * 2.0 - 1.0);
+                        }
+                        double s2 = 0.0;
+                        for (int k = 1; k <= 24; ++k)
+                            s2 += std::exp (-0.16 * (k - 1)) * std::sin (2.0 * M_PI * k * ph);
+                        double env = 0.0;
+                        if (t > 0.40) env = std::min (1.0, (t - 0.40) / 0.09);
+                        b.setSample (0, i, (float) (0.3 * env * amp * s2));
+                        b.setSample (1, i, (float) (0.3 * env * amp * s2));
+                    }
+                    proc.processBlock (b, m);
+                    out.insert (out.end(), b.getReadPointer (0), b.getReadPointer (0) + 512);
+                }
+                return out;
+            };
+            // how much of the attack still sits at the INPUT pitch (110 Hz)
+            // rather than the shifted one (185 Hz)
+            auto stuck = [] (const std::vector<float>& x)
+            {
+                const int fs = 48000, N = 2048;
+                int bad = 0, tot = 0;
+                for (int s = (int) (0.42 * fs); s + N < (int) (0.62 * fs); s += N / 4)
+                {
+                    std::vector<float> re (x.begin() + s, x.begin() + s + N), im ((size_t) N, 0.0f);
+                    double e = 0.0;
+                    for (int i = 0; i < N; ++i) e += re[(size_t) i] * re[(size_t) i];
+                    if (e / N < 1.0e-6) continue;
+                    for (int i = 0; i < N; ++i)
+                        re[(size_t) i] *= 0.5f - 0.5f * std::cos (2.0f * (float) M_PI * i / N);
+                    PsolaEngine::fftForViz (re.data(), im.data(), N);
+                    auto band = [&] (double lo, double hi)
+                    {
+                        double a = 0.0;
+                        for (int k = (int) (lo * N / fs); k <= (int) (hi * N / fs); ++k)
+                            a += re[(size_t) k] * re[(size_t) k] + im[(size_t) k] * im[(size_t) k];
+                        return a;
+                    };
+                    ++tot;
+                    if (band (95, 130) > band (165, 205)) ++bad;   // input pitch wins
+                }
+                return tot > 0 ? (double) bad / tot : 0.0;
+            };
+            const double off = stuck (run (false)), on = stuck (run (true));
+            std::printf ("  attack frames dominated by the INPUT pitch: off %.2f, on %.2f\n", off, on);
+            check (off > 0.05, "the generator actually reproduces the defect");
+            check (on < off * 0.5,
+                   "Onset Hold at least halves the untransposed burst in the attack");
+            auto* pp = proc.apvts.getParameter ("pitch");
+            pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture();
+            oh->beginChangeGesture(); oh->setValueNotifyingHost (1.0f); oh->endChangeGesture();
+        }
+    }
+
     // ---- .vmprofile round-trip, including the v0.40.0 texture fields ----
     // profileToXml / profileFromXml live in PluginEditor.h and need JUCE, so
     // offline_test cannot reach them; this is the only place they get tested.
