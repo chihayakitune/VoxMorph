@@ -1460,6 +1460,104 @@ int main (int argc, char** argv)
         }
     }
 
+    // ---- Pre-Lock Low Cut (v0.56.0) ---------------------------------------
+    // Onset Hold cannot touch the frames BEFORE the first voiced lock of a
+    // phrase, because there is no pitch to hold yet. This checks that the
+    // low cut both exists off by default and actually removes the low band
+    // from the pre-lock passthrough. The source is a hard-onset low tone: the
+    // engine cannot lock instantly, so the first frames go out unshifted, and
+    // at 110 Hz the leak lands squarely in the band being measured.
+    {
+        std::printf ("\n== Pre-Lock Low Cut ==\n");
+        auto* pc = proc.apvts.getParameter ("prelowcut");
+        check (pc != nullptr, "prelowcut parameter exists");
+        if (pc != nullptr)
+        {
+            check (pc->getDefaultValue() < 0.001f,
+                   "Pre-Lock Low Cut defaults to OFF (it awaits a listening test)");
+            std::unique_ptr<juce::Component> beta (new BetaPanel (proc));
+            int rows = 0, outside = 0;
+            walk (beta.get(), [&] (juce::Component* c)
+            {
+                if (auto* l = dynamic_cast<juce::Label*> (c))
+                    if (l->getText() == "Pre-Lock Low Cut") ++rows;
+                if (auto* b = dynamic_cast<juce::Button*> (c))
+                    if (b->getButtonText() == "Pre-Lock Low Cut") ++rows;
+            });
+            for (int i = 0; i < beta->getNumChildComponents(); ++i)
+                if (! beta->getLocalBounds().contains (beta->getChildComponent (i)->getBounds()))
+                    ++outside;
+            std::printf ("  rows in the BETA panel: %d, children outside it: %d\n", rows, outside);
+            check (rows >= 1, "a row is bound to it");
+            check (outside == 0, "the new row still fits inside the BETA window");
+
+            auto run = [&] (float amt)
+            {
+                proc.prepareToPlay (48000.0, 512);
+                auto* pp = proc.apvts.getParameter ("pitch");
+                pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (9.0f)); pp->endChangeGesture();
+                pc->beginChangeGesture(); pc->setValueNotifyingHost (amt); pc->endChangeGesture();
+                juce::AudioBuffer<float> b (2, 512);
+                juce::MidiBuffer m;
+                std::vector<float> out;
+                // A CLEAN tone on purpose here, unlike the Onset Hold test.
+                // With period jitter the 90-130 Hz band fills up with the
+                // old-pitch residue from grain reuse, which this feature does
+                // not touch and which then masks what it does -- measured,
+                // 22.3 dB either way. The clean tone leaves the pre-lock leak
+                // as the only thing in that band. Generator-specific numbers,
+                // so the check below is a relative one.
+                double ph = 0.0, amp = 1.0, per = 48000.0 / 110.0;
+                for (int blk = 0; blk < 60; ++blk)
+                {
+                    for (int i = 0; i < 512; ++i)
+                    {
+                        const double t = (blk * 512 + i) / 48000.0;
+                        ph += 1.0 / per;
+                        if (ph >= 1.0) ph -= 1.0;
+                        double s2 = 0.0;
+                        for (int k = 1; k <= 20; ++k)
+                            s2 += std::exp (-0.16 * (k - 1)) * std::sin (2.0 * M_PI * k * ph);
+                        const double env = t > 0.30 ? std::min (1.0, (t - 0.30) / 0.02) : 0.0;
+                        b.setSample (0, i, (float) (0.3 * env * amp * s2));
+                        b.setSample (1, i, (float) (0.3 * env * amp * s2));
+                    }
+                    proc.processBlock (b, m);
+                    out.insert (out.end(), b.getReadPointer (0), b.getReadPointer (0) + 512);
+                }
+                return out;
+            };
+            // energy at the INPUT pitch (110 Hz) over the first 60 ms of output
+            // Only the pre-lock window: the input onset is at 0.30 s and the
+            // engine's lookahead puts it out at about 0.343 s, so 0.335-0.395
+            // is the stretch before the first lock. A wider window lets the
+            // steady voiced output in and washes the difference out.
+            auto lowAtInputPitch = [] (const std::vector<float>& x)
+            {
+                const int fs = 48000, N = 1024;
+                double best = 0.0;
+                for (int s = (int) (0.335 * fs); s + N < (int) (0.395 * fs); s += N / 16)
+                {
+                    std::vector<float> re (x.begin() + s, x.begin() + s + N), im ((size_t) N, 0.0f);
+                    for (int i = 0; i < N; ++i)
+                        re[(size_t) i] *= 0.5f - 0.5f * std::cos (2.0f * (float) M_PI * i / N);
+                    PsolaEngine::fftForViz (re.data(), im.data(), N);
+                    double a = 0.0;
+                    for (int k = (int) (90.0 * N / fs); k <= (int) (130.0 * N / fs); ++k)
+                        a += re[(size_t) k] * re[(size_t) k] + im[(size_t) k] * im[(size_t) k];
+                    best = std::max (best, a);
+                }
+                return 10.0 * std::log10 (best + 1.0e-20);
+            };
+            const double off = lowAtInputPitch (run (0.0f)), on = lowAtInputPitch (run (1.0f));
+            std::printf ("  90-130 Hz peak across the attack: off %.1f dB, on %.1f dB\n", off, on);
+            check (on < off - 3.0, "Pre-Lock Low Cut removes at least 3 dB of the leak");
+            pc->beginChangeGesture(); pc->setValueNotifyingHost (0.0f); pc->endChangeGesture();
+            auto* pp = proc.apvts.getParameter ("pitch");
+            pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture();
+        }
+    }
+
     // ---- .vmprofile round-trip, including the v0.40.0 texture fields ----
     // profileToXml / profileFromXml live in PluginEditor.h and need JUCE, so
     // offline_test cannot reach them; this is the only place they get tested.

@@ -145,6 +145,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     // fricative periodicity both unchanged.
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "onsethold", 1 }, "Onset Hold", true));
+    // Pre-Lock Low Cut (v0.56.0). OFF by default: it is a real fix for a
+    // real leak, but it is the user's ear that decides whether the attacks
+    // sound better without their own low fundamental in them, and the
+    // instruction sheet this came from asks that no new default ship before
+    // that listening. Measured over 39 phrase onsets at +9 st: time with the
+    // 60-140 Hz band above the band the shifted voice occupies falls from
+    // 480 ms to 50 ms, p95 from +8.1 to -6.2 dB, while the periodicity
+    // imposed on fricatives does not move and the old-pitch residue improves.
+    layout.add (std::make_unique<P> (juce::ParameterID { "prelowcut", 1 }, "Pre-Lock Low Cut",
+                juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
     // Pulse Body (v0.52.0). Default raised to 0.75 in v0.53.0 after the user
     // A/B'd the four settings: that is the value where the output waveform's
     // positive/negative peak ratio lands on the original recording's (1.007
@@ -294,6 +304,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pPulseSmooth = apvts.getRawParameterValue ("pulsesmooth");
     pPulseBody   = apvts.getRawParameterValue ("pulsebody");
     pOnsetHold   = apvts.getRawParameterValue ("onsethold");
+    pPreLowCut   = apvts.getRawParameterValue ("prelowcut");
     pFloor     = apvts.getRawParameterValue ("pitchfloor");
     pAutoMute  = apvts.getRawParameterValue ("automute");
     pLowLat    = apvts.getRawParameterValue ("lowlat");
@@ -608,6 +619,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     // it costs nothing. See the Params comments in PsolaEngine.h.
     p.onsetHold        = pOnsetHold->load() > 0.5f ? 5 : 0;
     p.holdTracksPeriod = pOnsetHold->load() > 0.5f;
+    p.preLockLowCut    = pPreLowCut->load();
     p.pitchFloorHz  = pLowOn->load() > 0.5f ? pFloor->load() : 0.0f;
     p.lowLatency    = pLowLat->load() > 0.5f;
     p.robotHz       = pRobotHz->load();

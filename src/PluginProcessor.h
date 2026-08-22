@@ -423,6 +423,7 @@ private:
     std::atomic<float>* pPulseSmooth = nullptr;
     std::atomic<float>* pPulseBody   = nullptr;
     std::atomic<float>* pOnsetHold   = nullptr;
+    std::atomic<float>* pPreLowCut   = nullptr;
     std::atomic<float>* pFloor     = nullptr;
     std::atomic<float>* pAutoMute  = nullptr;
     std::atomic<float>* pLowLat    = nullptr;   // Legacy Low Latency (Beta)

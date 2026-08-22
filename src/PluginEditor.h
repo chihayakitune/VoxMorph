@@ -5280,6 +5280,26 @@ public:
                    "合成的に聞こえる場合は0のままにしてください。"));
         addAndMakeVisible (*breathRow);
 
+        preCutRow = std::make_unique<ParamRow> (proc, "prelowcut", ParamRow::Kind::slider,
+            "Pre-Lock Low Cut",
+            vmTip ("EXPERIMENTAL. Removes your own low voice from the very start of a phrase. "
+                   "Onset Hold (MAIN tab) can only keep a pitch the engine has already found; "
+                   "for the first few hundredths of a second of a phrase there is nothing to "
+                   "hold yet, and until the pitch is found the sound is passed through WITHOUT "
+                   "the pitch change - so the opening of every phrase leaks your untransposed "
+                   "voice underneath the new one. This cuts the bottom out of that leaked part "
+                   "only, while it lasts. The airy top of the attack still passes, so consonants "
+                   "keep their bite, and anything that looks like S or SH is left alone. "
+                   "Attacks may feel lighter. 0 = off.",
+                   "句の頭で漏れる「変換前の自分の低い声」を取り除きます。MAINタブのOnset Holdは"
+                   "「すでに見つかっている音程を保持する」機能なので、句の出だしのまだ音程が"
+                   "見つかっていない数十ミリ秒には効きません。その間の音はピッチ変換されずに"
+                   "そのまま通るため、新しい声の下に地声が一瞬顔を出します。この機能は、"
+                   "その漏れている部分の低域だけを、漏れている間だけ削ります。立ち上がりの"
+                   "空気感は残るので子音の勢いは保たれ、サ行のように見える音には手を付けません。"
+                   "立ち上がりが軽く感じられる場合があります。0=オフ。"));
+        addAndMakeVisible (*preCutRow);
+
         // Legacy Low Latency (moved here in v0.31.0, parameter id "lowlat"
         // unchanged). This is the OLD approach to latency: it shortens the
         // engine's lookahead and narrows its analysis, so it costs quality.
@@ -5314,7 +5334,7 @@ public:
         };
         addAndMakeVisible (closeBtn);
 
-        setSize (600, 280);
+        setSize (600, 314);
         sendLookAndFeelChange();
     }
 
@@ -5330,6 +5350,8 @@ public:
         r.removeFromTop (4);
         breathRow->setBounds (r.removeFromTop (30));
         r.removeFromTop (4);
+        preCutRow->setBounds (r.removeFromTop (30));
+        r.removeFromTop (4);
         lowLatRow->setBounds (r.removeFromTop (28));
         closeBtn.setBounds (r.removeFromBottom (30).removeFromRight (100).reduced (0, 2));
     }
@@ -5341,7 +5363,7 @@ private:
     juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
     juce::TooltipWindow  tips { this, 400 };
     juce::Label heading, note;
-    std::unique_ptr<ParamRow> gciRow, breathRow, lowLatRow;
+    std::unique_ptr<ParamRow> gciRow, breathRow, preCutRow, lowLatRow;
     juce::TextButton closeBtn { "Close" };
 };
 

@@ -270,6 +270,34 @@ public:
         // was tested as a rescue and as a release criterion and is useless
         // for both -- see HANDOVER v0.55.0.
         bool  holdTracksPeriod = false;
+
+        // Pre-Lock Low Cut (v0.56.0, EXPERIMENTAL -- 0 = off, bit-identical).
+        // Onset Hold only exists once the engine is ALREADY voiced. Before
+        // the first lock of a phrase there is nothing holding anything, and
+        // the unvoiced path passes the input through without shifting it --
+        // so the opening of every phrase leaks the speaker's own low
+        // fundamental. Measured on the user's take, that is what is left:
+        // across 39 phrase onsets, no setting of Onset Hold moves the 60-140
+        // vs 150-600 Hz balance by more than a few tenths of a dB, while in
+        // the pre-lock frames themselves the low band sits 5-11 dB ABOVE the
+        // band the shifted voice occupies.
+        //
+        // This suppresses the low, periodic body of the unvoiced path while
+        // the frame looks like a vowel that has not been locked yet -- low
+        // zero-crossing rate and rising level -- and only then. A fricative
+        // (high ZCR) is untouched, and so is everything after the lock. The
+        // aperiodic top of the sound still passes, so the attack keeps its
+        // consonant.
+        //
+        // 24 dB/oct at 200 Hz: the leak measured on this speaker is at
+        // 100-110 Hz, and a gentler slope simply does not reach it -- an
+        // earlier 12 dB/oct attempt at 160 Hz moved the worst moment by
+        // 1.8 dB and was abandoned for it. Two Butterworth biquads, NOT
+        // "signal minus a low-pass": subtracting a cascade of one-poles
+        // BOOSTS below the corner (1.33x at half the corner frequency) --
+        // that version measured as a 1.35 dB rise in the 60-140 Hz band it
+        // was supposed to be removing.
+        float preLockLowCut = 0.0f;   // 0..1
     };
 
     void prepare (double sampleRate)
@@ -286,6 +314,7 @@ public:
         noiseBuf.assign (kRing, 0.0f);
         accBuf.assign (kRing, 0.0f);
         normBuf.assign (kRing, 0.0f);
+        candBuf.assign (kRing, 0.0f);
         tmp.assign ((size_t) (kDetN + maxLagLow + 4), 0.0f);
         tmpD.assign ((size_t) ((kDetN + maxLagLow) / 2 + 4), 0.0f);
         sqPre.assign ((size_t) (kDetN + maxLagLow + 5), 0.0);
@@ -315,6 +344,9 @@ public:
         tiltLp      = 0.0f;
         dispS1.fill (0.0f);  dispS2.fill (0.0f);
         buildDisperse();
+        preZ.fill (0.0f);
+        buildPreHp (200.0);
+        preLock = false;  preHold = 0;  prevFrameE = 0.0;
         tiltK       = 1.0f - std::exp ((float) (-2.0 * M_PI * 1000.0 / fs));
 
         lastGci = -1;
@@ -458,6 +490,7 @@ public:
         pulseBodyAmt   = std::clamp (q.pulseBody, 0.0f, 1.0f);
         onsetHoldN     = std::clamp (q.onsetHold, 0, 8);
         trackInHold    = q.holdTracksPeriod;
+        preCutAmt      = std::clamp (q.preLockLowCut, 0.0f, 1.0f);
         setDisperse (std::clamp (q.pulseDisperse, 0.0f, 1.0f));
         hiFreq         = (q.hiRangeHz > 20.0f) ? std::clamp (q.hiRangeHz, 100.0f, 600.0f) : 0.0f;
         hiPAmt         = std::clamp (q.hiPitchAmt,   0.0f, 1.0f);
@@ -539,6 +572,7 @@ public:
             D = pendingD;
             std::fill (accBuf.begin(),  accBuf.end(),  0.0f);
             std::fill (normBuf.begin(), normBuf.end(), 0.0f);
+            std::fill (candBuf.begin(), candBuf.end(), 0.0f);
             std::fill (noiseFx.begin(), noiseFx.end(), 0.0f);
             dispS1.fill (0.0f);  dispS2.fill (0.0f);
             nextMarkF  = (double) (writePos + D);
@@ -736,6 +770,16 @@ public:
                 wet = gLow * tiltLp + gHigh * (wet - tiltLp);
             }
 
+            if (preCutAmt > 0.0f)
+            {
+                // The crossfade is the amount times how much of THIS sample
+                // came from pre-lock grains, which comes off the overlap-add
+                // and is therefore already as smooth as the grain windows.
+                const float cf = nrm > 1.0e-3f ? candBuf[idx] / std::max (nrm, 0.25f) : 0.0f;
+                const float hp = preHighpass (wet);
+                wet += preCutAmt * std::clamp (cf, 0.0f, 1.0f) * (hp - wet);
+            }
+
             if (dispOn)   // Pulse Softness: phase only, magnitude untouched
                 wet = disperse (wet);
 
@@ -749,6 +793,7 @@ public:
 
             accBuf[idx]  = 0.0f;
             normBuf[idx] = 0.0f;
+            candBuf[idx] = 0.0f;
         }
     }
 
@@ -820,8 +865,22 @@ private:
         for (int i = 1; i < kDetN; ++i)
             if ((tmp[(size_t)i] >= 0.0f) != (tmp[(size_t)(i-1)] >= 0.0f)) ++zc;
         const float zcr = (float) zc / (float) kDetN;
+        // pre-lock candidate: not voiced yet, but shaped like a vowel and
+        // getting louder. Recomputed every frame; the grain path reads it.
+        const double preE = prevFrameE;
+        prevFrameE = energy;
+        // "not collapsing" rather than "strictly rising": the worst leaks sit
+        // at the top of the swell, where the level has already plateaued for
+        // a frame, and a strict rise misses exactly those.
+        if ((! voiced) && preCutAmt > 0.0f && zcr < 0.12f && energy > 0.6 * preE)
+            preHold = kPreHold;
+        else if (voiced || zcr >= 0.12f)
+            preHold = 0;
+        else if (preHold > 0)
+            --preHold;
+        preLock = preHold > 0;
         if (energy / kDetN < 1.0e-8)
-        { voiced = false; holdCount = 0; lastGci = -1; pitchConf = 0.0f; return; }
+        { voiced = false; holdCount = 0; lastGci = -1; pitchConf = 0.0f; preLock = false; preHold = 0; return; }
 
         // ---- decimate x2: the CMND search runs on a half-rate copy, cutting
         // this burst (which lands on a SINGLE block every 512 samples) ~4x.
@@ -1549,6 +1608,7 @@ private:
             const size_t idx = (size_t) ((mi + j) & kMask);
             accBuf[idx]  += spectral ? x : w * x;   // spectral grain is pre-windowed
             normBuf[idx] += w;
+            if (preCutAmt > 0.0f && ! v && preLock) candBuf[idx] += w;
         }
 
         nextMarkF += (double) std::max (24.0f, Ts);
@@ -2042,7 +2102,7 @@ private:
     int    effMaxLagCur = 800, houtCapCur = 1200;
     float  capHalfCur = 800.0f, guardFrac = 1.0f;
 
-    std::vector<float>  inBuf, harmBuf, noiseBuf, accBuf, normBuf, tmp, tmpD, grainScratch;
+    std::vector<float>  inBuf, harmBuf, noiseBuf, accBuf, normBuf, candBuf, tmp, tmpD, grainScratch;
     std::vector<float>  fr, fi, mag, env, envSm, baseEnv, pkV;
     std::vector<int>    pkB;
     std::vector<double> dbuf, prefix;
@@ -2164,6 +2224,39 @@ private:
         return (float) best;
     }
 
+    // Fourth-order Butterworth high-pass, as two biquads (Q = 0.5412 and
+    // 1.3066). Transposed direct form II.
+    void buildPreHp (double fc)
+    {
+        static const double q[2] = { 0.54119610, 1.30656296 };
+        const double w0 = 2.0 * M_PI * fc / (fs > 0.0 ? fs : 48000.0);
+        const double cw = std::cos (w0), sw = std::sin (w0);
+        for (int k = 0; k < 2; ++k)
+        {
+            const double al = sw / (2.0 * q[k]);
+            const double a0 = 1.0 + al;
+            preB[(size_t) (3*k+0)] = (float) (((1.0 + cw) / 2.0) / a0);
+            preB[(size_t) (3*k+1)] = (float) ((-(1.0 + cw)) / a0);
+            preB[(size_t) (3*k+2)] = (float) (((1.0 + cw) / 2.0) / a0);
+            preA[(size_t) (2*k+0)] = (float) ((-2.0 * cw) / a0);
+            preA[(size_t) (2*k+1)] = (float) ((1.0 - al) / a0);
+        }
+    }
+
+    inline float preHighpass (float x)
+    {
+        for (int k = 0; k < 2; ++k)
+        {
+            const float b0 = preB[(size_t)(3*k)], b1 = preB[(size_t)(3*k+1)], b2 = preB[(size_t)(3*k+2)];
+            const float a1 = preA[(size_t)(2*k)], a2 = preA[(size_t)(2*k+1)];
+            const float y = b0 * x + preZ[(size_t)(2*k)];
+            preZ[(size_t)(2*k)]     = b1 * x - a1 * y + preZ[(size_t)(2*k+1)] + 1.0e-25f;
+            preZ[(size_t)(2*k+1)]   = b2 * x - a2 * y;
+            x = y;
+        }
+        return x;
+    }
+
     // ---------------- Pulse Softness (all-pass phase dispersion) ---------
     // Second-order all-pass section k:
     //     H(z) = (a2 + a1 z^-1 + z^-2) / (1 + a1 z^-1 + a2 z^-2)
@@ -2217,6 +2310,13 @@ private:
     float pulseBodyAmt = 0.0f;        // Pulse Body (0 = v0.51.0 width)
     int    onsetHoldN = 0;            // Onset Hold (0 = off)
     bool   trackInHold = false;       // track the period while holding
+    float  preCutAmt = 0.0f;          // Pre-Lock Low Cut (0 = off)
+    bool   preLock   = false;         // frame looks like an unlocked vowel
+    int    preHold   = 0;             // frames left in the candidate state
+    static constexpr int kPreHold = 2;
+    double prevFrameE = 0.0;
+    std::array<float,6> preB {};
+    std::array<float,4> preA {}, preZ {};
     static constexpr float kHoldTrack = 0.3f;   // measured: 0.3 > 0.6 > 0.9
     std::vector<double> sqPre;        // prefix sum of squares for the above
     double lastVoicedEnergy = 0.0;    // energy of the last confident frame
