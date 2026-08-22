@@ -289,15 +289,37 @@ public:
         // aperiodic top of the sound still passes, so the attack keeps its
         // consonant.
         //
-        // 24 dB/oct at 200 Hz: the leak measured on this speaker is at
-        // 100-110 Hz, and a gentler slope simply does not reach it -- an
-        // earlier 12 dB/oct attempt at 160 Hz moved the worst moment by
-        // 1.8 dB and was abandoned for it. Two Butterworth biquads, NOT
-        // "signal minus a low-pass": subtracting a cascade of one-poles
-        // BOOSTS below the corner (1.33x at half the corner frequency) --
-        // that version measured as a 1.35 dB rise in the 60-140 Hz band it
-        // was supposed to be removing.
+        // The corner FOLLOWS the speaker, at 1.6x the pitch the engine last
+        // tracked, clamped to 120-400 Hz. What leaks is the input's own
+        // fundamental, so a number fixed at 200 Hz only suits the voice it
+        // was tuned on: it would miss a higher speaker entirely and would eat
+        // the attack of a lower one. Before the first lock of a phrase the
+        // last pitch of the PREVIOUS phrase is the estimate -- stale, but the
+        // same speaker, which is all this needs.
+        //
+        // Only acts on upward shifts of more than 2 semitones; below that the
+        // unvoiced passthrough is either correct or close enough that cutting
+        // it would only thin the attack.
         float preLockLowCut = 0.0f;   // 0..1
+
+        // Onset Backfill (v0.57.0, EXPERIMENTAL -- false = bit-identical).
+        // The actual fix for the phrase-start leak, rather than hiding it.
+        //
+        // Grains are laid down AHEAD of the sample being played: the engine
+        // places marks up to houtCap past the write position, so at any
+        // moment about 27 ms of output is already accumulated and not yet
+        // handed to the host. When the first voiced lock of a phrase lands,
+        // that 27 ms is still sitting there -- rendered by the unvoiced path,
+        // at the speaker's own pitch, because at the time it was placed
+        // nothing knew better.
+        //
+        // This throws that work away and does it again with the pitch now in
+        // hand. The already-EMITTED part cannot be recalled, so the join is a
+        // short crossfade: the existing accumulation is scaled down over a
+        // few milliseconds while the new grains ramp up. Both the signal and
+        // the overlap-add weights are scaled together, so the crossfade
+        // happens in the normalised domain and the level does not step.
+        bool  onsetBackfill = false;
     };
 
     void prepare (double sampleRate)
@@ -344,9 +366,11 @@ public:
         tiltLp      = 0.0f;
         dispS1.fill (0.0f);  dispS2.fill (0.0f);
         buildDisperse();
-        preZ.fill (0.0f);
-        buildPreHp (200.0);
+        preLp.fill (0.0f);
+        preFc = 200.0f;
+        buildPreShelf (preFc);
         preLock = false;  preHold = 0;  prevFrameE = 0.0;
+        backfillPending = false;  unvoicedRun = 0;  olaFloor = INT64_MIN;  fadeLen = 0;
         tiltK       = 1.0f - std::exp ((float) (-2.0 * M_PI * 1000.0 / fs));
 
         lastGci = -1;
@@ -490,7 +514,11 @@ public:
         pulseBodyAmt   = std::clamp (q.pulseBody, 0.0f, 1.0f);
         onsetHoldN     = std::clamp (q.onsetHold, 0, 8);
         trackInHold    = q.holdTracksPeriod;
-        preCutAmt      = std::clamp (q.preLockLowCut, 0.0f, 1.0f);
+        // Only on a real upward shift. On a downward shift or at pitch 0 the
+        // unvoiced passthrough is CORRECT -- there is nothing to remove, and
+        // cutting the bottom out of an attack would be pure damage.
+        backfillOn     = q.onsetBackfill;
+        preCutAmt      = (q.pitchSemi > 2.0f) ? std::clamp (q.preLockLowCut, 0.0f, 1.0f) : 0.0f;
         setDisperse (std::clamp (q.pulseDisperse, 0.0f, 1.0f));
         hiFreq         = (q.hiRangeHz > 20.0f) ? std::clamp (q.hiRangeHz, 100.0f, 600.0f) : 0.0f;
         hiPAmt         = std::clamp (q.hiPitchAmt,   0.0f, 1.0f);
@@ -573,6 +601,7 @@ public:
             std::fill (accBuf.begin(),  accBuf.end(),  0.0f);
             std::fill (normBuf.begin(), normBuf.end(), 0.0f);
             std::fill (candBuf.begin(), candBuf.end(), 0.0f);
+            backfillPending = false;  olaFloor = INT64_MIN;  fadeLen = 0;
             std::fill (noiseFx.begin(), noiseFx.end(), 0.0f);
             dispS1.fill (0.0f);  dispS2.fill (0.0f);
             nextMarkF  = (double) (writePos + D);
@@ -743,8 +772,40 @@ public:
         else
             airFxHop = (writePos / (kFxN / 2) + 1) * (int64_t) (kFxN / 2);
 
+        if (backfillPending)
+        {
+            backfillPending = false;
+            // writePos is the first sample the host has NOT been given yet.
+            const int64_t from = writePos;
+            const int     xf   = std::min (fadeN, (int) (houtCapCur / 2));
+            // scale the existing accumulation down across the join. acc and
+            // norm are scaled by the SAME factor, so the normalised signal
+            // there is untouched -- what changes is how much say it has once
+            // the new grains are added on top.
+            for (int j = 0; j < xf; ++j)
+            {
+                const float r = 0.5f * (1.0f - std::cos ((float) M_PI * (float) j / (float) xf));
+                const size_t k = (size_t) ((from + j) & kMask);
+                accBuf[k]  *= (1.0f - r);
+                normBuf[k] *= (1.0f - r);
+                candBuf[k] *= (1.0f - r);
+            }
+            for (int64_t p2 = from + xf; p2 < (int64_t) nextMarkF + houtCapCur; ++p2)
+            {
+                const size_t k = (size_t) (p2 & kMask);
+                accBuf[k] = 0.0f;  normBuf[k] = 0.0f;  candBuf[k] = 0.0f;
+            }
+            nextMarkF  = (double) from;
+            lastInMark = (double) (from - D);
+            olaFloor   = from;      // never write behind what has been played
+            fadeFrom   = from;
+            fadeLen    = xf;
+        }
+
         while (nextMarkF < (double) (writePos + houtCapCur))
             placeGrain();
+        olaFloor = INT64_MIN;
+        fadeLen  = 0;
 
         const bool doTilt = (gLow != 1.0f || gHigh != 1.0f);
         // Full wet is by far the normal setting: 1.0f * wet + 0.0f * dry is
@@ -772,12 +833,14 @@ public:
 
             if (preCutAmt > 0.0f)
             {
-                // The crossfade is the amount times how much of THIS sample
-                // came from pre-lock grains, which comes off the overlap-add
-                // and is therefore already as smooth as the grain windows.
-                const float cf = nrm > 1.0e-3f ? candBuf[idx] / std::max (nrm, 0.25f) : 0.0f;
-                const float hp = preHighpass (wet);
-                wet += preCutAmt * std::clamp (cf, 0.0f, 1.0f) * (hp - wet);
+                // The depth is the amount times how much of THIS sample came
+                // from pre-lock grains, which comes off the overlap-add and is
+                // therefore already as smooth as the grain windows.
+                // depth is linear in dB: amount 1 and a fully pre-lock
+                // sample give -24 dB below the corner, amount 0.5 gives -12.
+                const float cf = std::clamp (nrm > 1.0e-3f ? candBuf[idx] / std::max (nrm, 0.25f) : 0.0f, 0.0f, 1.0f);
+                const float k  = 1.0f - std::pow (10.0f, -0.3f * preCutAmt * cf);
+                wet = preShelf (wet, k);
             }
 
             if (dispOn)   // Pulse Softness: phase only, magnitude untouched
@@ -880,7 +943,17 @@ private:
             --preHold;
         preLock = preHold > 0;
         if (energy / kDetN < 1.0e-8)
-        { voiced = false; holdCount = 0; lastGci = -1; pitchConf = 0.0f; preLock = false; preHold = 0; return; }
+        {
+            // NOTE the unvoiced counter has to advance here too. Digital
+            // silence takes this early return, so without it the first
+            // phrase after atrue silence -- the commonest case of all, and the
+            // only one a synthetic test ever produces -- never counted as a
+            // preceding unvoiced stretch and never backfilled.
+            voiced = false; holdCount = 0; lastGci = -1; pitchConf = 0.0f;
+            preLock = false; preHold = 0;
+            if (unvoicedRun < 1000) ++unvoicedRun;
+            return;
+        }
 
         // ---- decimate x2: the CMND search runs on a half-rate copy, cutting
         // this burst (which lands on a SINGLE block every 512 samples) ~4x.
@@ -1006,11 +1079,17 @@ private:
             holdCount = 0;
             lastGci = -1;
             pitchConf = 0.0f;
+            if (unvoicedRun < 1000) ++unvoicedRun;
             dlPush (4);
             return;
         }
         holdCount = 0;
         lastVoicedEnergy = energy;
+        if (preCutAmt > 0.0f && curP > 2.0f)
+        {
+            const float want = std::clamp (1.6f * (float) fs / curP, 120.0f, 400.0f);
+            if (std::abs (want - preFc) > 0.05f * preFc) { preFc = want; buildPreShelf (preFc); }
+        }
 
         // octave guard: resist sudden DOWNWARD period jumps (subharmonics),
         // but always allow upward corrections back to the pulse rate —
@@ -1080,6 +1159,10 @@ private:
         const float smoothBase = lowVoice ? 0.85f : 0.65f;
         const float rel = std::abs (newP - curP) / std::max (curP, 1.0f);
         const float smooth = (voiced && rel > 0.06f) ? 0.5f : smoothBase;
+        // A phrase start, not a hold release: only then is there a stretch of
+        // unvoiced output behind us worth re-rendering.
+        if (backfillOn && ! voiced && unvoicedRun >= 3) backfillPending = true;
+        unvoicedRun = 0;
         curP  = voiced ? smooth * curP + (1.0f - smooth) * newP : newP;
         voiced = true;
         dlPush (0);
@@ -1603,9 +1686,13 @@ private:
 
         for (int j = -Hout; j <= Hout; ++j)
         {
+            const int64_t op = mi + j;
+            if (op < olaFloor) continue;          // backfill: already played
             const float x = grainScratch[(size_t) (j + Hout)];
-            const float w = 0.5f * (1.0f + std::cos ((float) M_PI * (float) j / (float) Hout));
-            const size_t idx = (size_t) ((mi + j) & kMask);
+            float w = 0.5f * (1.0f + std::cos ((float) M_PI * (float) j / (float) Hout));
+            if (fadeLen > 0 && op >= fadeFrom && op < fadeFrom + fadeLen)
+                w *= 0.5f * (1.0f - std::cos ((float) M_PI * (float) (op - fadeFrom) / (float) fadeLen));
+            const size_t idx = (size_t) (op & kMask);
             accBuf[idx]  += spectral ? x : w * x;   // spectral grain is pre-windowed
             normBuf[idx] += w;
             if (preCutAmt > 0.0f && ! v && preLock) candBuf[idx] += w;
@@ -2224,35 +2311,37 @@ private:
         return (float) best;
     }
 
-    // Fourth-order Butterworth high-pass, as two biquads (Q = 0.5412 and
-    // 1.3066). Transposed direct form II.
-    void buildPreHp (double fc)
+    // Low shelf, as four cascaded first-order sections. Each one is
+    //     y = x - k * lowpass(x)
+    // which is a first-order shelf of depth (1-k): unity above the corner,
+    // (1-k) below it, and NO bump anywhere in between. Four of them give
+    // 24 dB/oct of slope at k -> 1 while the family stays monotone in k.
+    //
+    // Two things this gets right that the previous version did not.
+    //
+    // (a) The amount is a real amount. v0.56.0 crossfaded the dry signal
+    // against a 4th-order Butterworth high-pass, and dry and high-pass are
+    // NOT in phase above the corner -- an IIR high-pass still carries tens of
+    // degrees at several times its corner -- so the halfway mix produced a
+    // notch that the full-wet setting did not have. Measured on the user's
+    // take, amount 0.5 cut the 150-600 Hz body by 4.40 dB while amount 1.0
+    // cut it by 1.10 dB. Here the correction term is a LOW-PASSED signal,
+    // which vanishes above the corner on its own, so nothing can cancel up
+    // there whatever the amount is.
+    //
+    // (b) The amount is linear in dB. k = 1 - 10^(-0.3*amount) per section,
+    // so four sections give 0 dB at amount 0 and -24 dB at amount 1.
+    void buildPreShelf (double fc)
     {
-        static const double q[2] = { 0.54119610, 1.30656296 };
-        const double w0 = 2.0 * M_PI * fc / (fs > 0.0 ? fs : 48000.0);
-        const double cw = std::cos (w0), sw = std::sin (w0);
-        for (int k = 0; k < 2; ++k)
-        {
-            const double al = sw / (2.0 * q[k]);
-            const double a0 = 1.0 + al;
-            preB[(size_t) (3*k+0)] = (float) (((1.0 + cw) / 2.0) / a0);
-            preB[(size_t) (3*k+1)] = (float) ((-(1.0 + cw)) / a0);
-            preB[(size_t) (3*k+2)] = (float) (((1.0 + cw) / 2.0) / a0);
-            preA[(size_t) (2*k+0)] = (float) ((-2.0 * cw) / a0);
-            preA[(size_t) (2*k+1)] = (float) ((1.0 - al) / a0);
-        }
+        preK = (float) (1.0 - std::exp (-2.0 * M_PI * fc / (fs > 0.0 ? fs : 48000.0)));
     }
 
-    inline float preHighpass (float x)
+    inline float preShelf (float x, float depth)   // depth = per-section k
     {
-        for (int k = 0; k < 2; ++k)
+        for (int i = 0; i < 4; ++i)
         {
-            const float b0 = preB[(size_t)(3*k)], b1 = preB[(size_t)(3*k+1)], b2 = preB[(size_t)(3*k+2)];
-            const float a1 = preA[(size_t)(2*k)], a2 = preA[(size_t)(2*k+1)];
-            const float y = b0 * x + preZ[(size_t)(2*k)];
-            preZ[(size_t)(2*k)]     = b1 * x - a1 * y + preZ[(size_t)(2*k+1)] + 1.0e-25f;
-            preZ[(size_t)(2*k+1)]   = b2 * x - a2 * y;
-            x = y;
+            preLp[(size_t) i] += preK * (x - preLp[(size_t) i]) + 1.0e-25f;
+            x -= depth * preLp[(size_t) i];
         }
         return x;
     }
@@ -2315,8 +2404,18 @@ private:
     int    preHold   = 0;             // frames left in the candidate state
     static constexpr int kPreHold = 2;
     double prevFrameE = 0.0;
-    std::array<float,6> preB {};
-    std::array<float,4> preA {}, preZ {};
+    std::array<float,4> preLp {};
+    float  preK = 0.03f;
+    float  preFc = 200.0f;   // corner actually in use (adapts, see setParams)
+
+    // Onset Backfill
+    bool    backfillOn      = false;
+    bool    backfillPending = false;
+    int     unvoicedRun     = 0;
+    int64_t olaFloor        = INT64_MIN;
+    int64_t fadeFrom        = 0;
+    int     fadeLen         = 0;
+    static constexpr int fadeN = 128;     // ~2.9 ms at 44.1 kHz
     static constexpr float kHoldTrack = 0.3f;   // measured: 0.3 > 0.6 > 0.9
     std::vector<double> sqPre;        // prefix sum of squares for the above
     double lastVoicedEnergy = 0.0;    // energy of the last confident frame

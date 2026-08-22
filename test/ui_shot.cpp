@@ -1367,6 +1367,9 @@ int main (int argc, char** argv)
         if (oh != nullptr)
         {
             check (oh->getDefaultValue() > 0.5f, "Onset Hold defaults to ON");
+            auto* ohl = proc.apvts.getParameter ("onsetholdlong");
+            check (ohl != nullptr && ohl->getDefaultValue() < 0.5f,
+                   "the long/tracked variant is an experiment, not the default");
             int rows = 0;
             walk (ed.get(), [&] (juce::Component* c)
             {
@@ -1553,6 +1556,175 @@ int main (int argc, char** argv)
             std::printf ("  90-130 Hz peak across the attack: off %.1f dB, on %.1f dB\n", off, on);
             check (on < off - 3.0, "Pre-Lock Low Cut removes at least 3 dB of the leak");
             pc->beginChangeGesture(); pc->setValueNotifyingHost (0.0f); pc->endChangeGesture();
+            auto* pp = proc.apvts.getParameter ("pitch");
+            pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture();
+        }
+    }
+
+    // ---- Pre-Lock Low Cut: the amount has to BE an amount (v0.57.0) -------
+    // v0.56.0 crossfaded dry against an IIR high-pass, and the two are not in
+    // phase above the corner, so halfway settings notched the body harder
+    // than full wet did. This checks the property that failed: more amount,
+    // less low band, and the band the shifted voice lives in left alone.
+    {
+        std::printf ("\n== Pre-Lock Low Cut amount law ==\n");
+        auto* pc = proc.apvts.getParameter ("prelowcut");
+        if (pc != nullptr)
+        {
+            auto run = [&] (float amt)
+            {
+                proc.prepareToPlay (48000.0, 512);
+                auto* pp = proc.apvts.getParameter ("pitch");
+                pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (9.0f)); pp->endChangeGesture();
+                pc->beginChangeGesture(); pc->setValueNotifyingHost (amt); pc->endChangeGesture();
+                juce::AudioBuffer<float> b (2, 512);
+                juce::MidiBuffer m;
+                std::vector<float> out;
+                double ph = 0.0;
+                for (int blk = 0; blk < 60; ++blk)
+                {
+                    for (int i = 0; i < 512; ++i)
+                    {
+                        const double t = (blk * 512 + i) / 48000.0;
+                        ph += 110.0 / 48000.0;
+                        if (ph >= 1.0) ph -= 1.0;
+                        double s2 = 0.0;
+                        for (int k = 1; k <= 20; ++k)
+                            s2 += std::exp (-0.16 * (k - 1)) * std::sin (2.0 * M_PI * k * ph);
+                        const double env = t > 0.30 ? std::min (1.0, (t - 0.30) / 0.02) : 0.0;
+                        b.setSample (0, i, (float) (0.3 * env * s2));
+                        b.setSample (1, i, (float) (0.3 * env * s2));
+                    }
+                    proc.processBlock (b, m);
+                    out.insert (out.end(), b.getReadPointer (0), b.getReadPointer (0) + 512);
+                }
+                return out;
+            };
+            auto band = [] (const std::vector<float>& x, double lo, double hi)
+            {
+                const int fs = 48000, N = 1024;
+                double acc = 0.0; int cnt = 0;
+                for (int s = (int) (0.335 * fs); s + N < (int) (0.395 * fs); s += N / 16)
+                {
+                    std::vector<float> re (x.begin() + s, x.begin() + s + N), im ((size_t) N, 0.0f);
+                    for (int i = 0; i < N; ++i)
+                        re[(size_t) i] *= 0.5f - 0.5f * std::cos (2.0f * (float) M_PI * i / N);
+                    PsolaEngine::fftForViz (re.data(), im.data(), N);
+                    double a2 = 0.0;
+                    for (int k = (int) (lo * N / fs); k <= (int) (hi * N / fs); ++k)
+                        a2 += re[(size_t) k] * re[(size_t) k] + im[(size_t) k] * im[(size_t) k];
+                    acc += a2; ++cnt;
+                }
+                return 10.0 * std::log10 (acc / std::max (cnt, 1) + 1.0e-20);
+            };
+            double lowB[3], bodyB[3];
+            const float amts[3] = { 0.0f, 0.5f, 1.0f };
+            for (int i = 0; i < 3; ++i)
+            {
+                const auto y = run (amts[i]);
+                lowB[i]  = band (y, 90.0, 130.0);
+                bodyB[i] = band (y, 200.0, 600.0);
+            }
+            std::printf ("  90-130 Hz : %.1f / %.1f / %.1f dB at amount 0 / 0.5 / 1\n", lowB[0], lowB[1], lowB[2]);
+            std::printf ("  200-600 Hz: %.1f / %.1f / %.1f dB\n", bodyB[0], bodyB[1], bodyB[2]);
+            // A synthetic onset locks fast, so its pre-lock window is short
+            // and only a couple of dB are on the table here -- the real
+            // gradient (-48.9 / -53.5 / -55.8 dB) is in HANDOVER v0.57.0.
+            // What must hold in both is the direction, and that the halfway
+            // setting is not the deepest cut anywhere.
+            check (lowB[1] < lowB[0] - 1.0 && lowB[2] < lowB[0] - 1.0,
+                   "more amount, less low band");
+            check (lowB[1] > lowB[2] - 1.5, "the halfway setting is not deeper than full");
+            check (bodyB[1] > std::min (bodyB[0], bodyB[2]) - 1.5,
+                   "no notch in the body at the halfway setting");
+            pc->beginChangeGesture(); pc->setValueNotifyingHost (0.0f); pc->endChangeGesture();
+            auto* pp = proc.apvts.getParameter ("pitch");
+            pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture();
+        }
+    }
+
+    // ---- Onset Backfill (v0.57.0) -----------------------------------------
+    {
+        std::printf ("\n== Onset Backfill ==\n");
+        auto* bf = proc.apvts.getParameter ("onsetbackfill");
+        check (bf != nullptr, "onsetbackfill parameter exists");
+        if (bf != nullptr)
+        {
+            check (bf->getDefaultValue() < 0.5f, "Onset Backfill defaults to OFF");
+            std::unique_ptr<juce::Component> beta (new BetaPanel (proc));
+            int rows = 0, outside = 0;
+            walk (beta.get(), [&] (juce::Component* c)
+            {
+                if (auto* l = dynamic_cast<juce::Label*> (c))
+                    if (l->getText() == "Onset Backfill") ++rows;
+                if (auto* b = dynamic_cast<juce::Button*> (c))
+                    if (b->getButtonText() == "Onset Backfill") ++rows;
+            });
+            for (int i = 0; i < beta->getNumChildComponents(); ++i)
+                if (! beta->getLocalBounds().contains (beta->getChildComponent (i)->getBounds()))
+                    ++outside;
+            std::printf ("  rows %d, children outside the panel %d\n", rows, outside);
+            check (rows >= 1 && outside == 0, "a row is bound to it and the panel still fits");
+
+            auto run = [&] (bool on)
+            {
+                proc.prepareToPlay (48000.0, 512);
+                auto* pp = proc.apvts.getParameter ("pitch");
+                pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (9.0f)); pp->endChangeGesture();
+                bf->beginChangeGesture(); bf->setValueNotifyingHost (on ? 1.0f : 0.0f); bf->endChangeGesture();
+                juce::AudioBuffer<float> b (2, 512);
+                juce::MidiBuffer m;
+                std::vector<float> out;
+                double ph = 0.0;
+                for (int blk = 0; blk < 60; ++blk)
+                {
+                    for (int i = 0; i < 512; ++i)
+                    {
+                        const double t = (blk * 512 + i) / 48000.0;
+                        ph += 110.0 / 48000.0;
+                        if (ph >= 1.0) ph -= 1.0;
+                        double s2 = 0.0;
+                        for (int k = 1; k <= 20; ++k)
+                            s2 += std::exp (-0.16 * (k - 1)) * std::sin (2.0 * M_PI * k * ph);
+                        const double env = t > 0.30 ? std::min (1.0, (t - 0.30) / 0.02) : 0.0;
+                        b.setSample (0, i, (float) (0.3 * env * s2));
+                        b.setSample (1, i, (float) (0.3 * env * s2));
+                    }
+                    proc.processBlock (b, m);
+                    out.insert (out.end(), b.getReadPointer (0), b.getReadPointer (0) + 512);
+                }
+                return out;
+            };
+            const auto off = run (false), on = run (true);
+            auto lowPeak = [] (const std::vector<float>& x)
+            {
+                const int fs = 48000, N = 1024; double best = 0.0;
+                for (int s = (int) (0.335 * fs); s + N < (int) (0.395 * fs); s += N / 16)
+                {
+                    std::vector<float> re (x.begin() + s, x.begin() + s + N), im ((size_t) N, 0.0f);
+                    for (int i = 0; i < N; ++i)
+                        re[(size_t) i] *= 0.5f - 0.5f * std::cos (2.0f * (float) M_PI * i / N);
+                    PsolaEngine::fftForViz (re.data(), im.data(), N);
+                    double a2 = 0.0;
+                    for (int k = (int) (90.0 * N / fs); k <= (int) (130.0 * N / fs); ++k)
+                        a2 += re[(size_t) k] * re[(size_t) k] + im[(size_t) k] * im[(size_t) k];
+                    best = std::max (best, a2);
+                }
+                return 10.0 * std::log10 (best + 1.0e-20);
+            };
+            // the join must not click: compare the largest second difference
+            auto worstStep = [] (const std::vector<float>& x)
+            {
+                double w = 0.0;
+                for (size_t i = 2; i < x.size(); ++i)
+                    w = std::max (w, (double) std::abs (x[i] - 2.0f * x[i-1] + x[i-2]));
+                return w;
+            };
+            std::printf ("  90-130 Hz peak: off %.1f dB, on %.1f dB;  worst 2nd difference %.4f -> %.4f\n",
+                         lowPeak (off), lowPeak (on), worstStep (off), worstStep (on));
+            check (lowPeak (on) < lowPeak (off) - 2.0, "Onset Backfill re-renders the leaked opening");
+            check (worstStep (on) < worstStep (off) * 1.5, "the crossfade join does not click");
+            bf->beginChangeGesture(); bf->setValueNotifyingHost (0.0f); bf->endChangeGesture();
             auto* pp = proc.apvts.getParameter ("pitch");
             pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture();
         }

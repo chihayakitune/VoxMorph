@@ -94,7 +94,7 @@ int main (int argc, char** argv)
 {
     if (argc < 6)
     {
-        std::fprintf (stderr, "usage: %s <in.wav> <out.wav> <pitchSt> <formantSt> <disperse> [smooth] [body] [onsetHold] [holdTracksPeriod] [preLockLowCut]\n", argv[0]);
+        std::fprintf (stderr, "usage: %s <in.wav> <out.wav> <pitchSt> <formantSt> <disperse> [smooth] [body] [onsetHold] [holdTracksPeriod] [preLockLowCut] [backfill]\n", argv[0]);
         return 2;
     }
     std::vector<float> in; double fs = 0.0;
@@ -109,6 +109,7 @@ int main (int argc, char** argv)
     p.onsetHold     = argc > 8 ? std::atoi (argv[8]) : 0;            // 0 = off
     p.holdTracksPeriod = argc > 9 ? std::atoi (argv[9]) != 0 : false;
     p.preLockLowCut = argc > 10 ? (float) std::atof (argv[10]) : 0.0f;
+    p.onsetBackfill = argc > 11 ? std::atoi (argv[11]) != 0 : false;
 
     PsolaEngine e;
     e.prepare (fs);

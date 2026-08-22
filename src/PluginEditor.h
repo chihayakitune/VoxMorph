@@ -5300,6 +5300,38 @@ public:
                    "立ち上がりが軽く感じられる場合があります。0=オフ。"));
         addAndMakeVisible (*preCutRow);
 
+        holdLongRow = std::make_unique<ParamRow> (proc, "onsetholdlong", ParamRow::Kind::toggle,
+            "Onset Hold Long",
+            vmTip ("EXPERIMENTAL. Lets Onset Hold (MAIN tab) hold for longer - about 58 ms "
+                   "instead of 35 - and keeps following the pitch while it holds instead of "
+                   "freezing it. It only affects dropouts in the MIDDLE of a phrase, not the "
+                   "start; measured on a real take it removed two of twenty-two of them over "
+                   "110 seconds, so the difference is small. Off = the standard behaviour.",
+                   "MAINタブのOnset Holdの保持時間を約35ms→58msに延ばし、保持中も音程の追従を"
+                   "続けます。効くのは句の「途中」で起きる脱落だけで、句の頭には効きません。"
+                   "実声での測定では110秒中22回が20回になる程度なので、差はわずかです。"
+                   "オフ=標準の動作。"));
+        addAndMakeVisible (*holdLongRow);
+
+        backfillRow = std::make_unique<ParamRow> (proc, "onsetbackfill", ParamRow::Kind::toggle,
+            "Onset Backfill",
+            vmTip ("EXPERIMENTAL. Converts the start of a phrase properly instead of hiding it. "
+                   "The engine prepares sound slightly ahead of what you hear, so at the moment "
+                   "it finally works out the pitch of a new phrase, about 27 ms of the opening "
+                   "has been prepared but not yet played - prepared without the pitch change, "
+                   "because nothing knew it yet. This throws that away and redoes it with the "
+                   "pitch in hand, joining it with a 3 ms crossfade. Unlike Pre-Lock Low Cut it "
+                   "does not remove anything: the attack keeps its weight, it is simply at the "
+                   "right pitch. The two can be used together. No extra delay.",
+                   "句の頭を「隠す」のではなく、ちゃんと変換し直します。エンジンは聞こえている音より"
+                   "少し先まで音を用意しているので、新しい句の音程をやっと掴んだ時点で、"
+                   "出だしの約27ms分が「まだ再生されていないが、音程が分からないまま用意された」"
+                   "状態で残っています。この機能はそれを捨てて、掴んだ音程で作り直し、"
+                   "3msのクロスフェードで繋ぎます。Pre-Lock Low Cutと違って何も削らないので、"
+                   "立ち上がりの厚みはそのままで音程だけが正しくなります。併用もできます。"
+                   "遅延は増えません。"));
+        addAndMakeVisible (*backfillRow);
+
         // Legacy Low Latency (moved here in v0.31.0, parameter id "lowlat"
         // unchanged). This is the OLD approach to latency: it shortens the
         // engine's lookahead and narrows its analysis, so it costs quality.
@@ -5334,7 +5366,7 @@ public:
         };
         addAndMakeVisible (closeBtn);
 
-        setSize (600, 314);
+        setSize (600, 378);
         sendLookAndFeelChange();
     }
 
@@ -5352,6 +5384,10 @@ public:
         r.removeFromTop (4);
         preCutRow->setBounds (r.removeFromTop (30));
         r.removeFromTop (4);
+        holdLongRow->setBounds (r.removeFromTop (28));
+        r.removeFromTop (4);
+        backfillRow->setBounds (r.removeFromTop (28));
+        r.removeFromTop (4);
         lowLatRow->setBounds (r.removeFromTop (28));
         closeBtn.setBounds (r.removeFromBottom (30).removeFromRight (100).reduced (0, 2));
     }
@@ -5363,7 +5399,7 @@ private:
     juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
     juce::TooltipWindow  tips { this, 400 };
     juce::Label heading, note;
-    std::unique_ptr<ParamRow> gciRow, breathRow, preCutRow, lowLatRow;
+    std::unique_ptr<ParamRow> gciRow, breathRow, preCutRow, holdLongRow, backfillRow, lowLatRow;
     juce::TextButton closeBtn { "Close" };
 };
 
