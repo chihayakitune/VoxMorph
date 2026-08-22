@@ -459,6 +459,8 @@ public:
         float   zcr, rho;     // rho = -1 when it was not computed
         double  bestVal;      // YIN CMND value at the chosen lag
         int     pick, lag;
+        int     unvoicedRun, holdCount, preHold;   // release-audit fields
+        float   curP;
         float   f0Before, f0After;
         bool    confident, voicedBefore, voicedAfter;
         int     why;          // 0 none 1 lowVoiceHold 2 rescue 3 onsetHold 4 dropped
@@ -1080,7 +1082,8 @@ private:
         auto dlPush = [&] (int why)
         {
             detectLog.push_back ({ (double) writePos / fs, energy, lastVoicedEnergy,
-                                   zcr, dlRho, bestVal, pick, lag, dlF0Before,
+                                   zcr, dlRho, bestVal, pick, lag,
+                                   unvoicedRun, holdCount, preHold, curP, dlF0Before,
                                    voiced && curP > 0.0f ? (float) (fs / curP) : 0.0f,
                                    confident, dlVoicedBefore, voiced, why });
         };

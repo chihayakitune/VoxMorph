@@ -94,7 +94,7 @@ int main (int argc, char** argv)
 {
     if (argc < 6)
     {
-        std::fprintf (stderr, "usage: %s <in.wav> <out.wav> <pitchSt> <formantSt> <disperse> [smooth] [body] [onsetHold] [holdTracksPeriod] [preLockLowCut] [backfill] [hostBuf]\n", argv[0]);
+        std::fprintf (stderr, "usage: %s <in.wav> <out.wav> <pitchSt> <formantSt> <disperse> [smooth] [body] [onsetHold] [holdTracksPeriod] [preLockLowCut] [backfill] [hostBuf] [spec] [air]\n", argv[0]);
         return 2;
     }
     std::vector<float> in; double fs = 0.0;
@@ -110,6 +110,7 @@ int main (int argc, char** argv)
     p.holdTracksPeriod = argc > 9 ? std::atoi (argv[9]) != 0 : false;
     p.preLockLowCut = argc > 10 ? (float) std::atof (argv[10]) : 0.0f;
     p.onsetBackfill = argc > 11 ? std::atoi (argv[11]) != 0 : false;
+    p.airPreserve   = argc > 14 ? (float) std::atof (argv[14]) : 0.0f;
     // f1/f2/f3, breath, AEIOU and Definition are switched on by argv[13]
     // as a bit mask, to exercise the spectral path (see HANDOVER v0.58.0)
     const int spec = argc > 13 ? std::atoi (argv[13]) : 0;
@@ -140,10 +141,11 @@ int main (int argc, char** argv)
                           r.unvoicedRun, r.preHold, r.f0In, r.f0Out, r.cutHz);
         std::fclose (bf);
         FILE* lf = std::fopen ("/tmp/dlog.csv", "w");
-        std::fprintf (lf, "t,energy,lastVoicedE,zcr,rho,bestVal,pick,lag,f0Before,f0After,confident,vBefore,vAfter,why\n");
+        std::fprintf (lf, "t,energy,lastVoicedE,zcr,rho,bestVal,pick,lag,unvoicedRun,holdCount,preHold,curP,f0Before,f0After,confident,vBefore,vAfter,why\n");
         for (const auto& r : e.detectLog)
-            std::fprintf (lf, "%.6f,%.9g,%.9g,%.4f,%.4f,%.5f,%d,%d,%.2f,%.2f,%d,%d,%d,%d\n",
+            std::fprintf (lf, "%.6f,%.9g,%.9g,%.4f,%.4f,%.5f,%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%d,%d,%d,%d\n",
                           r.t, r.energy, r.lastVoicedE, r.zcr, r.rho, r.bestVal, r.pick, r.lag,
+                          r.unvoicedRun, r.holdCount, r.preHold, r.curP,
                           r.f0Before, r.f0After, (int) r.confident,
                           (int) r.voicedBefore, (int) r.voicedAfter, r.why);
         std::fclose (lf);
