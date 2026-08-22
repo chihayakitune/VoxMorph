@@ -1838,6 +1838,81 @@ int main (int argc, char** argv)
         { pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture(); }
     }
 
+    // ---- presets carry the recommended onset settings (v0.59.1) -----------
+    // Three cases, and they are not the same case:
+    //   a preset older than the parameters   -> no entry, falls back to the
+    //                                           default, already correct
+    //   a preset from the window where the   -> HAS an entry, holding the old
+    //   parameters existed but were off         default, which nobody chose
+    //   a preset saved from v0.59.1 on       -> HAS an entry AND a version
+    //                                           stamp; honour it exactly
+    {
+        std::printf ("\n== presets and the recommended onset settings ==\n");
+        auto set = [&] (const char* id, float v01)
+        {
+            if (auto* q = proc.apvts.getParameter (id))
+            { q->beginChangeGesture(); q->setValueNotifyingHost (v01); q->endChangeGesture(); }
+        };
+        auto get = [&] (const char* id)
+        {
+            auto* q = proc.apvts.getParameter (id);
+            return q != nullptr ? q->getValue() : -1.0f;
+        };
+        auto tmp = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                     .getChildFile ("vm_preset_test");
+        tmp.createDirectory();
+
+        // (1) a file from the in-between window: the ids are present and off,
+        //     and there is no version stamp
+        set ("onsetbackfill", 0.0f);
+        set ("prelowcut", 0.0f);
+        set ("pulsebody", 0.0f);
+        set ("pitch", proc.apvts.getParameter ("pitch")->convertTo0to1 (7.0f));
+        auto oldFile = tmp.getChildFile ("old.vmpreset");
+        {
+            auto xml = voxMorphPresetXml (proc);
+            xml->removeAttribute ("presetVersion");     // as an older build wrote it
+            xml->writeTo (oldFile);
+        }
+        // (2) the same settings saved by THIS build, stamp and all
+        auto newFile = tmp.getChildFile ("new.vmpreset");
+        { auto xml = voxMorphPresetXml (proc); xml->writeTo (newFile); }
+
+        // move everything away so the load has to do the work
+        set ("onsetbackfill", 1.0f); set ("prelowcut", 1.0f);
+        set ("pulsebody", 1.0f);     set ("pitch", 0.5f);
+
+        int applied = 0, locked = 0, migrated = 0;
+        check (voxMorphApplyPreset (proc, oldFile, applied, locked, &migrated),
+               "an unstamped preset loads");
+        std::printf ("  unstamped: migrated %d, backfill %.2f, strength %.2f, body %.2f, pitch %.2f\n",
+                     migrated, get ("onsetbackfill"), get ("prelowcut"),
+                     get ("pulsebody"), get ("pitch"));
+        check (migrated == 3, "its three onset values are recognised as not-a-choice");
+        check (get ("onsetbackfill") > 0.5f, "Onset Repair comes up ON");
+        check (std::abs (get ("prelowcut") - 0.75f) < 0.01f, "Strength comes up at 0.75");
+        check (std::abs (get ("pulsebody") - 0.75f) < 0.01f, "Pulse Body comes up at 0.75");
+        const float pOld = get ("pitch");
+
+        set ("onsetbackfill", 1.0f); set ("prelowcut", 1.0f);
+        set ("pulsebody", 1.0f);     set ("pitch", 0.5f);
+        check (voxMorphApplyPreset (proc, newFile, applied, locked, &migrated),
+               "a stamped preset loads");
+        std::printf ("  stamped  : migrated %d, backfill %.2f, strength %.2f, body %.2f, pitch %.2f\n",
+                     migrated, get ("onsetbackfill"), get ("prelowcut"),
+                     get ("pulsebody"), get ("pitch"));
+        check (migrated == 0, "nothing is second-guessed in a stamped preset");
+        check (get ("onsetbackfill") < 0.5f && get ("prelowcut") < 0.01f
+                 && get ("pulsebody") < 0.01f,
+               "a deliberate OFF saved by this build is honoured");
+        check (std::abs (get ("pitch") - pOld) < 0.001f,
+               "and everything else loads the same either way");
+
+        tmp.deleteRecursively();
+        set ("pitch", proc.apvts.getParameter ("pitch")->convertTo0to1 (0.0f));
+        set ("onsetbackfill", 1.0f); set ("prelowcut", 0.75f); set ("pulsebody", 0.75f);
+    }
+
     // ---- .vmprofile round-trip, including the v0.40.0 texture fields ----
     // profileToXml / profileFromXml live in PluginEditor.h and need JUCE, so
     // offline_test cannot reach them; this is the only place they get tested.

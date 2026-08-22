@@ -1145,6 +1145,22 @@ inline juce::Array<juce::File> voxMorphPresetFiles()
     return files;
 }
 
+// Format stamp for .vmpreset. Bump only when old files need treating
+// differently on load, and say why here.
+//   59 - v0.59.0 made Onset Repair, its Strength and Pulse Body recommended
+//        defaults. A preset saved before that either predates the parameters
+//        (and gets the defaults anyway, see below) or stores them at the OFF
+//        values that were current when it was written -- which was never a
+//        decision anybody made. Those are migrated to the defaults on load.
+inline constexpr int kVoxMorphPresetVersion = 59;
+
+// Parameters whose stored value an older preset should NOT be trusted for.
+// Everything else in a preset is honoured exactly as saved.
+inline bool voxMorphIsRecommendedOnsetParam (const juce::String& id)
+{
+    return id == "onsetbackfill" || id == "prelowcut" || id == "pulsebody";
+}
+
 // A .vmpreset is the APVTS state plus the few non-parameter things a preset
 // should carry. Every writer goes through here (the MAIN bar, the PRESETS tab
 // and MATCHING all save presets) so the format cannot drift between them.
@@ -1152,7 +1168,15 @@ inline std::unique_ptr<juce::XmlElement> voxMorphPresetXml (VoxMorphProcessor& p
 {
     auto xml = proc.apvts.copyState().createXml();
     if (xml != nullptr)
+    {
         xml->setAttribute ("characterImage", proc.characterImagePath);
+        // Stamp the format so a preset can say whether its stored values for
+        // the onset-repair group are a deliberate choice or just whatever the
+        // defaults happened to be on the day it was saved. See
+        // voxMorphApplyPreset. Presets written before this have no attribute
+        // and read as 0.
+        xml->setAttribute ("presetVersion", kVoxMorphPresetVersion);
+    }
     return xml;
 }
 
@@ -1160,13 +1184,23 @@ inline std::unique_ptr<juce::XmlElement> voxMorphPresetXml (VoxMorphProcessor& p
 // their current value, and parameters missing from the file fall back to
 // their default (the semantics PresetPanel has had since v0.19.0 — this is
 // that code, lifted out so the MAIN tab's preset bar behaves identically).
+//
+// `migrated` counts parameters whose stored value was deliberately ignored
+// because the file is older than the recommendation that made them defaults.
 inline bool voxMorphApplyPreset (VoxMorphProcessor& proc, const juce::File& file,
-                                 int& applied, int& lockedKept)
+                                 int& applied, int& lockedKept, int* migrated = nullptr)
 {
     applied = 0;  lockedKept = 0;
+    if (migrated != nullptr) *migrated = 0;
     auto xml = juce::XmlDocument::parse (file);
     if (xml == nullptr || ! xml->hasTagName (proc.apvts.state.getType()))
         return false;
+
+    // A preset that predates a parameter simply has no entry for it and falls
+    // back to the default below, which is already what we want. This handles
+    // the other case: the parameter existed, so the file HAS a value, but that
+    // value is the old default rather than anything the author chose.
+    const bool oldFormat = xml->getIntAttribute ("presetVersion", 0) < kVoxMorphPresetVersion;
 
     proc.history.group ([&]
     {
@@ -1175,7 +1209,14 @@ inline bool voxMorphApplyPreset (VoxMorphProcessor& proc, const juce::File& file
             {
                 float norm = rp->getDefaultValue();
                 if (auto* e = xml->getChildByAttribute ("id", rp->paramID))
-                    norm = rp->convertTo0to1 ((float) e->getDoubleAttribute ("value"));
+                {
+                    if (oldFormat && voxMorphIsRecommendedOnsetParam (rp->paramID))
+                    {
+                        if (migrated != nullptr) ++*migrated;   // keep the default
+                    }
+                    else
+                        norm = rp->convertTo0to1 ((float) e->getDoubleAttribute ("value"));
+                }
                 if (proc.isParamLocked (rp->paramID))
                 {
                     if (std::abs (norm - rp->getValue()) > 1.0e-4f) ++lockedKept;
@@ -3664,8 +3705,8 @@ private:
         }
         // Apply per parameter instead of replaceState: locked parameters keep
         // their current values, and the whole load is ONE undo step.
-        int applied = 0, lockedKept = 0;
-        if (! voxMorphApplyPreset (proc, files.getReference (idx), applied, lockedKept))
+        int applied = 0, lockedKept = 0, migrated = 0;
+        if (! voxMorphApplyPreset (proc, files.getReference (idx), applied, lockedKept, &migrated))
         {
             setStatus (juce::String::fromUTF8 ("読み込みに失敗しました(壊れたファイル?)"));
             return;
@@ -3676,6 +3717,8 @@ private:
         if (lockedKept > 0)
             msg += juce::String::fromUTF8 ("、") + juce::String (lockedKept)
                  + juce::String::fromUTF8 ("項目はロック保持");
+        if (migrated > 0)
+            msg += juce::String::fromUTF8 ("、語頭修正は推奨値を適用");
         setStatus (msg + juce::String::fromUTF8 (")。Undoで戻せます。"));
     }
 
@@ -4045,8 +4088,8 @@ private:
         const int idx = box.getSelectedId() - 1;
         if (! juce::isPositiveAndBelow (idx, files.size())) return;
 
-        int applied = 0, lockedKept = 0;
-        if (! voxMorphApplyPreset (proc, files.getReference (idx), applied, lockedKept))
+        int applied = 0, lockedKept = 0, migrated = 0;
+        if (! voxMorphApplyPreset (proc, files.getReference (idx), applied, lockedKept, &migrated))
         {
             report (juce::String::fromUTF8 ("読み込みに失敗しました(壊れたファイル?)"));
             return;
@@ -4057,6 +4100,8 @@ private:
         if (lockedKept > 0)
             msg += juce::String::fromUTF8 ("、") + juce::String (lockedKept)
                  + juce::String::fromUTF8 ("項目はロック保持");
+        if (migrated > 0)
+            msg += juce::String::fromUTF8 ("、語頭修正は推奨値");
         report (msg + juce::String::fromUTF8 (") — Undoで戻せます"));
     }
 
