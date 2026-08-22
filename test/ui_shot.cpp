@@ -18,6 +18,7 @@
 #include "../src/PluginProcessor.h"
 #include "../src/PluginEditor.h"
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <cstring>
 
 static int g_fail = 0;
 static void check (bool ok, const juce::String& what)
@@ -1727,6 +1728,107 @@ int main (int argc, char** argv)
             bf->beginChangeGesture(); bf->setValueNotifyingHost (0.0f); bf->endChangeGesture();
             auto* pp = proc.apvts.getParameter ("pitch");
             pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture();
+        }
+    }
+
+    // ---- Onset Backfill x the spectral path (v0.58.0) ---------------------
+    // The bug this guards: the backfill's crossfade ramp used to be folded
+    // into the analysis window w, and on the spectral path the grain is
+    // ALREADY windowed, so accBuf takes x rather than w*x -- the ramp reached
+    // the weight and not the signal. Full-level audio against a weight still
+    // ramping up is a step at the join, and only when a spectral feature
+    // happened to be on. Measured on a real take with F1-F3 enabled, the
+    // click index at the join was 1.246 with the bug and 0.460 without.
+    {
+        std::printf ("\n== Onset Backfill x spectral path ==\n");
+        auto* bf = proc.apvts.getParameter ("onsetbackfill");
+        if (bf != nullptr)
+        {
+            auto run = [&] (bool on, const char* extra, float val)
+            {
+                proc.prepareToPlay (48000.0, 512);
+                auto set = [&] (const char* id, float v)
+                {
+                    if (auto* q = proc.apvts.getParameter (id))
+                    { q->beginChangeGesture(); q->setValueNotifyingHost (q->convertTo0to1 (v)); q->endChangeGesture(); }
+                };
+                set ("pitch", 9.0f);
+                bf->beginChangeGesture(); bf->setValueNotifyingHost (on ? 1.0f : 0.0f); bf->endChangeGesture();
+                if (extra != nullptr) set (extra, val);
+                juce::AudioBuffer<float> b (2, 512);
+                juce::MidiBuffer m;
+                std::vector<float> out;
+                double ph = 0.0;
+                for (int blk = 0; blk < 60; ++blk)
+                {
+                    for (int i = 0; i < 512; ++i)
+                    {
+                        const double t = (blk * 512 + i) / 48000.0;
+                        ph += 110.0 / 48000.0;
+                        if (ph >= 1.0) ph -= 1.0;
+                        double s2 = 0.0;
+                        for (int k = 1; k <= 20; ++k)
+                            s2 += std::exp (-0.16 * (k - 1)) * std::sin (2.0 * M_PI * k * ph);
+                        const double env = t > 0.30 ? std::min (1.0, (t - 0.30) / 0.02) : 0.0;
+                        b.setSample (0, i, (float) (0.3 * env * s2));
+                        b.setSample (1, i, (float) (0.3 * env * s2));
+                    }
+                    proc.processBlock (b, m);
+                    out.insert (out.end(), b.getReadPointer (0), b.getReadPointer (0) + 512);
+                }
+                if (extra != nullptr) set (extra, 0.0f);
+                return out;
+            };
+            // Worst sample step in the join region, over the RMS of the
+            // SETTLED voice later in the same run -- deliberately not the
+            // local RMS. Backfill makes the join quieter (it removes the
+            // untransposed fundamental), and dividing by the local RMS then
+            // scores the quieter, smoother version as worse: measured, the
+            // Breath case read 0.55 off against 2.34 on while its absolute
+            // steps were smaller throughout. Normalise both by the same
+            // thing or the comparison is meaningless.
+            auto clickIndex = [] (const std::vector<float>& x)
+            {
+                const int fs = 48000;
+                double e = 0.0; int c = 0;
+                for (int i = (int) (0.45 * fs); i < (int) (0.60 * fs) && i < (int) x.size(); ++i)
+                { e += x[(size_t) i] * x[(size_t) i]; ++c; }
+                const double ref = std::sqrt (e / std::max (c, 1)) + 1.0e-12;
+                double d = 0.0;
+                for (int i = (int) (0.335 * fs) + 1; i < (int) (0.400 * fs); ++i)
+                    d = std::max (d, (double) std::abs (x[(size_t) i] - x[(size_t) (i - 1)]));
+                return d / ref;
+            };
+            struct Feat { const char* id; float v; const char* name; };
+            const Feat feats[] = { { nullptr, 0.0f, "none" },
+                                   { "f1shift", 1.5f,  "F1 shift" },
+                                   { "f2gain",  3.0f,  "F2 gain" },
+                                   { "breath2", 0.35f, "Breath" },
+                                   { "vamount", 100.0f,"AEIOU" },
+                                   { "resonance", 80.0f, "Definition" } };
+            bool vadaptOn = false;
+            for (const auto& f : feats)
+            {
+                if (std::strcmp (f.name, "AEIOU") == 0)
+                {
+                    if (auto* q = proc.apvts.getParameter ("vadapt"))
+                    { q->beginChangeGesture(); q->setValueNotifyingHost (1.0f); q->endChangeGesture(); vadaptOn = true; }
+                }
+                const double off = clickIndex (run (false, f.id, f.v));
+                const double on  = clickIndex (run (true,  f.id, f.v));
+                std::printf ("  %-11s click index  off %.2f  on %.2f\n", f.name, off, on);
+                check (on < std::max (off * 1.5, 0.5),
+                       juce::String ("the backfill join stays clean with ") + f.name);
+                if (vadaptOn)
+                {
+                    if (auto* q = proc.apvts.getParameter ("vadapt"))
+                    { q->beginChangeGesture(); q->setValueNotifyingHost (0.0f); q->endChangeGesture(); }
+                    vadaptOn = false;
+                }
+            }
+            bf->beginChangeGesture(); bf->setValueNotifyingHost (0.0f); bf->endChangeGesture();
+            if (auto* pp = proc.apvts.getParameter ("pitch"))
+            { pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture(); }
         }
     }
 

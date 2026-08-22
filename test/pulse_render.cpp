@@ -94,7 +94,7 @@ int main (int argc, char** argv)
 {
     if (argc < 6)
     {
-        std::fprintf (stderr, "usage: %s <in.wav> <out.wav> <pitchSt> <formantSt> <disperse> [smooth] [body] [onsetHold] [holdTracksPeriod] [preLockLowCut] [backfill]\n", argv[0]);
+        std::fprintf (stderr, "usage: %s <in.wav> <out.wav> <pitchSt> <formantSt> <disperse> [smooth] [body] [onsetHold] [holdTracksPeriod] [preLockLowCut] [backfill] [hostBuf]\n", argv[0]);
         return 2;
     }
     std::vector<float> in; double fs = 0.0;
@@ -110,13 +110,20 @@ int main (int argc, char** argv)
     p.holdTracksPeriod = argc > 9 ? std::atoi (argv[9]) != 0 : false;
     p.preLockLowCut = argc > 10 ? (float) std::atof (argv[10]) : 0.0f;
     p.onsetBackfill = argc > 11 ? std::atoi (argv[11]) != 0 : false;
+    // f1/f2/f3, breath, AEIOU and Definition are switched on by argv[13]
+    // as a bit mask, to exercise the spectral path (see HANDOVER v0.58.0)
+    const int spec = argc > 13 ? std::atoi (argv[13]) : 0;
+    if (spec & 1) { p.f1Shift = 1.5f; p.f2Gain = 3.0f; }
+    if (spec & 2) p.breath = 0.35f;
+    if (spec & 4) { p.vowelAdapt = true; p.vowelAdaptAmt = 1.0f; }
+    if (spec & 8) p.formantDefinition = 80.0f;
 
     PsolaEngine e;
     e.prepare (fs);
     e.setParams (p);
 
     std::vector<float> out (in.size(), 0.0f);
-    const size_t blk = 256;                       // the recommended host buffer
+    const size_t blk = argc > 12 ? (size_t) std::atoi (argv[12]) : 256;   // host buffer
     for (size_t i = 0; i < in.size(); i += blk)
     {
         const int c = (int) std::min (blk, in.size() - i);
@@ -125,6 +132,9 @@ int main (int argc, char** argv)
     writeWav (argv[2], out, fs);
 #ifdef PSOLA_DETECT_LOG
     {
+        FILE* bf = std::fopen ("/tmp/bflog.csv", "w");
+        for (double t : e.backfillAt) std::fprintf (bf, "%.6f\n", t);
+        std::fclose (bf);
         FILE* lf = std::fopen ("/tmp/dlog.csv", "w");
         std::fprintf (lf, "t,energy,lastVoicedE,zcr,rho,bestVal,pick,lag,f0Before,f0After,confident,vBefore,vAfter,why\n");
         for (const auto& r : e.detectLog)

@@ -371,6 +371,7 @@ public:
         buildPreShelf (preFc);
         preLock = false;  preHold = 0;  prevFrameE = 0.0;
         backfillPending = false;  unvoicedRun = 0;  olaFloor = INT64_MIN;  fadeLen = 0;
+        markResume = 0.0;
         tiltK       = 1.0f - std::exp ((float) (-2.0 * M_PI * 1000.0 / fs));
 
         lastGci = -1;
@@ -463,6 +464,7 @@ public:
         int     why;          // 0 none 1 lowVoiceHold 2 rescue 3 onsetHold 4 dropped
     };
     std::vector<DetectLogRow> detectLog;
+    std::vector<double>       backfillAt;   // output time of each join
 #endif
 
 #ifdef PSOLA_GRAIN_LOG
@@ -601,7 +603,7 @@ public:
             std::fill (accBuf.begin(),  accBuf.end(),  0.0f);
             std::fill (normBuf.begin(), normBuf.end(), 0.0f);
             std::fill (candBuf.begin(), candBuf.end(), 0.0f);
-            backfillPending = false;  olaFloor = INT64_MIN;  fadeLen = 0;
+            backfillPending = false;  olaFloor = INT64_MIN;  fadeLen = 0;  markResume = 0.0;
             std::fill (noiseFx.begin(), noiseFx.end(), 0.0f);
             dispS1.fill (0.0f);  dispS2.fill (0.0f);
             nextMarkF  = (double) (writePos + D);
@@ -775,8 +777,13 @@ public:
         if (backfillPending)
         {
             backfillPending = false;
-            // writePos is the first sample the host has NOT been given yet.
-            const int64_t from = writePos;
+            // `start`, not writePos: this chunk's own output has not been
+            // handed over either -- it is written at the END of processChunk,
+            // after this. Going back to `start` recovers the whole chunk as
+            // well as the lookahead, and is the furthest back it is legal to
+            // go. It also removes most of the host-buffer dependence: the
+            // recoverable window becomes n + houtCap rather than houtCap.
+            const int64_t from = start;
             const int     xf   = std::min (fadeN, (int) (houtCapCur / 2));
             // scale the existing accumulation down across the join. acc and
             // norm are scaled by the SAME factor, so the normalised signal
@@ -795,15 +802,38 @@ public:
                 const size_t k = (size_t) (p2 & kMask);
                 accBuf[k] = 0.0f;  normBuf[k] = 0.0f;  candBuf[k] = 0.0f;
             }
+            // Remember where the mark sequence was going to be, and snap
+            // back onto it once the re-render has caught up. Without this the
+            // rewind shifts the phase of every grain for the rest of the
+            // phrase -- the audio after the onset would differ from baseline
+            // for no reason connected to the fix.
+            markResume = nextMarkF;
             nextMarkF  = (double) from;
             lastInMark = (double) (from - D);
             olaFloor   = from;      // never write behind what has been played
             fadeFrom   = from;
             fadeLen    = xf;
+#ifdef PSOLA_DETECT_LOG
+            backfillAt.push_back ((double) from / fs);
+#endif
         }
 
         while (nextMarkF < (double) (writePos + houtCapCur))
+        {
             placeGrain();
+            if (markResume > 0.0 && nextMarkF > markResume)
+            {
+                // Back onto the grid the rewind interrupted. Snapping to
+                // markResume EXACTLY is what makes everything past the
+                // backfill bit-identical to a run without it; a variant that
+                // stepped forward to avoid a close-spaced pair broke that
+                // (median |diff| 0.027 over 164 joins) and fixed nothing --
+                // the close pair it was invented for did not exist.
+                nextMarkF  = markResume;
+                markResume = 0.0;
+            }
+        }
+
         olaFloor = INT64_MIN;
         fadeLen  = 0;
 
@@ -1689,12 +1719,20 @@ private:
             const int64_t op = mi + j;
             if (op < olaFloor) continue;          // backfill: already played
             const float x = grainScratch[(size_t) (j + Hout)];
-            float w = 0.5f * (1.0f + std::cos ((float) M_PI * (float) j / (float) Hout));
+            const float w = 0.5f * (1.0f + std::cos ((float) M_PI * (float) j / (float) Hout));
+            // The backfill ramp is NOT part of the analysis window and has to
+            // be kept apart from it. On the spectral path the grain arrives
+            // already windowed, so accBuf takes x and not w*x -- folding the
+            // ramp into w therefore applied it to the WEIGHT only, and the
+            // signal went in at full level against a weight that was still
+            // ramping up. The normalised result was a burst exactly at the
+            // join, and only when a spectral feature happened to be on.
+            float bf = 1.0f;
             if (fadeLen > 0 && op >= fadeFrom && op < fadeFrom + fadeLen)
-                w *= 0.5f * (1.0f - std::cos ((float) M_PI * (float) (op - fadeFrom) / (float) fadeLen));
+                bf = 0.5f * (1.0f - std::cos ((float) M_PI * (float) (op - fadeFrom) / (float) fadeLen));
             const size_t idx = (size_t) (op & kMask);
-            accBuf[idx]  += spectral ? x : w * x;   // spectral grain is pre-windowed
-            normBuf[idx] += w;
+            accBuf[idx]  += bf * (spectral ? x : w * x);   // spectral grain is pre-windowed
+            normBuf[idx] += bf * w;
             if (preCutAmt > 0.0f && ! v && preLock) candBuf[idx] += w;
         }
 
@@ -2415,6 +2453,7 @@ private:
     int64_t olaFloor        = INT64_MIN;
     int64_t fadeFrom        = 0;
     int     fadeLen         = 0;
+    double  markResume      = 0.0;
     static constexpr int fadeN = 128;     // ~2.9 ms at 44.1 kHz
     static constexpr float kHoldTrack = 0.3f;   // measured: 0.3 > 0.6 > 0.9
     std::vector<double> sqPre;        // prefix sum of squares for the above
