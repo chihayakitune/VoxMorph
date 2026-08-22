@@ -5338,8 +5338,22 @@ public:
                    "オフ=標準の動作。"));
         addAndMakeVisible (*holdLongRow);
 
+        relOnRow = std::make_unique<ParamRow> (proc, "relrepair", ParamRow::Kind::toggle,
+            "Release Repair",
+            vmTip ("EXPERIMENTAL. Treats the END of a phrase as its own thing. Onset Repair works "
+                   "on the start; until now the engine could not tell an ending apart from one, "
+                   "so the same treatment ran there and took 4-6 dB out of the voice band as the "
+                   "sound died away. Off = exactly the behaviour of the previous version, to the "
+                   "sample. On = the engine distinguishes the two and applies Release Strength "
+                   "below to endings only.",
+                   "句の「終わり」を独立して扱います。Onset Repairは句の頭を直す機能ですが、"
+                   "これまでエンジンは句の終わりと頭を区別できず、語尾にも同じ処理がかかって"
+                   "消えていく声の帯域を4〜6dB削っていました。オフ=前バージョンと1サンプルも"
+                   "違わない動作。オン=両者を区別し、下のRelease Strengthを語尾にだけ適用します。"));
+        addAndMakeVisible (*relOnRow);
+
         relRow = std::make_unique<ParamRow> (proc, "relshelf", ParamRow::Kind::slider,
-            "Release Suppression",
+            "Release Strength",
             vmTip ("EXPERIMENTAL. The other end of the phrase. Onset Repair works on the START of "
                    "a phrase; until now the engine could not tell a phrase ENDING apart from one, "
                    "so the same treatment ran there and took 4-6 dB out of the voice band as the "
@@ -5388,7 +5402,7 @@ public:
         };
         addAndMakeVisible (closeBtn);
 
-        setSize (600, 348);
+        setSize (600, 382);
         sendLookAndFeelChange();
     }
 
@@ -5406,6 +5420,8 @@ public:
         r.removeFromTop (4);
         holdLongRow->setBounds (r.removeFromTop (28));
         r.removeFromTop (4);
+        relOnRow->setBounds (r.removeFromTop (28));
+        r.removeFromTop (4);
         relRow->setBounds (r.removeFromTop (30));
         r.removeFromTop (4);
         lowLatRow->setBounds (r.removeFromTop (28));
@@ -5419,7 +5435,7 @@ private:
     juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
     juce::TooltipWindow  tips { this, 400 };
     juce::Label heading, note;
-    std::unique_ptr<ParamRow> gciRow, breathRow, holdLongRow, relRow, lowLatRow;
+    std::unique_ptr<ParamRow> gciRow, breathRow, holdLongRow, relOnRow, relRow, lowLatRow;
     juce::TextButton closeBtn { "Close" };
 };
 

@@ -427,6 +427,7 @@ private:
     std::atomic<float>* pOnsetHoldLong = nullptr;
     std::atomic<float>* pOnsetBackfill = nullptr;
     std::atomic<float>* pRelShelf      = nullptr;
+    std::atomic<float>* pRelRepair     = nullptr;
     std::atomic<float>* pFloor     = nullptr;
     std::atomic<float>* pAutoMute  = nullptr;
     std::atomic<float>* pLowLat    = nullptr;   // Legacy Low Latency (Beta)

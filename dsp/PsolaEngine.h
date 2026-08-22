@@ -321,32 +321,24 @@ public:
         // happens in the normalised domain and the level does not step.
         bool  onsetBackfill = false;
 
-        // Release Old-F0 Suppression (v0.60.0, EXPERIMENTAL -- 0 = off and
-        // bit-identical). A phrase ENDING is not a phrase opening, and until
-        // now the engine could not tell them apart: the pre-lock gate asks
-        // "not voiced, low zero-crossing rate, level not collapsing", which a
-        // gently decaying vowel satisfies perfectly. Measured on 23 endings,
-        // it armed at every one and took 4-6 dB out of 150-600 Hz there --
-        // the band the converted voice lives in.
+        // Release Repair (v0.60.1). ONE switch for the whole ending-side
+        // change: the VOICE/RELEASE/ONSET_ARMED/PRE_LOCK split AND the
+        // ending-side shelf. With it false the engine takes the v0.59.2 code
+        // paths exactly -- a strength of 0 was not enough, because the state
+        // machine on its own already moved the onset cut off the endings and
+        // that is audible. "Off" has to mean the previous build.
         //
-        // The engine now runs an explicit state machine,
-        //     VOICE -> RELEASE -> ONSET_ARMED -> PRE_LOCK -> VOICE
-        // and the onset low cut is confined to PRE_LOCK. This is what treats
-        // the ending instead: a notch parked on the LAST CONFIDENT INPUT F0,
-        // faded in on entering RELEASE and released over a few tens of ms.
-        //
-        // Only the fundamental, deliberately. 2*F0 is close to the converted
-        // f0 for shifts near an octave and would eat the voice itself; if it
-        // turns out to be needed it has to be measured first.
-        //
-        // Skipped when the last F0 is stale or was never confident: a notch
-        // aimed at a guess is worse than no notch.
-        float releaseNotchDb = 0.0f;   // 0 = off, else depth 0..18 dB
-        float releaseNotchQ  = 4.5f;   // 3 = wide, 6 = narrow
+        // An adaptive notch on the last input F0 was the first candidate and
+        // was removed after measurement: over the live release window it gave
+        // -7.0 dB against this shelf's -13.1 at every depth from 6 to 12 dB
+        // and every Q from 3 to 6. What survives an ending is the whole
+        // bottom of the untransposed voice, not one line at the old pitch, so
+        // a +-15 % notch removes far less while still denting the voice band.
+        // Numbers in HANDOVER v0.60.0; the code is gone.
+        bool  releaseRepair = false;
 
-        // Fallback for the above, NOT the first choice: a shallow low shelf
-        // that runs during RELEASE only. Same shape as the onset cut but on
-        // its own amount -- the onset value of 0.75 must never be reused here.
+        // Ending-side depth. Deliberately much shallower than the onset
+        // cut -- 0.75 is an onset number and must not be reused here.
         float releaseShelf = 0.0f;     // 0..1
     };
 
@@ -397,9 +389,9 @@ public:
         preLp.fill (0.0f);
         preFc = 200.0f;
         buildPreShelf (preFc);
-        relZ.fill (0.0f);  relLp.fill (0.0f);
+        relLp.fill (0.0f);
         relGain = 0.0f;  relTarget = 0.0f;  relF0 = 0.0f;  relF0Age = 100000;
-        relFc = 0.0f;  onState = OnsetState::armed;  relArmed = true;  relActive = false;
+        onState = OnsetState::armed;  relArmed = true;  relActive = false;
         relShelfK = 1.0f - std::exp ((float) (-2.0 * M_PI * 200.0 / fs));
         relAtk = 1.0f - std::exp ((float) (-1.0 / (0.004 * fs)));   // ~4 ms in
         relRel = 1.0f - std::exp ((float) (-1.0 / (0.040 * fs)));   // ~40 ms out
@@ -572,9 +564,8 @@ public:
         // cutting the bottom out of an attack would be pure damage.
         backfillOn     = q.onsetBackfill;
         pitchSemiNow   = q.pitchSemi;
-        relNotchDb     = std::clamp (q.releaseNotchDb, 0.0f, 18.0f);
-        relNotchQ      = std::clamp (q.releaseNotchQ,  1.0f, 12.0f);
-        relShelfAmt    = std::clamp (q.releaseShelf,   0.0f, 1.0f);
+        relRepairOn    = q.releaseRepair;
+        relShelfAmt    = relRepairOn ? std::clamp (q.releaseShelf, 0.0f, 1.0f) : 0.0f;
         preCutAmt      = (q.pitchSemi > 2.0f) ? std::clamp (q.preLockLowCut, 0.0f, 1.0f) : 0.0f;
         setDisperse (std::clamp (q.pulseDisperse, 0.0f, 1.0f));
         hiFreq         = (q.hiRangeHz > 20.0f) ? std::clamp (q.hiRangeHz, 100.0f, 600.0f) : 0.0f;
@@ -922,17 +913,17 @@ public:
                 wet = gLow * tiltLp + gHigh * (wet - tiltLp);
             }
 
-            if (relNotchDb > 0.0f || relShelfAmt > 0.0f)
+            if (relShelfAmt > 0.0f)
             {
                 // Attack fast enough to catch the start of the tail, release
-                // slowly so the treatment does not step out mid-decay.
+                // slowly so the treatment does not step out mid-decay. The
+                // filter state is updated on EVERY sample, gain or no gain:
+                // skipping it while idle leaves the one-poles holding the
+                // last ending's samples, and the next phrase -- different
+                // pitch, different phase, possibly after a long silence --
+                // then starts by mixing that stale value in.
                 relGain += (relTarget > relGain ? relAtk : relRel) * (relTarget - relGain);
-                if (relGain > 1.0e-4f)
-                {
-                    if (relNotchDb > 0.0f && std::abs (relF0 - relFc) > 0.02f * relFc)
-                        buildReleaseNotch (relF0, relNotchDb, relNotchQ);
-                    wet = releaseStage (wet, relGain);
-                }
+                wet = releaseStage (wet, relGain);
             }
 
             if (preCutAmt > 0.0f)
@@ -1089,9 +1080,11 @@ private:
         // The strong onset cut belongs to PRE_LOCK only. Everything else about
         // it -- the gate, the persistence, the corner -- is untouched, so a
         // real phrase opening behaves exactly as it did.
-        if (onState == OnsetState::preLock && preCutAmt > 0.0f && looksVoiced)
+        const bool preArm = relRepairOn ? (onState == OnsetState::preLock && looksVoiced)
+                                        : ((! voiced) && looksVoiced);
+        if (preArm && preCutAmt > 0.0f)
             preHold = kPreHold;
-        else if (voiced || zcr >= 0.12f || onState == OnsetState::release)
+        else if (voiced || zcr >= 0.12f || (relRepairOn && onState == OnsetState::release))
             preHold = 0;
         else if (preHold > 0)
             --preHold;
@@ -1327,7 +1320,8 @@ private:
         // A backfill is for the start of a phrase. Requiring ONSET_ARMED
         // says so structurally instead of inferring it from a frame count --
         // and it keeps the log honest about which of the two a given join is.
-        if (backfillOn && ! voiced && unvoicedRun >= 3 && relArmed) backfillPending = true;
+        if (backfillOn && ! voiced && unvoicedRun >= 3 && (! relRepairOn || relArmed))
+            backfillPending = true;
         unvoicedRun = 0;
         curP  = voiced ? smooth * curP + (1.0f - smooth) * newP : newP;
         voiced = true;
@@ -2520,42 +2514,13 @@ private:
         return x;
     }
 
-    // Peaking EQ with a negative gain: a depth-limited notch. A true null
-    // (b = 1, -2cos, 1) removes the component outright and rings; a shelf-like
-    // -6 to -12 dB dip is what a decaying tail needs.
-    void buildReleaseNotch (float fcHz, float depthDb, float q)
-    {
-        const double A  = std::pow (10.0, -(double) depthDb / 40.0);
-        const double w0 = 2.0 * M_PI * (double) fcHz / (fs > 0.0 ? fs : 48000.0);
-        const double al = std::sin (w0) / (2.0 * (double) q);
-        const double a0 = 1.0 + al / A;
-        relB[0] = (float) ((1.0 + al * A) / a0);
-        relB[1] = (float) ((-2.0 * std::cos (w0)) / a0);
-        relB[2] = (float) ((1.0 - al * A) / a0);
-        relA[0] = (float) ((-2.0 * std::cos (w0)) / a0);
-        relA[1] = (float) ((1.0 - al / A) / a0);
-        relFc = fcHz;
-    }
-
-    // The release treatment, per output sample. `g` is the smoothed 0..1
-    // envelope, so both parts fade in and out instead of switching.
     inline float releaseStage (float x, float g)
     {
-        if (relNotchDb > 0.0f)
+        const float k = 1.0f - std::pow (10.0f, -0.3f * relShelfAmt * g);
+        for (int i = 0; i < 4; ++i)
         {
-            const float y  = relB[0] * x + relZ[0];
-            relZ[0] = relB[1] * x - relA[0] * y + relZ[1] + 1.0e-25f;
-            relZ[1] = relB[2] * x - relA[1] * y;
-            x += g * (y - x);
-        }
-        if (relShelfAmt > 0.0f)
-        {
-            const float k = 1.0f - std::pow (10.0f, -0.3f * relShelfAmt * g);
-            for (int i = 0; i < 4; ++i)
-            {
-                relLp[(size_t) i] += relShelfK * (x - relLp[(size_t) i]) + 1.0e-25f;
-                x -= k * relLp[(size_t) i];
-            }
+            relLp[(size_t) i] += relShelfK * (x - relLp[(size_t) i]) + 1.0e-25f;
+            x -= k * relLp[(size_t) i];      // k is 0 while idle: state still tracks
         }
         return x;
     }
@@ -2645,11 +2610,8 @@ private:
     int     relF0Age    = 100000;    // detection frames since it was set
     float   relTarget   = 0.0f;      // 1 while the release treatment applies
     float   relGain     = 0.0f;      // smoothed
-    float   relNotchDb  = 0.0f, relNotchQ = 4.5f, relShelfAmt = 0.0f;
-    float   relFc       = 0.0f;      // frequency the notch is built for
-    std::array<float,3> relB {};
-    std::array<float,2> relA {};
-    std::array<float,2> relZ {};
+    bool    relRepairOn = false;
+    float   relShelfAmt = 0.0f;
     std::array<float,4> relLp {};
     float   relShelfK   = 0.03f;
     float   relAtk = 0.02f, relRel = 0.004f;

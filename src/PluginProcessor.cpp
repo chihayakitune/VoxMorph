@@ -173,8 +173,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     // -7.6 dB against this shelf's -13.1, because the tail residue is the
     // whole bottom of the untransposed voice rather than one line. It stays
     // reachable from test/pulse_render.cpp; it is not worth a control.
-    layout.add (std::make_unique<P> (juce::ParameterID { "relshelf", 1 }, "Release Suppression",
-                juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "relrepair", 1 }, "Release Repair", false));
+    layout.add (std::make_unique<P> (juce::ParameterID { "relshelf", 1 }, "Release Strength",
+                juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.5f));
     // Onset Repair (id "onsetbackfill", kept for compatibility). v0.59.0:
     // ON by default, adopted by the user after AB9. The root fix rather than
     // a mask: when the first voiced lock of a phrase
@@ -340,6 +342,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pOnsetHoldLong = apvts.getRawParameterValue ("onsetholdlong");
     pOnsetBackfill = apvts.getRawParameterValue ("onsetbackfill");
     pRelShelf      = apvts.getRawParameterValue ("relshelf");
+    pRelRepair     = apvts.getRawParameterValue ("relrepair");
     pFloor     = apvts.getRawParameterValue ("pitchfloor");
     pAutoMute  = apvts.getRawParameterValue ("automute");
     pLowLat    = apvts.getRawParameterValue ("lowlat");
@@ -668,6 +671,11 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const bool repairOn = pOnsetBackfill->load() > 0.5f;
     p.onsetBackfill    = repairOn;
     p.preLockLowCut    = repairOn ? pPreLowCut->load() : 0.0f;
+    // One switch for the whole ending-side change, state machine included.
+    // A strength of 0 is NOT enough to mean "off": the state machine alone
+    // moves the onset cut off the endings, which is audible, so OFF has to
+    // disable that too. Verified bit-identical to v0.59.2 in ui_shot.
+    p.releaseRepair    = pRelRepair->load() > 0.5f;
     p.releaseShelf     = pRelShelf->load();
     p.pitchFloorHz  = pLowOn->load() > 0.5f ? pFloor->load() : 0.0f;
     p.lowLatency    = pLowLat->load() > 0.5f;

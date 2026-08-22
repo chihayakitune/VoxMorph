@@ -1913,35 +1913,35 @@ int main (int argc, char** argv)
         set ("onsetbackfill", 1.0f); set ("prelowcut", 0.75f); set ("pulsebody", 0.75f);
     }
 
-    // ---- Release Suppression and the onset/release split (v0.60.0) --------
-    // Two things to hold. The control exists, is off by default and is bound
-    // to a row; and -- the point of the whole change -- separating VOICE from
-    // RELEASE must not cost the ONSET side anything. The onset numbers on the
-    // user's take are identical either way; here the guard is that the pre-
-    // lock cut still bites on a synthetic attack.
+    // ---- Release Repair: OFF must be the previous version (v0.60.1) -------
+    // The switch has to disable the STATE MACHINE too, not just the shelf.
+    // A strength of 0 with the state machine still running is audibly not the
+    // old build -- that was the defect in v0.60.0.
     {
-        std::printf ("\n== Release Suppression ==\n");
+        std::printf ("\n== Release Repair ==\n");
+        auto* rr = proc.apvts.getParameter ("relrepair");
         auto* rs = proc.apvts.getParameter ("relshelf");
-        check (rs != nullptr, "relshelf parameter exists");
-        if (rs != nullptr)
+        check (rr != nullptr && rs != nullptr, "relrepair and relshelf exist");
+        if (rr != nullptr && rs != nullptr)
         {
-            check (rs->getDefaultValue() < 0.001f,
-                   "Release Suppression defaults to OFF (it awaits a listening test)");
+            check (rr->getDefaultValue() < 0.5f, "Release Repair defaults to OFF");
+            check (std::abs (rs->getDefaultValue() - 0.5f) < 0.01f, "Release Strength defaults to 0.50");
             std::unique_ptr<juce::Component> beta (new BetaPanel (proc));
             int rows = 0, outside = 0;
             walk (beta.get(), [&] (juce::Component* c)
             {
                 if (auto* l = dynamic_cast<juce::Label*> (c))
-                    if (l->getText() == "Release Suppression") ++rows;
+                    if (l->getText() == "Release Repair" || l->getText() == "Release Strength") ++rows;
+                if (auto* b = dynamic_cast<juce::Button*> (c))
+                    if (b->getButtonText() == "Release Repair") ++rows;
             });
             for (int i = 0; i < beta->getNumChildComponents(); ++i)
                 if (! beta->getLocalBounds().contains (beta->getChildComponent (i)->getBounds()))
                     ++outside;
-            std::printf ("  rows %d, children outside the BETA panel %d\n", rows, outside);
-            check (rows >= 1 && outside == 0, "a row is bound to it and the panel still fits");
+            std::printf ("  rows %d, outside %d\n", rows, outside);
+            check (rows >= 2 && outside == 0, "both rows are bound and the panel fits");
 
-            // a phrase: silence, attack, steady, then a decay to silence
-            auto run = [&] (float rel)
+            auto run = [&] (bool repair, float strength)
             {
                 proc.prepareToPlay (48000.0, 512);
                 auto set = [&] (const char* id, float v01)
@@ -1951,62 +1951,67 @@ int main (int argc, char** argv)
                 };
                 if (auto* pp = proc.apvts.getParameter ("pitch"))
                 { pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (9.0f)); pp->endChangeGesture(); }
-                set ("onsetbackfill", 1.0f);  set ("prelowcut", 0.75f);
-                set ("relshelf", rel);
+                set ("onsetbackfill", 1.0f); set ("prelowcut", 0.75f); set ("onsetholdlong", 0.0f);
+                set ("relrepair", repair ? 1.0f : 0.0f);
+                set ("relshelf", strength);
                 juce::AudioBuffer<float> b (2, 512);
                 juce::MidiBuffer m;
                 std::vector<float> out;
-                double ph = 0.0;
-                for (int blk = 0; blk < 80; ++blk)
+                juce::Random rng (7);
+                double ph = 0.0, amp = 1.0, per = 48000.0 / 110.0;
+                for (int blk = 0; blk < 90; ++blk)
                 {
                     for (int i = 0; i < 512; ++i)
                     {
                         const double t = (blk * 512 + i) / 48000.0;
-                        ph += 110.0 / 48000.0;
-                        if (ph >= 1.0) ph -= 1.0;
+                        ph += 1.0 / per;
+                        if (ph >= 1.0)
+                        {
+                            ph -= 1.0;
+                            per = 48000.0 / 110.0 * (1.0 + 0.05 * (rng.nextDouble() * 2.0 - 1.0));
+                            amp = 1.0 + 0.15 * (rng.nextDouble() * 2.0 - 1.0);
+                        }
                         double s2 = 0.0;
                         for (int k = 1; k <= 20; ++k)
                             s2 += std::exp (-0.16 * (k - 1)) * std::sin (2.0 * M_PI * k * ph);
+                        // two phrases with a long silence between them, so the
+                        // filter state cannot be carried from one to the next
                         double env = 0.0;
-                        if (t > 0.30 && t < 0.55) env = std::min (1.0, (t - 0.30) / 0.02);
-                        else if (t >= 0.55)       env = std::max (0.0, 1.0 - (t - 0.55) / 0.08);
-                        b.setSample (0, i, (float) (0.3 * env * s2));
-                        b.setSample (1, i, (float) (0.3 * env * s2));
+                        if (t > 0.20 && t < 0.45)  env = std::min (1.0, (t - 0.20) / 0.02);
+                        else if (t >= 0.45 && t < 0.55) env = std::max (0.0, 1.0 - (t - 0.45) / 0.08);
+                        else if (t > 0.75 && t < 0.90) env = std::min (1.0, (t - 0.75) / 0.02);
+                        b.setSample (0, i, (float) (0.3 * env * s2 * amp));
+                        b.setSample (1, i, (float) (0.3 * env * s2 * amp));
                     }
                     proc.processBlock (b, m);
                     out.insert (out.end(), b.getReadPointer (0), b.getReadPointer (0) + 512);
                 }
                 return out;
             };
-            auto band = [] (const std::vector<float>& x, double t0, double t1, double lo, double hi)
+            const auto offA = run (false, 0.0f), offB = run (false, 0.75f), on = run (true, 0.5f);
+            size_t d1 = 0, d2 = 0;
+            for (size_t i = 0; i < offA.size(); ++i)
             {
-                const int fs = 48000, N = 2048;
-                double acc = 0.0; int c = 0;
-                for (int s = (int) (t0 * fs); s + N < (int) (t1 * fs); s += N / 2)
-                {
-                    std::vector<float> re (x.begin() + s, x.begin() + s + N), im ((size_t) N, 0.0f);
-                    for (int i = 0; i < N; ++i)
-                        re[(size_t) i] *= 0.5f - 0.5f * std::cos (2.0f * (float) M_PI * i / N);
-                    PsolaEngine::fftForViz (re.data(), im.data(), N);
-                    double a2 = 0.0;
-                    for (int k = (int) (lo * N / fs); k <= (int) (hi * N / fs); ++k)
-                        a2 += re[(size_t) k] * re[(size_t) k] + im[(size_t) k] * im[(size_t) k];
-                    acc += a2; ++c;
-                }
-                return 10.0 * std::log10 (acc / std::max (c, 1) + 1.0e-20);
+                if (offA[i] != offB[i]) ++d1;
+                if (offA[i] != on[i])   ++d2;
+            }
+            std::printf ("  OFF at strength 0 vs 0.75: %zu differing;  OFF vs ON: %zu\n", d1, d2);
+            check (d1 == 0, "with Release Repair off the strength knob changes nothing");
+            check (d2 > offA.size() / 200, "and turning it on does change the endings");
+            // no click at the second phrase's attack after a long silence
+            auto worstStep = [] (const std::vector<float>& x, double t0, double t1)
+            {
+                const int fs = 48000; double w = 0.0;
+                for (int i = (int) (t0 * fs) + 1; i < (int) (t1 * fs) && i < (int) x.size(); ++i)
+                    w = std::max (w, (double) std::abs (x[(size_t) i] - x[(size_t) (i - 1)]));
+                return w;
             };
-            const auto off = run (0.0f), on = run (0.5f);
-            // the tail: 90-130 Hz is the untransposed voice, which should go
-            const double tOff = band (off, 0.60, 0.70, 90.0, 130.0);
-            const double tOn  = band (on,  0.60, 0.70, 90.0, 130.0);
-            // the attack must be untouched -- this is the no-regression clause
-            const double aOff = band (off, 0.345, 0.395, 90.0, 130.0);
-            const double aOn  = band (on,  0.345, 0.395, 90.0, 130.0);
-            std::printf ("  tail 90-130 Hz  off %.1f  on %.1f dB;  attack  off %.1f  on %.1f dB\n",
-                         tOff, tOn, aOff, aOn);
-            check (tOn < tOff - 1.0, "Release Suppression takes the old pitch out of the tail");
-            check (std::abs (aOn - aOff) < 0.5, "and leaves the attack alone");
-            rs->beginChangeGesture(); rs->setValueNotifyingHost (0.0f); rs->endChangeGesture();
+            const double sOff = worstStep (offA, 0.78, 0.84), sOn = worstStep (on, 0.78, 0.84);
+            std::printf ("  second attack after silence, worst step: off %.4f on %.4f\n", sOff, sOn);
+            check (sOn < sOff * 1.5 + 0.01, "no click when the next phrase starts");
+            for (const char* id : { "relrepair", "relshelf" })
+                if (auto* q = proc.apvts.getParameter (id))
+                { q->beginChangeGesture(); q->setValueNotifyingHost (std::strcmp (id, "relshelf") == 0 ? 0.5f : 0.0f); q->endChangeGesture(); }
             if (auto* pp = proc.apvts.getParameter ("pitch"))
             { pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture(); }
         }

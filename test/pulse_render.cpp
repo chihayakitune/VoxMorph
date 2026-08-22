@@ -94,7 +94,7 @@ int main (int argc, char** argv)
 {
     if (argc < 6)
     {
-        std::fprintf (stderr, "usage: %s <in.wav> <out.wav> <pitchSt> <formantSt> <disperse> [smooth] [body] [onsetHold] [holdTracksPeriod] [preLockLowCut] [backfill] [hostBuf] [spec] [air] [notchDb] [notchQ] [relShelf]\n", argv[0]);
+        std::fprintf (stderr, "usage: %s <in.wav> <out.wav> <pitchSt> <formantSt> <disperse> [smooth] [body] [onsetHold] [holdTracksPeriod] [preLockLowCut] [backfill] [hostBuf] [spec] [air] [relRepair] [relShelf]\n", argv[0]);
         return 2;
     }
     std::vector<float> in; double fs = 0.0;
@@ -111,9 +111,8 @@ int main (int argc, char** argv)
     p.preLockLowCut = argc > 10 ? (float) std::atof (argv[10]) : 0.0f;
     p.onsetBackfill = argc > 11 ? std::atoi (argv[11]) != 0 : false;
     p.airPreserve   = argc > 14 ? (float) std::atof (argv[14]) : 0.0f;
-    p.releaseNotchDb= argc > 15 ? (float) std::atof (argv[15]) : 0.0f;
-    p.releaseNotchQ = argc > 16 ? (float) std::atof (argv[16]) : 4.5f;
-    p.releaseShelf  = argc > 17 ? (float) std::atof (argv[17]) : 0.0f;
+    p.releaseRepair = argc > 15 ? std::atoi (argv[15]) != 0 : false;
+    p.releaseShelf  = argc > 16 ? (float) std::atof (argv[16]) : 0.0f;
     // f1/f2/f3, breath, AEIOU and Definition are switched on by argv[13]
     // as a bit mask, to exercise the spectral path (see HANDOVER v0.58.0)
     const int spec = argc > 13 ? std::atoi (argv[13]) : 0;
