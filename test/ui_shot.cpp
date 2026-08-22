@@ -1913,6 +1913,105 @@ int main (int argc, char** argv)
         set ("onsetbackfill", 1.0f); set ("prelowcut", 0.75f); set ("pulsebody", 0.75f);
     }
 
+    // ---- Release Suppression and the onset/release split (v0.60.0) --------
+    // Two things to hold. The control exists, is off by default and is bound
+    // to a row; and -- the point of the whole change -- separating VOICE from
+    // RELEASE must not cost the ONSET side anything. The onset numbers on the
+    // user's take are identical either way; here the guard is that the pre-
+    // lock cut still bites on a synthetic attack.
+    {
+        std::printf ("\n== Release Suppression ==\n");
+        auto* rs = proc.apvts.getParameter ("relshelf");
+        check (rs != nullptr, "relshelf parameter exists");
+        if (rs != nullptr)
+        {
+            check (rs->getDefaultValue() < 0.001f,
+                   "Release Suppression defaults to OFF (it awaits a listening test)");
+            std::unique_ptr<juce::Component> beta (new BetaPanel (proc));
+            int rows = 0, outside = 0;
+            walk (beta.get(), [&] (juce::Component* c)
+            {
+                if (auto* l = dynamic_cast<juce::Label*> (c))
+                    if (l->getText() == "Release Suppression") ++rows;
+            });
+            for (int i = 0; i < beta->getNumChildComponents(); ++i)
+                if (! beta->getLocalBounds().contains (beta->getChildComponent (i)->getBounds()))
+                    ++outside;
+            std::printf ("  rows %d, children outside the BETA panel %d\n", rows, outside);
+            check (rows >= 1 && outside == 0, "a row is bound to it and the panel still fits");
+
+            // a phrase: silence, attack, steady, then a decay to silence
+            auto run = [&] (float rel)
+            {
+                proc.prepareToPlay (48000.0, 512);
+                auto set = [&] (const char* id, float v01)
+                {
+                    if (auto* q = proc.apvts.getParameter (id))
+                    { q->beginChangeGesture(); q->setValueNotifyingHost (v01); q->endChangeGesture(); }
+                };
+                if (auto* pp = proc.apvts.getParameter ("pitch"))
+                { pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (9.0f)); pp->endChangeGesture(); }
+                set ("onsetbackfill", 1.0f);  set ("prelowcut", 0.75f);
+                set ("relshelf", rel);
+                juce::AudioBuffer<float> b (2, 512);
+                juce::MidiBuffer m;
+                std::vector<float> out;
+                double ph = 0.0;
+                for (int blk = 0; blk < 80; ++blk)
+                {
+                    for (int i = 0; i < 512; ++i)
+                    {
+                        const double t = (blk * 512 + i) / 48000.0;
+                        ph += 110.0 / 48000.0;
+                        if (ph >= 1.0) ph -= 1.0;
+                        double s2 = 0.0;
+                        for (int k = 1; k <= 20; ++k)
+                            s2 += std::exp (-0.16 * (k - 1)) * std::sin (2.0 * M_PI * k * ph);
+                        double env = 0.0;
+                        if (t > 0.30 && t < 0.55) env = std::min (1.0, (t - 0.30) / 0.02);
+                        else if (t >= 0.55)       env = std::max (0.0, 1.0 - (t - 0.55) / 0.08);
+                        b.setSample (0, i, (float) (0.3 * env * s2));
+                        b.setSample (1, i, (float) (0.3 * env * s2));
+                    }
+                    proc.processBlock (b, m);
+                    out.insert (out.end(), b.getReadPointer (0), b.getReadPointer (0) + 512);
+                }
+                return out;
+            };
+            auto band = [] (const std::vector<float>& x, double t0, double t1, double lo, double hi)
+            {
+                const int fs = 48000, N = 2048;
+                double acc = 0.0; int c = 0;
+                for (int s = (int) (t0 * fs); s + N < (int) (t1 * fs); s += N / 2)
+                {
+                    std::vector<float> re (x.begin() + s, x.begin() + s + N), im ((size_t) N, 0.0f);
+                    for (int i = 0; i < N; ++i)
+                        re[(size_t) i] *= 0.5f - 0.5f * std::cos (2.0f * (float) M_PI * i / N);
+                    PsolaEngine::fftForViz (re.data(), im.data(), N);
+                    double a2 = 0.0;
+                    for (int k = (int) (lo * N / fs); k <= (int) (hi * N / fs); ++k)
+                        a2 += re[(size_t) k] * re[(size_t) k] + im[(size_t) k] * im[(size_t) k];
+                    acc += a2; ++c;
+                }
+                return 10.0 * std::log10 (acc / std::max (c, 1) + 1.0e-20);
+            };
+            const auto off = run (0.0f), on = run (0.5f);
+            // the tail: 90-130 Hz is the untransposed voice, which should go
+            const double tOff = band (off, 0.60, 0.70, 90.0, 130.0);
+            const double tOn  = band (on,  0.60, 0.70, 90.0, 130.0);
+            // the attack must be untouched -- this is the no-regression clause
+            const double aOff = band (off, 0.345, 0.395, 90.0, 130.0);
+            const double aOn  = band (on,  0.345, 0.395, 90.0, 130.0);
+            std::printf ("  tail 90-130 Hz  off %.1f  on %.1f dB;  attack  off %.1f  on %.1f dB\n",
+                         tOff, tOn, aOff, aOn);
+            check (tOn < tOff - 1.0, "Release Suppression takes the old pitch out of the tail");
+            check (std::abs (aOn - aOff) < 0.5, "and leaves the attack alone");
+            rs->beginChangeGesture(); rs->setValueNotifyingHost (0.0f); rs->endChangeGesture();
+            if (auto* pp = proc.apvts.getParameter ("pitch"))
+            { pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture(); }
+        }
+    }
+
     // ---- .vmprofile round-trip, including the v0.40.0 texture fields ----
     // profileToXml / profileFromXml live in PluginEditor.h and need JUCE, so
     // offline_test cannot reach them; this is the only place they get tested.

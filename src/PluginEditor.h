@@ -5338,6 +5338,22 @@ public:
                    "オフ=標準の動作。"));
         addAndMakeVisible (*holdLongRow);
 
+        relRow = std::make_unique<ParamRow> (proc, "relshelf", ParamRow::Kind::slider,
+            "Release Suppression",
+            vmTip ("EXPERIMENTAL. The other end of the phrase. Onset Repair works on the START of "
+                   "a phrase; until now the engine could not tell a phrase ENDING apart from one, "
+                   "so the same treatment ran there and took 4-6 dB out of the voice band as the "
+                   "sound died away. The engine now knows the difference, and this is what it "
+                   "uses on endings instead: a much gentler version, aimed only at the low "
+                   "remains of your untransposed voice. Start around 0.5. 0 = off, and endings "
+                   "then get no treatment at all.",
+                   "句の「終わり」側です。Onset Repairは句の頭を直す機能ですが、これまでエンジンは"
+                   "句の終わりと頭を区別できず、語尾にも同じ処理がかかって、消えていく声の帯域を"
+                   "4〜6dB削っていました。エンジンが両者を区別できるようになったので、語尾には"
+                   "こちらを使います。ずっと浅い処理で、狙うのは変換前の地声の低い残りだけです。"
+                   "0.5あたりから試してください。0=オフ(語尾には何もしません)。"));
+        addAndMakeVisible (*relRow);
+
         // Legacy Low Latency (moved here in v0.31.0, parameter id "lowlat"
         // unchanged). This is the OLD approach to latency: it shortens the
         // engine's lookahead and narrows its analysis, so it costs quality.
@@ -5372,7 +5388,7 @@ public:
         };
         addAndMakeVisible (closeBtn);
 
-        setSize (600, 314);
+        setSize (600, 348);
         sendLookAndFeelChange();
     }
 
@@ -5390,6 +5406,8 @@ public:
         r.removeFromTop (4);
         holdLongRow->setBounds (r.removeFromTop (28));
         r.removeFromTop (4);
+        relRow->setBounds (r.removeFromTop (30));
+        r.removeFromTop (4);
         lowLatRow->setBounds (r.removeFromTop (28));
         closeBtn.setBounds (r.removeFromBottom (30).removeFromRight (100).reduced (0, 2));
     }
@@ -5401,7 +5419,7 @@ private:
     juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
     juce::TooltipWindow  tips { this, 400 };
     juce::Label heading, note;
-    std::unique_ptr<ParamRow> gciRow, breathRow, holdLongRow, lowLatRow;
+    std::unique_ptr<ParamRow> gciRow, breathRow, holdLongRow, relRow, lowLatRow;
     juce::TextButton closeBtn { "Close" };
 };
 

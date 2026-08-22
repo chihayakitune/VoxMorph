@@ -159,6 +159,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     // experiment for post-lock dropouts; it does nothing for phrase onsets.
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "onsetholdlong", 1 }, "Onset Hold Long", false));
+    // Release Suppression (v0.60.0, BETA, default OFF pending a listening
+    // test). The ENDING half of the onset work: v0.59.2 measured the onset
+    // low cut arming at 23 of 23 phrase endings and costing 4-6 dB of
+    // 150-600 Hz there. The engine now separates VOICE / RELEASE /
+    // ONSET_ARMED / PRE_LOCK and confines the onset cut to PRE_LOCK; this is
+    // what treats the ending instead, and it is deliberately a much shallower
+    // shelf than the onset one -- 0.75 is an onset value and must not be
+    // reused here.
+    //
+    // The adaptive notch on the last input F0 was built and measured first,
+    // as instructed, and lost: over the live release window it gives -6.3 to
+    // -7.6 dB against this shelf's -13.1, because the tail residue is the
+    // whole bottom of the untransposed voice rather than one line. It stays
+    // reachable from test/pulse_render.cpp; it is not worth a control.
+    layout.add (std::make_unique<P> (juce::ParameterID { "relshelf", 1 }, "Release Suppression",
+                juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
     // Onset Repair (id "onsetbackfill", kept for compatibility). v0.59.0:
     // ON by default, adopted by the user after AB9. The root fix rather than
     // a mask: when the first voiced lock of a phrase
@@ -323,6 +339,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pPreLowCut   = apvts.getRawParameterValue ("prelowcut");
     pOnsetHoldLong = apvts.getRawParameterValue ("onsetholdlong");
     pOnsetBackfill = apvts.getRawParameterValue ("onsetbackfill");
+    pRelShelf      = apvts.getRawParameterValue ("relshelf");
     pFloor     = apvts.getRawParameterValue ("pitchfloor");
     pAutoMute  = apvts.getRawParameterValue ("automute");
     pLowLat    = apvts.getRawParameterValue ("lowlat");
@@ -651,6 +668,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const bool repairOn = pOnsetBackfill->load() > 0.5f;
     p.onsetBackfill    = repairOn;
     p.preLockLowCut    = repairOn ? pPreLowCut->load() : 0.0f;
+    p.releaseShelf     = pRelShelf->load();
     p.pitchFloorHz  = pLowOn->load() > 0.5f ? pFloor->load() : 0.0f;
     p.lowLatency    = pLowLat->load() > 0.5f;
     p.robotHz       = pRobotHz->load();
