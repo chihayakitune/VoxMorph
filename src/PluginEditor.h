@@ -5280,26 +5280,6 @@ public:
                    "合成的に聞こえる場合は0のままにしてください。"));
         addAndMakeVisible (*breathRow);
 
-        preCutRow = std::make_unique<ParamRow> (proc, "prelowcut", ParamRow::Kind::slider,
-            "Pre-Lock Low Cut",
-            vmTip ("EXPERIMENTAL. Removes your own low voice from the very start of a phrase. "
-                   "Onset Hold (MAIN tab) can only keep a pitch the engine has already found; "
-                   "for the first few hundredths of a second of a phrase there is nothing to "
-                   "hold yet, and until the pitch is found the sound is passed through WITHOUT "
-                   "the pitch change - so the opening of every phrase leaks your untransposed "
-                   "voice underneath the new one. This cuts the bottom out of that leaked part "
-                   "only, while it lasts. The airy top of the attack still passes, so consonants "
-                   "keep their bite, and anything that looks like S or SH is left alone. "
-                   "Attacks may feel lighter. 0 = off.",
-                   "句の頭で漏れる「変換前の自分の低い声」を取り除きます。MAINタブのOnset Holdは"
-                   "「すでに見つかっている音程を保持する」機能なので、句の出だしのまだ音程が"
-                   "見つかっていない数十ミリ秒には効きません。その間の音はピッチ変換されずに"
-                   "そのまま通るため、新しい声の下に地声が一瞬顔を出します。この機能は、"
-                   "その漏れている部分の低域だけを、漏れている間だけ削ります。立ち上がりの"
-                   "空気感は残るので子音の勢いは保たれ、サ行のように見える音には手を付けません。"
-                   "立ち上がりが軽く感じられる場合があります。0=オフ。"));
-        addAndMakeVisible (*preCutRow);
-
         holdLongRow = std::make_unique<ParamRow> (proc, "onsetholdlong", ParamRow::Kind::toggle,
             "Onset Hold Long",
             vmTip ("EXPERIMENTAL. Lets Onset Hold (MAIN tab) hold for longer - about 58 ms "
@@ -5312,25 +5292,6 @@ public:
                    "実声での測定では110秒中22回が20回になる程度なので、差はわずかです。"
                    "オフ=標準の動作。"));
         addAndMakeVisible (*holdLongRow);
-
-        backfillRow = std::make_unique<ParamRow> (proc, "onsetbackfill", ParamRow::Kind::toggle,
-            "Onset Backfill",
-            vmTip ("EXPERIMENTAL. Converts the start of a phrase properly instead of hiding it. "
-                   "The engine prepares sound slightly ahead of what you hear, so at the moment "
-                   "it finally works out the pitch of a new phrase, about 27 ms of the opening "
-                   "has been prepared but not yet played - prepared without the pitch change, "
-                   "because nothing knew it yet. This throws that away and redoes it with the "
-                   "pitch in hand, joining it with a 3 ms crossfade. Unlike Pre-Lock Low Cut it "
-                   "does not remove anything: the attack keeps its weight, it is simply at the "
-                   "right pitch. The two can be used together. No extra delay.",
-                   "句の頭を「隠す」のではなく、ちゃんと変換し直します。エンジンは聞こえている音より"
-                   "少し先まで音を用意しているので、新しい句の音程をやっと掴んだ時点で、"
-                   "出だしの約27ms分が「まだ再生されていないが、音程が分からないまま用意された」"
-                   "状態で残っています。この機能はそれを捨てて、掴んだ音程で作り直し、"
-                   "3msのクロスフェードで繋ぎます。Pre-Lock Low Cutと違って何も削らないので、"
-                   "立ち上がりの厚みはそのままで音程だけが正しくなります。併用もできます。"
-                   "遅延は増えません。"));
-        addAndMakeVisible (*backfillRow);
 
         // Legacy Low Latency (moved here in v0.31.0, parameter id "lowlat"
         // unchanged). This is the OLD approach to latency: it shortens the
@@ -5366,7 +5327,7 @@ public:
         };
         addAndMakeVisible (closeBtn);
 
-        setSize (600, 378);
+        setSize (600, 314);
         sendLookAndFeelChange();
     }
 
@@ -5382,11 +5343,7 @@ public:
         r.removeFromTop (4);
         breathRow->setBounds (r.removeFromTop (30));
         r.removeFromTop (4);
-        preCutRow->setBounds (r.removeFromTop (30));
-        r.removeFromTop (4);
         holdLongRow->setBounds (r.removeFromTop (28));
-        r.removeFromTop (4);
-        backfillRow->setBounds (r.removeFromTop (28));
         r.removeFromTop (4);
         lowLatRow->setBounds (r.removeFromTop (28));
         closeBtn.setBounds (r.removeFromBottom (30).removeFromRight (100).reduced (0, 2));
@@ -5399,7 +5356,7 @@ private:
     juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
     juce::TooltipWindow  tips { this, 400 };
     juce::Label heading, note;
-    std::unique_ptr<ParamRow> gciRow, breathRow, preCutRow, holdLongRow, backfillRow, lowLatRow;
+    std::unique_ptr<ParamRow> gciRow, breathRow, holdLongRow, lowLatRow;
     juce::TextButton closeBtn { "Close" };
 };
 
@@ -6681,6 +6638,34 @@ private:
                  "その数フレームだけ直前の音程を保持します。ただし「まだ声に見える」間だけ"
                  "なので、サ行などの子音には影響しません。保持中も音程の追従は続けるため、古い音程に貼り付いたままにはなりません。従来の動作に戻したいとき以外は"
                  "オンのままにしてください。"));
+        toggle (*cardAdvanced, "onsetbackfill", "Onset Repair",
+            tip ("Fixes the low growl at the start of phrases. The engine prepares sound slightly "
+                 "ahead of what you hear, so at the moment it works out the pitch of a new "
+                 "phrase, roughly 27 ms of the opening has been prepared but not played - "
+                 "prepared without the pitch change, because nothing knew it yet. This throws "
+                 "that away and redoes it with the pitch in hand, and takes the bottom out of "
+                 "whatever was already gone (see Repair Strength below). It adds no delay. Turn "
+                 "it off to get the behaviour from before v0.57.0 back exactly.",
+                 "句の頭で鳴る低い唸りを直します。エンジンは聞こえている音より少し先まで音を"
+                 "用意しているので、新しい句の音程を掴んだ時点で、出だしの約27ms分が"
+                 "「まだ再生されていないが、音程が分からないまま用意された」状態で残っています。"
+                 "この機能はそれを捨てて、掴んだ音程で作り直し、間に合わなかった分は低域を"
+                 "削って処理します(下のRepair Strength)。遅延は増えません。"
+                 "オフにすると v0.57.0 以前の動作に完全に戻ります。"));
+        slider (*cardAdvanced, "prelowcut", "Onset Repair Strength",
+            tip ("How hard to cut the bottom out of the part of the phrase opening that could not "
+                 "be re-rendered - the part already sent on before the pitch was known. 0 leaves "
+                 "it alone and relies on the re-render only; 1 removes about 24 dB below the "
+                 "speaker's own pitch. The default 0.75 is the setting chosen by ear. The airy "
+                 "top of the attack always passes, so consonants keep their bite, and anything "
+                 "that looks like S or SH is left alone. Only active while Onset Repair is on, "
+                 "and only on upward shifts.",
+                 "句の出だしのうち、作り直しが間に合わなかった部分(音程が分かる前に既に送り出して"
+                 "しまった部分)の低域をどれだけ削るか。0=削らず作り直しだけに任せる、"
+                 "1=話者自身の音程より下を約24dB削ります。既定の0.75は試聴で選ばれた値です。"
+                 "立ち上がりの空気感は常に通すので子音の勢いは保たれ、サ行のように見える音には"
+                 "手を付けません。Onset Repairがオンのとき、かつ上げ方向のシフトのときだけ"
+                 "動作します。"));
         slider (*cardAdvanced, "pulsebody", "Pulse Body",
             tip ("How much of each glottal pulse survives a large upward shift. To stop a raised "
                  "voice sounding like two voices at once, the engine cuts a shorter slice out of "

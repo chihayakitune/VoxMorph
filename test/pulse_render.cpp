@@ -133,7 +133,11 @@ int main (int argc, char** argv)
 #ifdef PSOLA_DETECT_LOG
     {
         FILE* bf = std::fopen ("/tmp/bflog.csv", "w");
-        for (double t : e.backfillAt) std::fprintf (bf, "%.6f\n", t);
+        std::fprintf (bf, "tOut,tLock,recovered,alreadyOut,hostBlock,unvoicedRun,preHold,f0In,f0Out,cutHz\n");
+        for (const auto& r : e.backfillLog)
+            std::fprintf (bf, "%.6f,%.6f,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f\n",
+                          r.tOut, r.tLock, r.recovered, r.alreadyOut, r.hostBlock,
+                          r.unvoicedRun, r.preHold, r.f0In, r.f0Out, r.cutHz);
         std::fclose (bf);
         FILE* lf = std::fopen ("/tmp/dlog.csv", "w");
         std::fprintf (lf, "t,energy,lastVoicedE,zcr,rho,bestVal,pick,lag,f0Before,f0After,confident,vBefore,vAfter,why\n");

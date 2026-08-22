@@ -655,6 +655,12 @@ int main (int argc, char** argv)
     //      change -- a frozen shape at low alpha still reads as a reading
     {
         std::printf ("\n== VISUALIZER page ==\n");
+        // The onset features ship ON from v0.59.0 and place extra grains at
+        // every re-onset, which republishes the analysis taps this section
+        // reads. Pin them: this is a test of the lane, not of them.
+        for (auto* pid : { "onsetbackfill", "prelowcut", "onsetholdlong" })
+            if (auto* q = proc.apvts.getParameter (pid))
+            { q->beginChangeGesture(); q->setValueNotifyingHost (0.0f); q->endChangeGesture(); }
         ed->setSize (1400, 1080);
         juce::MessageManager::getInstance()->runDispatchLoopUntil (200);
         auto* vizTab = findButton (ed.get(), "Visualizer");
@@ -1465,102 +1471,11 @@ int main (int argc, char** argv)
     }
 
     // ---- Pre-Lock Low Cut (v0.56.0) ---------------------------------------
-    // Onset Hold cannot touch the frames BEFORE the first voiced lock of a
-    // phrase, because there is no pitch to hold yet. This checks that the
-    // low cut both exists off by default and actually removes the low band
-    // from the pre-lock passthrough. The source is a hard-onset low tone: the
-    // engine cannot lock instantly, so the first frames go out unshifted, and
-    // at 110 Hz the leak lands squarely in the band being measured.
-    {
-        std::printf ("\n== Pre-Lock Low Cut ==\n");
-        auto* pc = proc.apvts.getParameter ("prelowcut");
-        check (pc != nullptr, "prelowcut parameter exists");
-        if (pc != nullptr)
-        {
-            check (pc->getDefaultValue() < 0.001f,
-                   "Pre-Lock Low Cut defaults to OFF (it awaits a listening test)");
-            std::unique_ptr<juce::Component> beta (new BetaPanel (proc));
-            int rows = 0, outside = 0;
-            walk (beta.get(), [&] (juce::Component* c)
-            {
-                if (auto* l = dynamic_cast<juce::Label*> (c))
-                    if (l->getText() == "Pre-Lock Low Cut") ++rows;
-                if (auto* b = dynamic_cast<juce::Button*> (c))
-                    if (b->getButtonText() == "Pre-Lock Low Cut") ++rows;
-            });
-            for (int i = 0; i < beta->getNumChildComponents(); ++i)
-                if (! beta->getLocalBounds().contains (beta->getChildComponent (i)->getBounds()))
-                    ++outside;
-            std::printf ("  rows in the BETA panel: %d, children outside it: %d\n", rows, outside);
-            check (rows >= 1, "a row is bound to it");
-            check (outside == 0, "the new row still fits inside the BETA window");
-
-            auto run = [&] (float amt)
-            {
-                proc.prepareToPlay (48000.0, 512);
-                auto* pp = proc.apvts.getParameter ("pitch");
-                pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (9.0f)); pp->endChangeGesture();
-                pc->beginChangeGesture(); pc->setValueNotifyingHost (amt); pc->endChangeGesture();
-                juce::AudioBuffer<float> b (2, 512);
-                juce::MidiBuffer m;
-                std::vector<float> out;
-                // A CLEAN tone on purpose here, unlike the Onset Hold test.
-                // With period jitter the 90-130 Hz band fills up with the
-                // old-pitch residue from grain reuse, which this feature does
-                // not touch and which then masks what it does -- measured,
-                // 22.3 dB either way. The clean tone leaves the pre-lock leak
-                // as the only thing in that band. Generator-specific numbers,
-                // so the check below is a relative one.
-                double ph = 0.0, amp = 1.0, per = 48000.0 / 110.0;
-                for (int blk = 0; blk < 60; ++blk)
-                {
-                    for (int i = 0; i < 512; ++i)
-                    {
-                        const double t = (blk * 512 + i) / 48000.0;
-                        ph += 1.0 / per;
-                        if (ph >= 1.0) ph -= 1.0;
-                        double s2 = 0.0;
-                        for (int k = 1; k <= 20; ++k)
-                            s2 += std::exp (-0.16 * (k - 1)) * std::sin (2.0 * M_PI * k * ph);
-                        const double env = t > 0.30 ? std::min (1.0, (t - 0.30) / 0.02) : 0.0;
-                        b.setSample (0, i, (float) (0.3 * env * amp * s2));
-                        b.setSample (1, i, (float) (0.3 * env * amp * s2));
-                    }
-                    proc.processBlock (b, m);
-                    out.insert (out.end(), b.getReadPointer (0), b.getReadPointer (0) + 512);
-                }
-                return out;
-            };
-            // energy at the INPUT pitch (110 Hz) over the first 60 ms of output
-            // Only the pre-lock window: the input onset is at 0.30 s and the
-            // engine's lookahead puts it out at about 0.343 s, so 0.335-0.395
-            // is the stretch before the first lock. A wider window lets the
-            // steady voiced output in and washes the difference out.
-            auto lowAtInputPitch = [] (const std::vector<float>& x)
-            {
-                const int fs = 48000, N = 1024;
-                double best = 0.0;
-                for (int s = (int) (0.335 * fs); s + N < (int) (0.395 * fs); s += N / 16)
-                {
-                    std::vector<float> re (x.begin() + s, x.begin() + s + N), im ((size_t) N, 0.0f);
-                    for (int i = 0; i < N; ++i)
-                        re[(size_t) i] *= 0.5f - 0.5f * std::cos (2.0f * (float) M_PI * i / N);
-                    PsolaEngine::fftForViz (re.data(), im.data(), N);
-                    double a = 0.0;
-                    for (int k = (int) (90.0 * N / fs); k <= (int) (130.0 * N / fs); ++k)
-                        a += re[(size_t) k] * re[(size_t) k] + im[(size_t) k] * im[(size_t) k];
-                    best = std::max (best, a);
-                }
-                return 10.0 * std::log10 (best + 1.0e-20);
-            };
-            const double off = lowAtInputPitch (run (0.0f)), on = lowAtInputPitch (run (1.0f));
-            std::printf ("  90-130 Hz peak across the attack: off %.1f dB, on %.1f dB\n", off, on);
-            check (on < off - 3.0, "Pre-Lock Low Cut removes at least 3 dB of the leak");
-            pc->beginChangeGesture(); pc->setValueNotifyingHost (0.0f); pc->endChangeGesture();
-            auto* pp = proc.apvts.getParameter ("pitch");
-            pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture();
-        }
-    }
+    // The standalone "does the low cut alone remove the leak" test is gone:
+    // from v0.59.0 the product has no such configuration -- Onset Repair
+    // gates both mechanisms together, deliberately, so that OFF is a way back
+    // to the old path. Isolating the cut is done at engine level with
+    // test/pulse_render.cpp, which takes the two as separate arguments.
 
     // ---- Pre-Lock Low Cut: the amount has to BE an amount (v0.57.0) -------
     // v0.56.0 crossfaded dry against an IIR high-pass, and the two are not in
@@ -1628,16 +1543,23 @@ int main (int argc, char** argv)
             }
             std::printf ("  90-130 Hz : %.1f / %.1f / %.1f dB at amount 0 / 0.5 / 1\n", lowB[0], lowB[1], lowB[2]);
             std::printf ("  200-600 Hz: %.1f / %.1f / %.1f dB\n", bodyB[0], bodyB[1], bodyB[2]);
-            // A synthetic onset locks fast, so its pre-lock window is short
-            // and only a couple of dB are on the table here -- the real
-            // gradient (-48.9 / -53.5 / -55.8 dB) is in HANDOVER v0.57.0.
-            // What must hold in both is the direction, and that the halfway
-            // setting is not the deepest cut anywhere.
-            check (lowB[1] < lowB[0] - 1.0 && lowB[2] < lowB[0] - 1.0,
-                   "more amount, less low band");
-            check (lowB[1] > lowB[2] - 1.5, "the halfway setting is not deeper than full");
-            check (bodyB[1] > std::min (bodyB[0], bodyB[2]) - 1.5,
-                   "no notch in the body at the halfway setting");
+            // On this synthetic onset the backfill covers the whole pre-lock
+            // window on its own, so nothing is left for the strength knob and
+            // all three readings come out equal. That is the product working,
+            // not the knob being broken -- and since Onset Repair gates the
+            // two together there is no way to isolate the cut from here any
+            // more. The gradient is measured at engine level, where they are
+            // separate arguments: -48.9 / -51.5 / -53.5 / -54.9 / -55.8 dB
+            // across amount 0..1. See HANDOVER v0.59.0.
+            //
+            // What is worth guarding here is the pair of failure modes the
+            // old dry/high-pass crossfade had: the knob must never RAISE the
+            // low band, and halfway must never notch the body deeper than
+            // full does.
+            check (lowB[1] <= lowB[0] + 0.5 && lowB[2] <= lowB[0] + 0.5,
+                   "the strength knob never raises the low band");
+            check (bodyB[1] > std::min (bodyB[0], bodyB[2]) - 1.0,
+                   "and never notches the body at the halfway setting");
             pc->beginChangeGesture(); pc->setValueNotifyingHost (0.0f); pc->endChangeGesture();
             auto* pp = proc.apvts.getParameter ("pitch");
             pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture();
@@ -1651,21 +1573,16 @@ int main (int argc, char** argv)
         check (bf != nullptr, "onsetbackfill parameter exists");
         if (bf != nullptr)
         {
-            check (bf->getDefaultValue() < 0.5f, "Onset Backfill defaults to OFF");
-            std::unique_ptr<juce::Component> beta (new BetaPanel (proc));
-            int rows = 0, outside = 0;
-            walk (beta.get(), [&] (juce::Component* c)
+            int rows = 0;
+            walk (ed.get(), [&] (juce::Component* c)
             {
                 if (auto* l = dynamic_cast<juce::Label*> (c))
-                    if (l->getText() == "Onset Backfill") ++rows;
+                    if (l->getText() == "Onset Repair") ++rows;
                 if (auto* b = dynamic_cast<juce::Button*> (c))
-                    if (b->getButtonText() == "Onset Backfill") ++rows;
+                    if (b->getButtonText() == "Onset Repair") ++rows;
             });
-            for (int i = 0; i < beta->getNumChildComponents(); ++i)
-                if (! beta->getLocalBounds().contains (beta->getChildComponent (i)->getBounds()))
-                    ++outside;
-            std::printf ("  rows %d, children outside the panel %d\n", rows, outside);
-            check (rows >= 1 && outside == 0, "a row is bound to it and the panel still fits");
+            std::printf ("  rows named \"Onset Repair\" on the MAIN tab: %d\n", rows);
+            check (rows >= 1, "a row is bound to it outside the BETA window");
 
             auto run = [&] (bool on)
             {
@@ -1830,6 +1747,95 @@ int main (int argc, char** argv)
             if (auto* pp = proc.apvts.getParameter ("pitch"))
             { pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture(); }
         }
+    }
+
+    // ---- shipped defaults (v0.59.0) ---------------------------------------
+    // The set the user adopted after AB9. These are the values a NEW plugin
+    // instance gets; PsolaEngine's own Params defaults are deliberately
+    // different (everything off) so bitexact and offline_test keep measuring
+    // the original engine. Do not conflate the two.
+    {
+        std::printf ("\n== shipped defaults ==\n");
+        struct D { const char* id; float want; const char* how; };
+        const D wanted[] = {
+            { "pulsesmooth",   1.00f, "on"   },
+            { "pulsebody",     0.75f, "0.75" },
+            { "onsethold",     1.00f, "on"   },
+            { "onsetholdlong", 0.00f, "off"  },
+            { "onsetbackfill", 1.00f, "on"   },
+            { "prelowcut",     0.75f, "0.75" },
+        };
+        for (const auto& d : wanted)
+        {
+            auto* q = proc.apvts.getParameter (d.id);
+            const float got = q != nullptr ? q->getDefaultValue() : -1.0f;
+            std::printf ("  %-14s default %.3f (want %s)\n", d.id, got, d.how);
+            check (q != nullptr && std::abs (got - d.want) < 0.005f,
+                   juce::String (d.id) + " ships at its adopted default");
+        }
+    }
+
+    // ---- Onset Repair OFF is the old signal path (v0.59.0) ----------------
+    // One switch has to stop BOTH mechanisms. If the strength knob could
+    // leave its filter running with the repair off, "off" would not be a way
+    // back to the previous behaviour, which is the only thing that makes the
+    // default change safe to ship.
+    {
+        std::printf ("\n== Onset Repair off ==\n");
+        auto run = [&] (bool repair, float strength)
+        {
+            proc.prepareToPlay (48000.0, 512);
+            auto set = [&] (const char* id, float v01)
+            {
+                if (auto* q = proc.apvts.getParameter (id))
+                { q->beginChangeGesture(); q->setValueNotifyingHost (v01); q->endChangeGesture(); }
+            };
+            if (auto* pp = proc.apvts.getParameter ("pitch"))
+            { pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (9.0f)); pp->endChangeGesture(); }
+            set ("onsetbackfill", repair ? 1.0f : 0.0f);
+            set ("prelowcut", strength);
+            juce::AudioBuffer<float> b (2, 512);
+            juce::MidiBuffer m;
+            std::vector<float> out;
+            double ph = 0.0;
+            for (int blk = 0; blk < 60; ++blk)
+            {
+                for (int i = 0; i < 512; ++i)
+                {
+                    const double t = (blk * 512 + i) / 48000.0;
+                    ph += 110.0 / 48000.0;
+                    if (ph >= 1.0) ph -= 1.0;
+                    double s2 = 0.0;
+                    for (int k = 1; k <= 20; ++k)
+                        s2 += std::exp (-0.16 * (k - 1)) * std::sin (2.0 * M_PI * k * ph);
+                    const double env = t > 0.30 ? std::min (1.0, (t - 0.30) / 0.02) : 0.0;
+                    b.setSample (0, i, (float) (0.3 * env * s2));
+                    b.setSample (1, i, (float) (0.3 * env * s2));
+                }
+                proc.processBlock (b, m);
+                out.insert (out.end(), b.getReadPointer (0), b.getReadPointer (0) + 512);
+            }
+            return out;
+        };
+        const auto offZero = run (false, 0.0f);
+        const auto offFull = run (false, 1.0f);
+        const auto onFull  = run (true,  1.0f);
+        size_t diffGate = 0, diffOn = 0;
+        for (size_t i = 0; i < offZero.size(); ++i)
+        {
+            if (offZero[i] != offFull[i]) ++diffGate;
+            if (offZero[i] != onFull[i])  ++diffOn;
+        }
+        std::printf ("  samples differing: repair off, strength 0 vs 1 = %zu;  off vs on = %zu\n",
+                     diffGate, diffOn);
+        check (diffGate == 0, "the strength knob does nothing while Onset Repair is off");
+        check (diffOn > offZero.size() / 100, "and something does happen when it is on");
+        if (auto* q = proc.apvts.getParameter ("onsetbackfill"))
+        { q->beginChangeGesture(); q->setValueNotifyingHost (1.0f); q->endChangeGesture(); }
+        if (auto* q = proc.apvts.getParameter ("prelowcut"))
+        { q->beginChangeGesture(); q->setValueNotifyingHost (0.75f); q->endChangeGesture(); }
+        if (auto* pp = proc.apvts.getParameter ("pitch"))
+        { pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture(); }
     }
 
     // ---- .vmprofile round-trip, including the v0.40.0 texture fields ----

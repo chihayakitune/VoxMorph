@@ -464,6 +464,21 @@ public:
         int     why;          // 0 none 1 lowVoiceHold 2 rescue 3 onsetHold 4 dropped
     };
     std::vector<DetectLogRow> detectLog;
+    // one row per backfill, with everything needed to say WHY a residue
+    // survived it: how much was recoverable, how much had already gone out,
+    // and what the pre-lock gate and the adaptive corner were doing.
+    struct BackfillLogRow
+    {
+        double tOut;        // output time of the join
+        double tLock;       // input time of the first voiced lock
+        int    recovered;   // samples re-rendered (writePos + houtCap - start)
+        int    alreadyOut;  // samples of the leak that had already been sent
+        int    hostBlock;   // n for the chunk the lock landed in
+        int    unvoicedRun;
+        int    preHold;     // pre-lock gate state at the lock
+        float  f0In, f0Out, cutHz;
+    };
+    std::vector<BackfillLogRow> backfillLog;
     std::vector<double>       backfillAt;   // output time of each join
 #endif
 
@@ -520,6 +535,7 @@ public:
         // unvoiced passthrough is CORRECT -- there is nothing to remove, and
         // cutting the bottom out of an attack would be pure damage.
         backfillOn     = q.onsetBackfill;
+        pitchSemiNow   = q.pitchSemi;
         preCutAmt      = (q.pitchSemi > 2.0f) ? std::clamp (q.preLockLowCut, 0.0f, 1.0f) : 0.0f;
         setDisperse (std::clamp (q.pulseDisperse, 0.0f, 1.0f));
         hiFreq         = (q.hiRangeHz > 20.0f) ? std::clamp (q.hiRangeHz, 100.0f, 600.0f) : 0.0f;
@@ -815,6 +831,12 @@ public:
             fadeLen    = xf;
 #ifdef PSOLA_DETECT_LOG
             backfillAt.push_back ((double) from / fs);
+            backfillLog.push_back ({ (double) from / fs, (double) writePos / fs,
+                                     (int) ((int64_t) nextMarkF + houtCapCur - from),
+                                     (int) (from - lastEmitted), n, unvoicedRun, preHold,
+                                     curP > 0.0f ? (float) (fs / curP) : 0.0f,
+                                     curP > 0.0f ? (float) (fs / curP) * std::pow (2.0f, pitchSemiNow / 12.0f) : 0.0f,
+                                     preFc });
 #endif
         }
 
@@ -887,6 +909,9 @@ public:
             accBuf[idx]  = 0.0f;
             normBuf[idx] = 0.0f;
             candBuf[idx] = 0.0f;
+#ifdef PSOLA_DETECT_LOG
+            lastEmitted = oi + 1;
+#endif
         }
     }
 
@@ -2454,6 +2479,10 @@ private:
     int64_t fadeFrom        = 0;
     int     fadeLen         = 0;
     double  markResume      = 0.0;
+#ifdef PSOLA_DETECT_LOG
+    int64_t lastEmitted = 0;
+#endif
+    float   pitchSemiNow = 0.0f;
     static constexpr int fadeN = 128;     // ~2.9 ms at 44.1 kHz
     static constexpr float kHoldTrack = 0.3f;   // measured: 0.3 > 0.6 > 0.9
     std::vector<double> sqPre;        // prefix sum of squares for the above

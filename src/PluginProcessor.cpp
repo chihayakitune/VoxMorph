@@ -144,23 +144,24 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     // toggle rather than the default; see v0.56.1 below.
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "onsethold", 1 }, "Onset Hold", true));
-    // Pre-Lock Low Cut (v0.56.0). OFF by default: it is a real fix for a
-    // real leak, but it is the user's ear that decides whether the attacks
-    // sound better without their own low fundamental in them, and the
-    // instruction sheet this came from asks that no new default ship before
-    // that listening. Measured over 39 phrase onsets at +9 st: time with the
+    // Onset Repair Strength (id "prelowcut", kept for compatibility).
+    // v0.59.0: default 0.75 -- the user A/B'd it and adopted it, treating the
+    // phrase-start growl as a defect rather than a matter of taste.
+    // It only has an effect while Onset Repair is on; see updateParams.
+    // Measured over 39 phrase onsets at +9 st: time with the
     // 60-140 Hz band above the band the shifted voice occupies falls from
     // 480 ms to 50 ms, p95 from +8.1 to -6.2 dB, while the periodicity
     // imposed on fricatives does not move and the old-pitch residue improves.
-    layout.add (std::make_unique<P> (juce::ParameterID { "prelowcut", 1 }, "Pre-Lock Low Cut",
-                juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
+    layout.add (std::make_unique<P> (juce::ParameterID { "prelowcut", 1 }, "Onset Repair Strength",
+                juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.75f));
     // Onset Hold Long (v0.56.1, BETA): the v0.55.0 variant -- 5 frames with
     // the period tracked through the hold instead of frozen. Kept as an
     // experiment for post-lock dropouts; it does nothing for phrase onsets.
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "onsetholdlong", 1 }, "Onset Hold Long", false));
-    // Onset Backfill (v0.57.0, BETA, default OFF pending a listening test).
-    // The root fix rather than a mask: when the first voiced lock of a phrase
+    // Onset Repair (id "onsetbackfill", kept for compatibility). v0.59.0:
+    // ON by default, adopted by the user after AB9. The root fix rather than
+    // a mask: when the first voiced lock of a phrase
     // lands, the ~27 ms of output that is placed but not yet handed to the
     // host is thrown away and re-rendered with the pitch now known, joined by
     // a 3 ms crossfade. Measured at +9 st over 39 phrase onsets it removes
@@ -169,7 +170,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     // which is what tells the two apart: one converts the sound, the other
     // deletes part of it.
     layout.add (std::make_unique<juce::AudioParameterBool> (
-                juce::ParameterID { "onsetbackfill", 1 }, "Onset Backfill", false));
+                juce::ParameterID { "onsetbackfill", 1 }, "Onset Repair", true));
     // Pulse Body (v0.52.0). Default raised to 0.75 in v0.53.0 after the user
     // A/B'd the four settings: that is the value where the output waveform's
     // positive/negative peak ratio lands on the original recording's (1.007
@@ -642,8 +643,14 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const bool holdLong = pOnsetHoldLong->load() > 0.5f;
     p.onsetHold        = pOnsetHold->load() > 0.5f ? (holdLong ? 5 : 3) : 0;
     p.holdTracksPeriod = pOnsetHold->load() > 0.5f && holdLong;
-    p.preLockLowCut    = pPreLowCut->load();
-    p.onsetBackfill    = pOnsetBackfill->load() > 0.5f;
+    // Onset Repair is one switch over two mechanisms: re-render the opening
+    // of the phrase, and take the bottom out of whatever of it could not be
+    // re-rendered. Turning it off has to stop both, so that OFF is exactly
+    // the pre-v0.57.0 signal path -- the strength knob alone must not be able
+    // to leave a filter running.
+    const bool repairOn = pOnsetBackfill->load() > 0.5f;
+    p.onsetBackfill    = repairOn;
+    p.preLockLowCut    = repairOn ? pPreLowCut->load() : 0.0f;
     p.pitchFloorHz  = pLowOn->load() > 0.5f ? pFloor->load() : 0.0f;
     p.lowLatency    = pLowLat->load() > 0.5f;
     p.robotHz       = pRobotHz->load();
