@@ -442,6 +442,8 @@ public:
         buildPreShelf (preFc);
         relLp.fill (0.0f);
         relGain = 0.0f;  relTarget = 0.0f;  relF0 = 0.0f;  relF0Age = 100000;
+        relShelfSm  = relShelfAmt;   // no ramp-in on the first phrase after a reset
+        relShelfSmK = (float) (1.0 - std::exp (-1.0 / (0.04 * fs)));
         relQN = 0;  prevFrameCenter = 0;  lastEmitted = 0;
         relLateEvents = 0;  relDropped = 0;  relOverflow = 0;
         relSuspend = false;  relCutWanted = 200.0f;
@@ -563,6 +565,27 @@ public:
     };
     std::vector<BackfillLogRow> backfillLog;
     std::vector<double>       backfillAt;   // output time of each join
+
+    // One row per analysis frame for the ONSET/RELEASE state machine,
+    // including the frames that take the digital-silence early return -- a
+    // release ends in silence, so a log that stops there cannot say how long
+    // RELEASE lasted. Pushed after the state machine has run, so `state` is
+    // the state this frame moved to while `voicedRead` is the (previous
+    // frame's) voicing it decided from.
+    struct StateLogRow
+    {
+        double t;              // input time of the frame's anchor, seconds
+        int    state;          // 0 voice, 1 release, 2 armed, 3 preLock
+        bool   voicedRead;
+        bool   relActive;
+        float  relTarget;      // what was booked, before the queue applies it
+        double energyPerSample;
+        float  zcr;
+        float  relF0;
+        int    relF0Age;
+        int    relLeft;
+    };
+    std::vector<StateLogRow> stateLog;
 #endif
 
 #ifdef PSOLA_GRAIN_LOG
@@ -1108,7 +1131,9 @@ public:
                 wet = gLow * tiltLp + gHigh * (wet - tiltLp);
             }
 
-            if (relShelfAmt > 0.0f)
+            // `|| relShelfSm` so turning the strength down to 0 glides out
+            // instead of cutting, and the one-poles keep tracking while it does
+            if (relShelfAmt > 0.0f || relShelfSm > 1.0e-4f)
             {
                 while (relQN > 0 && oi >= relQ[0].applyPos)
                 {
@@ -1133,6 +1158,7 @@ public:
                 // pitch, different phase, possibly after a long silence --
                 // then starts by mixing that stale value in.
                 relGain += (relTarget > relGain ? relAtk : relRel) * (relTarget - relGain);
+                relShelfSm += relShelfSmK * (relShelfAmt - relShelfSm);
                 wet = releaseStage (wet, relGain);
             }
 
@@ -1356,6 +1382,11 @@ private:
             if (want != pending && ! relSuspend)
                 pushRelEvent (src + D, want, relF0, relCutWanted, want > 0.5f ? 1 : 2, src);
         }
+#ifdef PSOLA_DETECT_LOG
+        stateLog.push_back ({ (double) anchor / fs, (int) onState, voiced, relActive,
+                              relTarget, energy / (double) kDetN, zcr, relF0, relF0Age,
+                              relLeft });
+#endif
         if (energy / kDetN < 1.0e-8)
         {
             // NOTE the unvoiced counter has to advance here too. Digital
@@ -2840,7 +2871,7 @@ private:
 
     inline float releaseStage (float x, float g)
     {
-        const float k = 1.0f - std::pow (10.0f, -0.3f * relShelfAmt * g);
+        const float k = 1.0f - std::pow (10.0f, -0.3f * relShelfSm * g);
         for (int i = 0; i < 4; ++i)
         {
             relLp[(size_t) i] += relShelfK * (x - relLp[(size_t) i]) + 1.0e-25f;
@@ -2942,6 +2973,11 @@ private:
     int     relCutMode  = 0;
     float   relCutHz    = 200.0f;
     float   relShelfAmt = 0.0f;
+    // Release Strength, dezippered. The depth is read on EVERY sample inside
+    // releaseStage, so moving the knob used to step the shelf mid-decay --
+    // audible precisely where the feature is meant to be doing its quietest
+    // work. ~40 ms, the same glide the pitch/formant ratios use.
+    float   relShelfSm  = 0.0f, relShelfSmK = 0.0f;
     std::array<float,4> relLp {};
     float   relShelfK   = 0.03f;
     float   relAtk = 0.02f, relRel = 0.004f;
