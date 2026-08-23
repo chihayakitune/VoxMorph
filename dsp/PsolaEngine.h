@@ -349,6 +349,41 @@ public:
         // lands ABOVE the converted f0 and eats the voice, and at 220 Hz in
         // it lands below the pitch it is supposed to be removing.
         int   releaseCutMode = 0;
+
+        // Deterministic Analysis Cadence (v0.62.0, BETA -- false = the
+        // shipped behaviour, bit-identical).
+        //
+        // The legacy scheduler counts samples: `sinceDetect += n` at the end
+        // of every chunk, analyse once it reaches 512, then `sinceDetect = 0`.
+        // Two things follow from the reset, and both make the analysis depend
+        // on the host's buffer size:
+        //   * the REMAINDER is thrown away. With a buffer that is not a
+        //     divisor of 512 the real period is not 512 at all -- at 480 it
+        //     is 960 -- so a different host gives a different analysis rate.
+        //   * even when the period is right, the PHASE is not. The first
+        //     detection happens at the end of the first chunk that satisfies
+        //     `writePos >= kDetN + maxLag`, which lands at 1760 for a buffer
+        //     of 32, 1792 for 64 and 256, and 2048 for 512. Everything after
+        //     that inherits the offset, so the analysis frames sit at
+        //     different absolute positions -- up to 288 samples apart -- and
+        //     no amount of care in APPLYING a decision can line them up.
+        //     Measured, that is the 1.58 dB of buffer spread left in Release
+        //     Repair after the event queue was fixed (v0.61.1).
+        //
+        // With this on, the schedule is an absolute position instead of a
+        // counter: `nextDetectPos` starts at the first sample index where a
+        // full analysis frame exists (kDetN + maxLag -- NOT a round 2048,
+        // which would be reading data that has not arrived yet at 88.2 and
+        // 96 kHz) and steps by exactly 512 from there. Host chunks are split
+        // at those boundaries so the analysis frame lands on the same
+        // absolute sample whatever the buffer size, and no remainder is
+        // dropped.
+        //
+        // It is a separate switch from Release Repair on purpose: it moves
+        // the analysis grid for every voice, so it has to be measurable on
+        // its own (Repair OFF, cadence OFF vs ON) before it is judged in
+        // combination with anything.
+        bool  deterministicCadence = false;
     };
 
     void prepare (double sampleRate)
@@ -392,6 +427,13 @@ public:
         curP        = (float) (fs / 150.0);
         voiced      = false;
         sinceDetect = 0;
+        // absolute schedule for the deterministic cadence: the first index at
+        // which a whole analysis frame exists, then every 512 from there. Seat
+        // it even when the mode is off, so switching it on mid-stream has a
+        // grid to snap to.
+        nextDetectPos = (int64_t) (kDetN + maxLag);
+        detCadenceSeen = detCadence;
+        readBound   = 0;
         tiltLp      = 0.0f;
         dispS1.fill (0.0f);  dispS2.fill (0.0f);
         buildDisperse();
@@ -585,6 +627,7 @@ public:
         relCutMode     = std::clamp (q.releaseCutMode, 0, 2);
         relShelfAmt    = relRepairOn ? std::clamp (q.releaseShelf, 0.0f, 1.0f) : 0.0f;
         preCutAmt      = (q.pitchSemi > 2.0f) ? std::clamp (q.preLockLowCut, 0.0f, 1.0f) : 0.0f;
+        detCadence     = q.deterministicCadence;
         setDisperse (std::clamp (q.pulseDisperse, 0.0f, 1.0f));
         hiFreq         = (q.hiRangeHz > 20.0f) ? std::clamp (q.hiRangeHz, 100.0f, 600.0f) : 0.0f;
         hiPAmt         = std::clamp (q.hiPitchAmt,   0.0f, 1.0f);
@@ -650,6 +693,11 @@ public:
         // Internally chop large host buffers into <=512-sample chunks so the
         // engine behaves identically at ANY buffer size: pitch-detection
         // cadence, grain scheduling and dezippering all stay uniform.
+        if (detCadence != detCadenceSeen)
+        {
+            detCadenceSeen = detCadence;
+            if (detCadence) seatDetectGrid();   // do not replay old frames
+        }
         while (n > 512)
         {
             processChunk (in, out, 512);
@@ -657,6 +705,30 @@ public:
         }
         if (n > 0)
             processChunk (in, out, n);
+    }
+
+    // Put `nextDetectPos` on the first grid point at or past the write head.
+    // Only needed when the mode is switched on mid-stream: the grid is
+    // base + k*512 counted from the start of the stream, so a stale value
+    // would otherwise send the scheduler off replaying frames that have
+    // already gone past.
+    void seatDetectGrid()
+    {
+        const int64_t base = (int64_t) (kDetN + maxLag);
+        if (writePos <= base) { nextDetectPos = base; return; }
+        const int64_t k = (writePos - base + 511) / 512;
+        nextDetectPos = base + k * 512;
+    }
+
+    // One dezipper step covering `n` samples. Kept as its own function so the
+    // two cadences can call it on their own schedule without the formula
+    // drifting apart.
+    void dezipperStep (int n)
+    {
+        const float a = std::min (1.0f, (float) (n / (0.04 * fs)));
+        prSm += a * (pitchRatio     - prSm);
+        frSm += a * (formantRatio   - frSm);
+        crSm += a * (consonantRatio - crSm);
     }
 
     void processChunk (const float* in, float* out, int n)
@@ -805,19 +877,50 @@ public:
 
         // dezipper: glide the conversion ratios over ~40 ms so parameter
         // moves (or host automation) never step audibly between grains
-        {
-            const float a = std::min (1.0f, (float) (n / (0.04 * fs)));
-            prSm += a * (pitchRatio     - prSm);
-            frSm += a * (formantRatio   - frSm);
-            crSm += a * (consonantRatio - crSm);
-        }
+        //
+        // Legacy takes one step per HOST chunk, so the trajectory depends on
+        // how the stream was chopped: sixteen steps of 32 do not land where
+        // one step of 512 lands. That would be inaudible on its own -- except
+        // that a grain's half width is `baseHalf / f` TRUNCATED to an int, so
+        // a last-bit difference in the ratio flips the width by a sample and
+        // the difference never washes out. Measured with the analysis grid
+        // already fixed, this was the whole of the remaining spread: the
+        // grain MARKS matched exactly across buffers and only `hout` differed.
+        //
+        // Under the deterministic cadence the step is taken once per grid
+        // point instead (in the detection loop below), which is what makes
+        // the control state a grain reads a function of the grid alone.
+        if (! detCadence)
+            dezipperStep (n);
 
         sinceDetect += n;
-        if (sinceDetect >= 512 && writePos >= kDetN + maxLag)
+        if (detCadence)
         {
-            detectPitch();
+            // Every grid point this chunk has just made available, analysed
+            // AT that point rather than at the chunk end. The frame is
+            // [g - kDetN - effMaxLag, g - effMaxLag), all of it behind the
+            // write head, so nothing is being read before it arrives -- and
+            // because g comes from the grid and not from the host, the frame
+            // sits on the same absolute samples for every buffer size. A
+            // buffer of 480 simply runs the loop twice every other chunk
+            // instead of dropping the remainder.
+            while (nextDetectPos <= writePos)
+            {
+                dezipperStep (512);
+                detectPitch (nextDetectPos);
+                if (airAmt > 0.001f)
+                    updateAirBands (nextDetectPos);
+                if (vaOn)
+                    updateVowelAdapt();
+                sinceDetect = 0;
+                nextDetectPos += 512;
+            }
+        }
+        else if (sinceDetect >= 512 && writePos >= kDetN + maxLag)
+        {
+            detectPitch (writePos);
             if (airAmt > 0.001f)
-                updateAirBands();
+                updateAirBands (writePos);
             if (vaOn)
                 updateVowelAdapt();
             sinceDetect = 0;
@@ -888,7 +991,33 @@ public:
 #endif
         }
 
-        while (nextMarkF < (double) (writePos + houtCapCur))
+        // How far ahead grains are laid down. Legacy follows the write head,
+        // so the horizon takes whatever values the host's chunking gives it
+        // -- and a mark that falls just past one host's horizon but inside
+        // another's is placed on OPPOSITE sides of a detection, with a
+        // different pitch. Fixing the analysis grid alone does not fix this;
+        // measured, it was what kept buffer 512 a full dB away from
+        // 32/64/128/256 in the release numbers even once every frame landed
+        // on the same sample.
+        //
+        // Under the deterministic cadence the horizon is quantised to the
+        // same grid. `nextDetectPos` is the next analysis point: it is
+        // > writePos and <= writePos + 512 once the loop above has run, so
+        // the output is never short of grains, and it changes ONLY at a
+        // detection -- which makes the sequence of horizons a property of
+        // the grid rather than of the buffer size.
+        //
+        // Before the first detection it is left following the write head:
+        // there is no grid to lock to yet, the state cannot change until the
+        // first frame anyway, and running the horizon out to the first grid
+        // point would place the whole warm-up's grains at a half-converged
+        // dezipper value.
+        const bool onGrid = detCadence && nextDetectPos > (int64_t) (kDetN + maxLag);
+        const int64_t markHorizon = onGrid ? nextDetectPos : writePos;
+        // and the matching read limit for the grains this places (see the
+        // member's comment): the last grid point, which is <= writePos
+        readBound = onGrid ? nextDetectPos - 512 : writePos;
+        while (nextMarkF < (double) (markHorizon + houtCapCur))
         {
             placeGrain();
             if (markResume > 0.0 && nextMarkF > markResume)
@@ -1049,21 +1178,27 @@ private:
     static constexpr int kDetN = 1024;
 
     // ---------------- pitch detection (YIN + octave guard) ----------------
-    void detectPitch()
+    // `anchor` is the input position the frame ENDS at (before the lag
+    // allowance). Legacy passes the write head, which is wherever the host's
+    // chunk happened to stop; the deterministic cadence passes a grid point,
+    // which is the entire difference between the two modes. Everything below
+    // is written against the anchor, never against writePos, so the two share
+    // one code path.
+    void detectPitch (int64_t anchor)
     {
         const int effMaxLag = effMaxLagCur;
         // The frame this call analyses, and its centre. Every release
         // decision is booked against an OUTPUT position derived from this,
         // never against whatever chunk boundary happened to trigger the call.
-        //   start  = writePos - kDetN - effMaxLag
-        //   end    = writePos - effMaxLag
+        //   start  = anchor - kDetN - effMaxLag
+        //   end    = anchor - effMaxLag
         //   centre = end - kDetN/2
-        const int64_t frameEnd    = writePos - effMaxLag;
+        const int64_t frameEnd    = anchor - effMaxLag;
         const int64_t frameCenter = frameEnd - kDetN / 2;
         struct CentreKeeper { int64_t& dst; int64_t v; ~CentreKeeper() { dst = v; } }
             centreKeeper { prevFrameCenter, frameCenter };
         const int span = kDetN + effMaxLag;
-        const int64_t s0 = writePos - span;
+        const int64_t s0 = anchor - span;
         for (int i = 0; i < span; ++i)
             tmp[(size_t) i] = inBuf[(size_t) ((s0 + i) & kMask)];
 
@@ -1247,7 +1382,7 @@ private:
         float dlRho = -1.0f;
         auto dlPush = [&] (int why)
         {
-            detectLog.push_back ({ (double) writePos / fs, energy, lastVoicedEnergy,
+            detectLog.push_back ({ (double) anchor / fs, energy, lastVoicedEnergy,
                                    zcr, dlRho, bestVal, pick, lag,
                                    unvoicedRun, holdCount, preHold, curP, dlF0Before,
                                    voiced && curP > 0.0f ? (float) (fs / curP) : 0.0f,
@@ -1438,7 +1573,9 @@ private:
     // bands sitting at the background level, so room/mic hiss is not
     // adopted as "air" (an assist on the keep amount only — nothing is
     // ever subtracted from the signal itself).
-    void updateAirBands()
+    // Same contract as detectPitch: the window ends at `anchor`, which is a
+    // grid point under the deterministic cadence and the write head otherwise.
+    void updateAirBands (int64_t anchor)
     {
         airCombT = 0.0f;               // re-armed below on suitable frames
         const float dRel = std::abs (curP - airPrevP) / std::max (curP, 1.0f);
@@ -1451,7 +1588,7 @@ private:
         const int   sr2  = std::max (1, (int) (0.04f * P));   // search @2P
         const int   warm = 256;                    // one-pole transient settle
         const int   span = N + 2 * lag + sr2 + warm;
-        if (writePos < (int64_t) (span + 2 * lag + 4)) return;
+        if (anchor < (int64_t) (span + 2 * lag + 4)) return;
 
         // rebuild the comb residual over the span (same predictor as the
         // audio path, with the frame-constant period) and band-split it
@@ -1459,7 +1596,7 @@ private:
         // warm-up region, well before the frame)
         AirBands bs = airSplit;
         bs.reset();
-        const int64_t s0 = writePos - span;
+        const int64_t s0 = anchor - span;
         for (int i = 0; i < span; ++i)
         {
             const int64_t pos = s0 + i;
@@ -1864,7 +2001,7 @@ private:
             if (wB > 0.02f)
             {
                 cB = alignToPeak (c + (beta >= 0.0 ? (double) P : -(double) P), P);
-                if (cB + (double) ((Hout + 1) * f) + 2.0 >= (double) writePos)
+                if (cB + (double) ((Hout + 1) * f) + 2.0 >= (double) readBound)
                     wB = 0.0f;                   // future pulse not here yet
             }
             else
@@ -1880,7 +2017,7 @@ private:
             const double  ip = c + jf;
             const int64_t i0 = (int64_t) std::floor (ip);
             float s = 0.0f;
-            if (i0 >= 0 && i0 + 1 < writePos)
+            if (i0 >= 0 && i0 + 1 < readBound)
             {
                 const float frac = (float) (ip - (double) i0);
                 s = harmBuf[(size_t) (i0 & kMask)] * (1.0f - frac)
@@ -1891,7 +2028,7 @@ private:
                 const double  ip2 = cB + jf;
                 const int64_t i2  = (int64_t) std::floor (ip2);
                 float s2 = 0.0f;
-                if (i2 >= 0 && i2 + 1 < writePos)
+                if (i2 >= 0 && i2 + 1 < readBound)
                 {
                     const float fr2 = (float) (ip2 - (double) i2);
                     s2 = harmBuf[(size_t) (i2 & kMask)] * (1.0f - fr2)
@@ -1902,7 +2039,7 @@ private:
                     const double  ip3 = cC + jf;
                     const int64_t i3  = (int64_t) std::floor (ip3);
                     float s3 = 0.0f;
-                    if (i3 >= 0 && i3 + 1 < writePos)
+                    if (i3 >= 0 && i3 + 1 < readBound)
                     {
                         const float fr3 = (float) (ip3 - (double) i3);
                         s3 = harmBuf[(size_t) (i3 & kMask)] * (1.0f - fr3)
@@ -2327,7 +2464,7 @@ private:
         double best = -1.0; int64_t bestI = c0;
         for (int64_t i = c0 - r; i <= c0 + r; ++i)
         {
-            if (i < 2 || i + 2 >= writePos) continue;
+            if (i < 2 || i + 2 >= readBound) continue;
             double e = 0.0;
             for (int64_t k = i - 2; k <= i + 2; ++k)
             {
@@ -2360,7 +2497,7 @@ private:
         for (int j = 0; j <= 2 * r; ++j)
         {
             const int64_t i = lo + j;
-            if (i < 3 || i + 3 >= writePos) continue;
+            if (i < 3 || i + 3 >= readBound) continue;
             double e = 0.0;
             for (int64_t k = i - 2; k <= i + 2; ++k)
             {
@@ -2471,6 +2608,18 @@ private:
     float   curP = 320.0f;
     bool    voiced = false;
     int     sinceDetect = 0;
+    // Deterministic Analysis Cadence. `sinceDetect` stays maintained while
+    // this is on so that switching back mid-stream resumes the legacy
+    // schedule without a double or a missing frame.
+    bool    detCadence = false, detCadenceSeen = false;
+    int64_t nextDetectPos = 0;
+    // How far the input may be read while grains are being laid down. Legacy
+    // is the write head, which is exactly where the host's chunk happened to
+    // stop; the deterministic cadence uses the last grid point instead, so a
+    // grain that is refused a not-yet-arrived sample is refused it at every
+    // buffer size rather than only at some. Always <= writePos, so it can
+    // never reach for data that is not there.
+    int64_t readBound = 0;
     uint32_t rng = 0x1234567u;
 
     float pitchRatio = 1.0f, formantRatio = 1.0f, consonantRatio = 1.0f;

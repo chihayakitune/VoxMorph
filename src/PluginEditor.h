@@ -5368,6 +5368,30 @@ public:
                    "0.5あたりから試してください。0=オフ(語尾には何もしません)。"));
         addAndMakeVisible (*relRow);
 
+        cadenceRow = std::make_unique<ParamRow> (proc, "detcadence", ParamRow::Kind::toggle,
+            "Analysis Cadence",
+            vmTip ("EXPERIMENTAL. Where the engine's pitch analysis lands. It runs every 512 "
+                   "samples, but the counter that schedules it is reset by each block your "
+                   "audio device hands over, so the analysis actually sits on a different "
+                   "position for every buffer size, and a buffer that is not a multiple of 512 "
+                   "loses the remainder as well. That is why the same take can come out slightly "
+                   "different at 64 samples than at 512. On = the schedule is counted from the "
+                   "start of the stream instead, so the analysis lands on the same samples "
+                   "whatever your buffer is. Measured: with Onset Repair off the output becomes "
+                   "identical at every buffer size, and the Release Repair effect stops varying "
+                   "by up to 1.7 dB. No extra latency and no extra CPU. Off = exactly the "
+                   "behaviour of the previous version, to the sample.",
+                   "エンジンのピッチ解析がどの位置で行われるかの設定です。解析は512サンプル毎ですが、"
+                   "そのスケジュールを刻むカウンターがオーディオデバイスのブロック毎にリセット"
+                   "されるため、実際の解析位置はバッファサイズごとにずれます。512の倍数でない"
+                   "バッファでは余りも捨てられます。同じ録音でもバッファ64と512で結果が"
+                   "わずかに変わるのはこのためです。オン=スケジュールをストリーム先頭からの"
+                   "絶対位置で数えるので、バッファサイズによらず解析が同じサンプル位置に"
+                   "落ちます。実測では、Onset Repairをオフにすると全バッファサイズで出力が"
+                   "完全に一致し、Release Repairの効果が最大1.7dBばらついていたのが止まります。"
+                   "レイテンシーもCPUも増えません。オフ=前バージョンと1サンプルも違わない動作。"));
+        addAndMakeVisible (*cadenceRow);
+
         // Legacy Low Latency (moved here in v0.31.0, parameter id "lowlat"
         // unchanged). This is the OLD approach to latency: it shortens the
         // engine's lookahead and narrows its analysis, so it costs quality.
@@ -5402,7 +5426,7 @@ public:
         };
         addAndMakeVisible (closeBtn);
 
-        setSize (600, 382);
+        setSize (600, 414);   // + one 28 px row and its 4 px gap (Analysis Cadence)
         sendLookAndFeelChange();
     }
 
@@ -5424,6 +5448,8 @@ public:
         r.removeFromTop (4);
         relRow->setBounds (r.removeFromTop (30));
         r.removeFromTop (4);
+        cadenceRow->setBounds (r.removeFromTop (28));
+        r.removeFromTop (4);
         lowLatRow->setBounds (r.removeFromTop (28));
         closeBtn.setBounds (r.removeFromBottom (30).removeFromRight (100).reduced (0, 2));
     }
@@ -5435,7 +5461,8 @@ private:
     juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
     juce::TooltipWindow  tips { this, 400 };
     juce::Label heading, note;
-    std::unique_ptr<ParamRow> gciRow, breathRow, holdLongRow, relOnRow, relRow, lowLatRow;
+    std::unique_ptr<ParamRow> gciRow, breathRow, holdLongRow, relOnRow, relRow,
+                              cadenceRow, lowLatRow;
     juce::TextButton closeBtn { "Close" };
 };
 

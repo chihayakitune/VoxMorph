@@ -177,6 +177,27 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::ParameterID { "relrepair", 1 }, "Release Repair", false));
     layout.add (std::make_unique<P> (juce::ParameterID { "relshelf", 1 }, "Release Strength",
                 juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.5f));
+    // Analysis Cadence (v0.62.0, BETA, default off = the shipped sound).
+    //
+    // Deliberately NOT folded into Release Repair, even though that is what
+    // exposed it. The legacy scheduler counts samples and resets the counter,
+    // so the analysis frame lands on a different absolute sample for every
+    // host buffer size -- 1760 for a buffer of 32, 1792 for 64 and 256, 2048
+    // for 512 -- and every decision downstream inherits the offset. This puts
+    // the schedule on an absolute grid instead. It moves the analysis for
+    // EVERY voice, not just the ones using the repair, so it has to be
+    // switchable and measurable on its own.
+    //
+    // Measured (synthetic speech, buffers 1..1024 plus variable, 44.1/48/
+    // 88.2/96 kHz): the detection log becomes identical across every buffer,
+    // the Release Repair effect goes from 1.19-1.66 dB of spread to 0.00, and
+    // with Onset Repair off the OUTPUT is bit-identical at every buffer size.
+    // Cost and latency are unchanged. What it does not fix is Onset Repair's
+    // rewind, which reaches back to the start of the chunk it fires in --
+    // that IS a host chunk by definition, since output already handed over
+    // cannot be recalled.
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "detcadence", 1 }, "Analysis Cadence (Beta)", false));
     // Onset Repair (id "onsetbackfill", kept for compatibility). v0.59.0:
     // ON by default, adopted by the user after AB9. The root fix rather than
     // a mask: when the first voiced lock of a phrase
@@ -343,6 +364,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pOnsetBackfill = apvts.getRawParameterValue ("onsetbackfill");
     pRelShelf      = apvts.getRawParameterValue ("relshelf");
     pRelRepair     = apvts.getRawParameterValue ("relrepair");
+    pDetCadence    = apvts.getRawParameterValue ("detcadence");
     pFloor     = apvts.getRawParameterValue ("pitchfloor");
     pAutoMute  = apvts.getRawParameterValue ("automute");
     pLowLat    = apvts.getRawParameterValue ("lowlat");
@@ -676,6 +698,9 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     // moves the onset cut off the endings, which is audible, so OFF has to
     // disable that too. Verified bit-identical to v0.59.2 in ui_shot.
     p.releaseRepair    = pRelRepair->load() > 0.5f;
+    // Independent of everything above: it moves the analysis grid itself, so
+    // it is read straight from its own switch and never folded into another.
+    p.deterministicCadence = pDetCadence->load() > 0.5f;
     p.releaseShelf     = pRelShelf->load();
     // Geometric mean of the input and converted pitch. Swept 80/110/160/220 Hz
     // against -5/0/+3/+9/+12: no corner rule passes every bar, because the two

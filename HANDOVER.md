@@ -1,6 +1,6 @@
 # VoxMorph 開発引き継ぎ書 (AIセッション用)
 
-最終更新: v0.61.1 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+最終更新: v0.62.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
 
 ## ⚠ いま保留中のこと(2026-08-23 時点)
 
@@ -11,7 +11,8 @@
 - **v0.60.1 の Release Repair(BETA、既定OFF)+ Release Strength(既定0.50)** — 語尾側。**OFFで v0.59.2 と全ファイルbitexact**を確認済み。A/Bは `~/Downloads/VoxMorph_RELEASE_AB/`(v0.60.0版、R0〜R4)。**T0〜T3の作り直しは未実施**
 - **v0.60.2 で実施**: Pitch/話者F0の一般化、カットオフ方式の比較、T0〜T3。試聴用は `~/Downloads/VoxMorph_RELEASE_T/`
 - **②(Release専用キュー)は完了。**追加監査もv0.61.1で通過(late/dropped/overflow すべて0、キュー済みcutoffをイベント位置で適用、残差はOFF側のエンジン差と検出グリッド差に分解済み)
-- **次にやること = ①「Deterministic Analysis Cadence」を独立BETA機能として実装**。仕様はユーザー指示のとおり(下記v0.61.1の「次セッションはここから」)
+- **①(Deterministic Analysis Cadence)も v0.62.0 で完了**。BETA・既定OFF・OFFで v0.61.1 と bitexact。**Release effect のバッファ幅は 1.19〜1.66dB → 0.00dB**、**Onset Repair OFF なら全バッファでビット単位一致**。CPU・レイテンシとも不変。ただし**語頭指標はオンセット中央値で +0.00〜+0.30dB(7テイク中7つが非負)** — 判断はユーザー(下記v0.62.0)
+- **次にやること = ユーザーの試聴判断**。①のON/OFFと、①ONを前提にしたRelease Repairの正式判断
 - **まだ未実施**: 状態機械の誤分類テスト(ビブラート・トレモロ・振幅回復・低周波ノイズ・1フレーム vs 2フレーム確認)、ライブ切替(OFF↔ON、0.40↔0.50、有声中・語尾処理中)
 
 **ユーザー採用済み(製品既定)**
@@ -82,11 +83,12 @@
 - `dsp/SpatialEngine.h` — **ASMR空間演出エンジン(v0.45.0、依存ゼロ単一ヘッダ)**。変換エンジンより**後段**、出力の最終段にあるのでピッチ・フォルマント・声質には一切触れない。段構成: ①位置(パッドx/y+オートオービット回転) ②定パワーパン+距離減衰(**v0.44のインライン実装をそのまま移設**) ③ITD(Woodworth、遠い耳へ最大0.66ms遅延、Catmull-Rom補間) ④ヘッドシャドウ(遠い耳を2.2kHz一次LPでブレンド) ⑤ダリング=空気吸収(3.8kHz、距離連動)+背後キュー(2.2kHz、bin時のみ) ⑥ルーム(初期反射4タップ+コム4/オールパス2、サイズ・ダンピング付き) ⑦ステレオ幅(M/S)。**各段は自分のパラメータが中立値の間まるごとスキップ**するので、**全新規パラメータ既定値では出力がv0.44とビット単位で同一**(`test/spatial_test.cpp` が旧インライン実装のコピーと memcmp で検証)。prepare以外でallocationなし
 - `src/PluginEditor.h` 内 AsmrPanel/SonarPad — **ASMRタブ(v0.13.0、v0.45.0で全面改修)**: パッドはasmrx/asmry(-1..1)を駆動(上=正面/左右=耳元/中心から離れるほど遠い、ダブルクリックで中央=効果なし)。v0.45.0でMAINタブと同じ作りに統一 — 描画は**ANOKOEパレットのみ**(皿=0xfffafcfd→0xffeceff3 グラデ【v0.45.0時点ではVISUALIZERのドーナツと共通の値。ドーナツ自体はv0.46.0で撤去したので、いまこの色を使っているのはここだけ】、ソース=seriesOutピンク、リスナー=seriesInミント。旧実装の 0xffeef7f4 独自ミント円は撤去)、コントロールは**ak::Card + ParamRow**でMAINと同一の行(数値欄・↺・🔒つき、トーン別LookAndFeel)。追加表示: 距離リングの実dB値、頭アイコン(耳・鼻で正面が分かる)、耳ゲイン弧、bin時の背後シェーディング、オービット時の軌道円と実位置追従。**SCENE**ボタン6種(Off/Close Left/Close Right/Behind/Across/Orbit)は10パラメータを**1 Undoステップ**で一括適用し、ロック項目は尊重する
 - `test/formant_probe.cpp` — **エンジンのF1〜F3追跡を既知フォルマントの合成母音で測る(v0.47.1)**。口唇放射を必ず入れること、そして「信号にそもそも山が3つあるか」の自己チェックを必ず見ること(どちらも省くと、テスト信号の欠陥をエンジンの誤差として報告してしまう)
+- `test/cadence_probe.cpp` — **Deterministic Analysis Cadence の測定ハーネス(v0.62.0)**。①検出グリッドの一致、①b 出力のビット一致、②Release effect のバッファ幅、③C0/C1/C2/C3 の語頭ペア比較、④CPU/レイテンシ/キュー健全性/ライブ切替。引数なしで合成音声、`<voice.wav>` を渡すと実録(録音はリポジトリに入れない)。**窓は必ず先読みDぶんずらすこと** — 出力は入力よりDサンプル遅れるので、入力由来の窓をそのまま出力に当てると語頭窓の中身がほぼ無音になる(一度これで「効果0.00dB」を出した)
 - `test/offline_test.cpp` + `analyze.py` — 合成母音での数値検証(Linux g++でコンパイル可、JUCE不要)。**エンジン変更時は必ず実行**: f0/フォルマント独立性、抑揚、子音シフト、フライ声、VoiceAnalyzer、回帰一式
 
 ## 主要パラメータ(内部ID)
 
-pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, resonance(Formant Definition, -100〜+100%・既定0), vadapt/vamount/vcharacter(AEIOU Character, 既定オフ/60%/Natural)+Custom15値(va_{a,i,u,e,o}_f{1,2,3}), range(抑揚)/center, breath2(Beta), air(Natural Air, 0〜1.5・標準経路常時使用), airshine(Air Shine, >6kHz抜け感0〜6dB), 【deprecated no-op: airband/air2/air2low=旧セッション互換のため登録のみ】, gci(GCI同期), hifreq/hipitch/hiformant(High Rangeガード), tilt, jitter, robot/robotHz, lowvoice, lowlat(Legacy Low Latency、BETAウィンドウ), perfmode(Performance Mode), pitchfloor, **pulsesmooth(Pulse Smoothing・既定ON、+3.9st超の上方シフトでのみ動作)**, automute, gate(ノイズゲート), asmrx/asmry(ASMR位置), asmrbin(Binaural Cues・既定オフ)/asmrdist(距離量%・既定100)/asmrair(空気吸収%・既定0)/asmrroom(ルーム%・既定0)/asmrsize(ルームサイズ%・既定50)/asmrwidth(ステレオ幅%・既定100)/asmrorbit(オービットHz・既定0)/asmrdepth(オービット半径%・既定60) 【v0.45.0。**全て既定値=その段がスキップされる値**】, mix, gain
+pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, resonance(Formant Definition, -100〜+100%・既定0), vadapt/vamount/vcharacter(AEIOU Character, 既定オフ/60%/Natural)+Custom15値(va_{a,i,u,e,o}_f{1,2,3}), range(抑揚)/center, breath2(Beta), air(Natural Air, 0〜1.5・標準経路常時使用), airshine(Air Shine, >6kHz抜け感0〜6dB), 【deprecated no-op: airband/air2/air2low=旧セッション互換のため登録のみ】, gci(GCI同期), hifreq/hipitch/hiformant(High Rangeガード), tilt, jitter, robot/robotHz, lowvoice, lowlat(Legacy Low Latency、BETAウィンドウ), perfmode(Performance Mode), pitchfloor, **pulsesmooth(Pulse Smoothing・既定ON、+3.9st超の上方シフトでのみ動作)**, detcadence(Analysis Cadence・BETA・既定OFF), automute, gate(ノイズゲート), asmrx/asmry(ASMR位置), asmrbin(Binaural Cues・既定オフ)/asmrdist(距離量%・既定100)/asmrair(空気吸収%・既定0)/asmrroom(ルーム%・既定0)/asmrsize(ルームサイズ%・既定50)/asmrwidth(ステレオ幅%・既定100)/asmrorbit(オービットHz・既定0)/asmrdepth(オービット半径%・既定60) 【v0.45.0。**全て既定値=その段がスキップされる値**】, mix, gain
 
 ## 重要な設計判断・経緯
 
@@ -106,6 +108,46 @@ pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, resonan
 - **v0.22.0: Natural Air v2 スペクトルクリーンアップ(Phase 2先行)**。ユーザー実録(KITUNE、44.1kHz、+12st)で切り分け: middleレンジはair分離段階のF0周期漏れ(air完全オフ比+4.8dB)、**lowレンジのゴースト(-21.9dB)はair完全オフでも同値=グレイン再合成経路由来(+12stではグレイン幅が入力1周期を超え、奇数次入力倍音が出力倍音の中間に残る)で本件では未解決・別課題**。対策(ユーザー指示の方式2を採用): noiseBufは出力までDサンプル遅延の余裕があるため、1024点FFT/hop512/周期Hann OLA(ユニティ再構成)を**追加レイテンシゼロ**で挿入し(processAirFx)、有声時に入力F0整数倍近傍(6kHz以下のみ、幅±max(1, 2%C)を間隔の35%でキャップ)のビンを倍音間フロア(隣接中点magの小さい方×1.4)へクランプ。>6kHzは不変=**Air Shine完全維持**。f0<~130Hz(倍音間隔<3bin)はクランプ無効(低域はlowCons/クレストガードが担当)。Low Latencyモード(D<窓長)は従来どおり生バイパス+airFxHopは追従のみ。方式1(定常母音でBand0-2に上限)はairband=4000代理で比較→ゴースト低減は同等(-48.0 vs -47.8)だが中低域エアを構造的に失うため**不採用**。実測(KITUNE_middle入力をエンジン通し、+12st): air経路ghost -43.2→**-47.8dB**(air0=-48.0と一致)、6-16k・Shine特性・レベル不変。offline_testに+12st持続母音ゴースト回帰(ghostDb、fftForViz流用)追加。CPUオフライン代理: v2計1.90%(legacy 0.94%、クリーンアップ分+0.12%)。※ユーザー音声ファイルはローカル解析のみ、リポジトリ非収載
 - **v0.21.0: 低音ゴースト修正 + Air Shine**。ユーザー実声評価(v0.20.0): ウィスパー良好・ビブラート/グライドの中域ゴースト大幅改善、ただし**低い「あー」持続で旧ピッチゴースト**、高域の抜けはさらに強化したい。①原因=period doubling/交互周期/軽いフライの倍音漏れは**2Pで相関しPでは弱い**ため非周期と誤認(offline再現: サブハーモニック-15%でb1のkeepが0.99まで上昇)。対策: 漏れ判定の候補ラグを{P, 2P, P/2}に拡張(各±2%、ストライド2+±1精密化、分母エネルギーはprefix和でO(1))。②さらに**クレストファクタガード**: ランダム周期ジッタのパルス残差は「どのラグでも無相関=技術的には非周期」だが旧ピッチに聴こえる。息ノイズ(ガウス的、crest~3.5)に対しパルス残差はcrest≫6で明確分離→crest4.5-7でkeepをフェードアウト(90Hz定常のrel diff 0.042→0.006)。③低F0(<130Hz)ではb0/b1のkeep上昇レートを減速(lowCons)。検証: サブハーモニックb1 keep 0.99→0.14、全既存回帰PASS維持。**Air Shine(airshineパラメータ、0〜6dB、既定0)**: v2専用、最上段バンド(>6kHz)の**noiseBuf再加算ゲインのみ**を持ち上げる(harmBuf側の減算・中低域は不変)。breathy実測: +6dBで6-16k帯域比0.0176→0.0291、1-4k・RMSはほぼ不変。CPUオフライン代理計測: legacy 0.97%→v2 1.78%(+0.8%/コア)
 
+- **v0.62.0: ①Deterministic Analysis Cadence を独立BETA機能として実装(既定OFF)**。**OFF は v0.61.1 と bitexact**(bitexact.cpp の12構成すべて)。パラメータID `detcadence`、表示名 **Analysis Cadence (Beta)**、BETAウィンドウ。新テスト = `test/cadence_probe.cpp`。
+  - **方式(v0.60.3で取り下げた案とは別物)**。v0.60.3 は「検出周期を絶対位置化 + 検出境界でチャンク分割」だった。**分割はしない**。`detectPitch(anchor)` / `updateAirBands(anchor)` に**解析フレーム終端の絶対位置**を渡す形に変え、チャンク末尾で「そのチャンクが利用可能にしたグリッド点」を順に回す:
+    ```
+    while (nextDetectPos <= writePos) { dezipperStep(512); detectPitch(nextDetectPos); ...; nextDetectPos += 512; }
+    ```
+    初回 `nextDetectPos = kDetN + maxLag`(**2048に固定しない**。88.2/96kHzでは 2494/2624 で、2048では届いていないデータを読む)。フレームは `[g-kDetN-effMaxLag, g-effMaxLag)` で全部 writePos より後ろなので、先読みにならない。**バッファ480なら2チャンクに1回ループが2周するだけで、余りは捨てない**
+  - **分割方式をやめた理由**: 一度は「チャンクをグリッドで切る」実装で測って、Release幅0.22dBまで行った。ただし**検出が起きるサブチャンクが極端に短くなる**(バッファ256で32サンプル)。`backfillPending` の巻き戻しは `from = start` なので、**Onset Repair の遡り量がサブチャンク長まで縮む**。語頭を犠牲にして語尾を揃える取引になるので捨てた
+  - **グリッドに載せたのは検出だけではない。3つある**:
+    1. **検出位置**(上記)
+    2. **grain配置の地平線**: `markHorizon = nextDetectPos`(従来は `writePos`)。マークが「あるバッファでは地平線の内側、別のバッファでは外側」に落ちると、**同じマークが検出をまたいだ別の状態で置かれる**。検出位置を揃えただけでは**バッファ512が32/64/128/256から1dB離れたまま**だった。**初回検出前は writePos のまま**(まだ載せるグリッドがなく、デジッパー半収束の値でウォームアップ全部を置いてしまうため)
+    3. **デジッパー**(`prSm/frSm/crSm`): 従来はホストチャンク毎に1ステップなので、32を16回と512を1回で着地点が違う。これ単体なら不可聴だが、**grain半幅が `baseHalf / f` の整数切り捨て**なので、比の最下位ビット差が幅を1サンプル動かし、**永久に消えない**。実測でも**マークは完全一致で hout だけが違っていた**。ONのときは検出ループの中で512サンプル分を1ステップ
+    - ついでに `placeGrain` 内の「まだ届いていない入力か」ガード5箇所を `writePos` → `readBound`(= 直前のグリッド点、常に `writePos` 以下)に変更。発火は稀だが同種の依存
+  - **結果(合成音声8秒、バッファ 1/31/32/63/64/127/128/255/256/480/511/512/513/1024 + 可変3列、44.1/48/88.2/96kHz)**:
+    | 判定基準 | legacy | 本機能ON |
+    |---|---|---|
+    | ①検出ログの一致(対512) | 421〜898行が不一致 | **全条件0** |
+    | ②Release effect のバッファ幅(inF0) | 1.19 / 1.66 / 0.19 / 0.05 dB | **全レートで 0.00 dB** |
+    | 出力のビット一致(Onset Repair OFF) | 21万〜45万サンプル差 | **全バッファ・全レートで0** |
+    | CPU(air込み最重経路) | 1.2% | 1.2%(不変) |
+    | レイテンシ | 2048 | 2048(不変) |
+    - Release専用キュー: 全バッファで late/dropped/overflow **0**
+    - **ライブ切替**(17ブロック毎にON/OFFトグル、有声中も無音中も): 非有限サンプル0、ピーク0.780。`seatDetectGrid()` が writePos 以降の最初のグリッド点に座り直すので、途中ONでも過去フレームの再生はしない
+  - **③語頭指標は「ほぼ引き分け、わずかに悪い側」**。実録7テイク(110〜227秒、83〜342オンセット)で、**オンセットごとのペア比較**(C1−C0):
+    | テイク | 中央値 | 平均 | 悪化したオンセット |
+    |---|---|---|---|
+    | KITUNE_NemannTest | +0.30 | +0.60 | 113/191 |
+    | うる | +0.22 | +0.86 | 119/209 |
+    | まき | +0.20 | +0.58 | 190/342 |
+    | ゆに | +0.17 | +0.95 | 174/330 |
+    | くら | +0.15 | +0.77 | 115/214 |
+    | そし | +0.11 | +0.90 | 52/99 |
+    | ふに | +0.00 | +0.24 | 42/83 |
+    **オンセット単位の振れ幅は±7dB前後**で、その中の中央値+0.2dB・悪化率55%。ただし**7テイクすべてで符号が非負**なので、小さいが系統的
+    - **原因は特定済み = 地平線の量子化**。地平線を `writePos` に戻した変種で測ると中央値は +0.09/+0.07/-0.03 まで下がるが、**②が1.89dBに戻り、ビット一致も全部壊れる**。つまり**バッファ非依存と語頭の直接のトレードオフ**で、回避策はない(地平線は `writePos` 以上でなければ出力のgrainが足りず、グリッド上でそれを満たす最小値が `nextDetectPos`)
+    - **語頭指標は今回定義し直したもので、引き継ぎ書の「39箇所 worst 13.2 / p95 -6.2」とは別物**。あちらの生成物は残っていない。今回は入力から検出したオンセット(80ms以上の無音の後)の先頭60msの「変換後f0の下」の帯域を、**走っているフレーズの全帯域**に対して測る。0dB=漏れが声全体と同じ大きさ。**C0とC1を同一の窓で採り、ソート済み分布どうしではなくオンセット単位で引く**(別々にソートしたp95どうしを比べると、200オンセットあるだけで1dB動いてしまう)
+  - **ユーザー判断待ち**: ①をONで出すかどうか。**語尾(Release Repair)の正式判断は①ONを前提に**(v0.61.1の試聴は方向性確認までという条件が、①で解消される)
+  - **①の限界(仕様として残るもの)**: **Onset Repair をONにするとバッファ依存が戻る**(実測 1万〜1.3万サンプル、最大0.44)。`backfillPending` の巻き戻しは `from = start`、つまり**ホストに渡していない出力の先頭まで**しか遡れず、その長さは定義上ホストバッファ長。渡した出力は取り消せないので、これはカデンスではなく**Onset Repair 自身の性質**。直すならサブチャンク跨ぎの再出力(出力段のフィルタ状態の保存/復元が必要)で、別案件
+
+- **まだやっていない(①の後に回していたもの)**: 状態機械の誤分類テスト(ビブラート・トレモロ・振幅回復・低周波ノイズ・1フレーム vs 2フレーム確認)、Safe Strength、新T0〜T3、ライブ切替の平滑化(無害なことは確認済みだが平滑化そのものは未実装)
+
 - **v0.61.1: ②の追加監査を通過。残差の内訳を確定**。**Repair OFF は v0.59.2 と bitexact、語頭39箇所も完全一致**。
   - **②キューのcutoffを実際に適用するようにした**(指摘2)。`RelEvent` の `cutHz` は保存されているだけで、適用時に更新していたのは `relTarget` だけだった。**ONイベントの適用位置で `relCutHz` と `relShelfK` を同時に切り替える**よう修正。検出側は `relCutWanted`(候補)だけを更新し、**RELEASE中に後続の検出がライブのカットオフを書き換えないように**した
     - ただし**同一グリッド(64/128/256)の残差はこれでは動かなかった**: 0.53/1.06/0.31 → **0.51/1.10/0.31 dB**。つまりキューのcutoff処理は残差の原因ではなかった
@@ -122,17 +164,6 @@ pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, resonan
     - **グリッドが同じ場合(64/128/256): 0.5〜1.1 dB** ← Repair OFF でも存在するエンジン本体のバッファ差
     - **Releaseキュー自体: 問題なし**
   - **検証**: Repair OFF は v0.59.2 と bitexact、語頭39箇所 完全一致(worst 13.2 / p95 -6.2 / 超過50ms)、offline_test・UIハーネス ALL PASS
-
-- **【次セッションはここから】①Deterministic Analysis Cadence(未着手)**
-  - **独立したBETA機能として実装する**。既定OFF、**OFFで v0.61.1 と bitexact**、Release Repair とは別パラメータ、既存セッション/プリセットを変更しない
-  - 新スケジューラは**絶対位置の `nextDetectPos`**。初回 `nextDetectPos = kDetN + maxLag`、以後 `+= 512`。ホストチャンクが跨ぐときだけ内部分割し、**余りを捨てない**。**512の現在動作に合わせて初回を2048に固定してはいけない**(解析に必要なデータが揃う最初の絶対位置を基準にする)
-  - **必須条件(まずこの3つ)**: ①全バッファで**検出ログが完全一致** ②Release effect の幅が **0.25dB以内(最大0.5dB)** ③**語頭指標の悪化なし**
-  - 評価バッファ: 1/31/32/63/64/127/128/255/256/480/511/512/513/1024 + 可変列(32/512/64/255)。レート: 44.1/48/88.2/96kHz
-  - 評価項目: F0系列・voiced系列・pitch mark系列・dropout数・周期同期相関・旧ピッチ残留・摩擦音周期性・語頭39箇所・Release effect・HNR/CPP相当・スペクトルフラックス・最大1階/2階差分・CPU・追加レイテンシ
-  - **出荷済みの音が変わるので内部修正として採用しない**。同一ゲインで **C0(Legacy/Repair OFF) / C1(Deterministic/Repair OFF) / C2(Legacy/Repair ON) / C3(Deterministic/Repair ON)** を作り、**C1がC0より悪化していないことを確認してからでないとC3を正式候補にしない**
-  - **参考(v0.60.3で一度試した結果)**: 素朴に `sinceDetect -= 512` + 境界分割にすると、bitexactの12構成のうち**256と512以外の10構成が変化**(サンプル値最大差0.9〜1.5)、実録44.1kHzではバッファ256でも4,443,724サンプルが変化した。**ウォームアップ閾値 `kDetN + maxLag` がレート依存**なのが効いている
-  - **保留中(①の結果が出るまで)**: ライブ切替の平滑化、状態機械の誤分類試験、Safe Strength、新T0〜T3
-  - **v0.61.1の試聴は「方向性の確認」まで**。ホストバッファ依存が残るので ON/OFF や Strength の正式判断には使わない
 
 - **v0.61.0: Release Repair専用キューを正しく再実装。バッファ依存は4.2→1.58dB。残りは検出グリッド起因と特定**。**Repair OFF は v0.59.2 と bitexact、語頭39箇所も完全一致**。
   - **適用位置の式を訂正**(ユーザー指摘)。解析フレームは `[writePos-kDetN-effMaxLag, writePos-effMaxLag)`、中心は **`frameCenter = writePos - effMaxLag - kDetN/2`**。引き継ぎ書にあった `writePos - (kDetN+effMaxLag)/2 + D` は代数的に別物だった。**Dは固定値にしない**(soft resetで変わる)ので毎回 `frameCenter + D` を計算する

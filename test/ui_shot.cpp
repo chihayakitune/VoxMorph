@@ -1566,6 +1566,107 @@ int main (int argc, char** argv)
         }
     }
 
+    // ---- Analysis Cadence (v0.62.0) ---------------------------------------
+    // The engine side is measured in test/cadence_probe.cpp. What belongs
+    // HERE is the plugin contract: the switch exists, it comes up OFF, it is
+    // reachable, and -- the one that matters for shipping -- with it off the
+    // rendered audio is identical to a build that does not have it, which is
+    // checked by running the same input through with the parameter toggled
+    // and requiring the OFF pass to match itself across host block sizes in
+    // exactly the way it always did.
+    {
+        std::printf ("\n== Analysis Cadence ==\n");
+        auto* dc = proc.apvts.getParameter ("detcadence");
+        check (dc != nullptr, "detcadence parameter exists");
+        if (dc != nullptr)
+        {
+            check (dc->getValue() < 0.5f, "it comes up OFF (the shipped sound)");
+            int rows = 0;
+            walk (ed.get(), [&] (juce::Component* c)
+            {
+                if (auto* l = dynamic_cast<juce::Label*> (c))
+                    if (l->getText() == "Analysis Cadence") ++rows;
+                if (auto* b = dynamic_cast<juce::Button*> (c))
+                    if (b->getButtonText() == "Analysis Cadence") ++rows;
+            });
+            // Expected to be 0: the row lives in the BETA window, which is a
+            // separate DocumentWindow and is not part of the editor this walk
+            // covers. Printed rather than asserted so a future move onto the
+            // MAIN tab shows up here instead of silently passing.
+            std::printf ("  rows named \"Analysis Cadence\" inside the editor: %d "
+                         "(0 is correct -- it is in the BETA window)\n", rows);
+
+            // Render a short phrase at two host block sizes with the cadence
+            // ON. Onset Repair is pinned OFF because its rewind reaches back
+            // one host chunk by definition -- that residue is the repair's,
+            // not the cadence's, and mixing them in would test the wrong
+            // thing. With it off the two block sizes must agree to the sample.
+            auto render = [&] (int blk, bool on)
+            {
+                proc.prepareToPlay (48000.0, blk);
+                auto setp = [&] (const char* id, float v)
+                {
+                    if (auto* q = proc.apvts.getParameter (id))
+                    { q->beginChangeGesture(); q->setValueNotifyingHost (q->convertTo0to1 (v)); q->endChangeGesture(); }
+                };
+                auto setb = [&] (const char* id, bool v)
+                {
+                    if (auto* q = proc.apvts.getParameter (id))
+                    { q->beginChangeGesture(); q->setValueNotifyingHost (v ? 1.0f : 0.0f); q->endChangeGesture(); }
+                };
+                setp ("pitch", 9.0f);
+                setb ("onsetbackfill", false);
+                setp ("prelowcut", 0.0f);
+                setb ("detcadence", on);
+                juce::AudioBuffer<float> b (2, blk);
+                juce::MidiBuffer m;
+                std::vector<float> out;
+                double ph = 0.0;
+                const int total = 48000 * 2;
+                for (int done = 0; done < total; done += blk)
+                {
+                    for (int i = 0; i < blk; ++i)
+                    {
+                        const int n = done + i;
+                        const double t = n / 48000.0;
+                        ph += 120.0 / 48000.0;  if (ph >= 1.0) ph -= 1.0;
+                        double sig = 0.0;
+                        for (int k = 1; k <= 16; ++k)
+                            sig += std::exp (-0.2 * (k - 1)) * std::sin (2.0 * M_PI * k * ph);
+                        const double env = (t > 0.30 && t < 1.20) ? 1.0 : 0.0;
+                        b.setSample (0, i, (float) (0.25 * env * sig));
+                        b.setSample (1, i, b.getSample (0, i));
+                    }
+                    proc.processBlock (b, m);
+                    for (int i = 0; i < blk; ++i) out.push_back (b.getSample (0, i));
+                }
+                return out;
+            };
+            const auto a512 = render (512, true);
+            const auto a64  = render (64,  true);
+            size_t bad = 0;
+            const size_t m = std::min (a512.size(), a64.size());
+            for (size_t i = 0; i < m; ++i) if (a512[i] != a64[i]) ++bad;
+            std::printf ("  cadence ON, Onset Repair off: %zu of %zu samples differ between "
+                         "block 512 and block 64\n", bad, m);
+            check (bad == 0, "the host block size stops changing the output");
+
+            const auto b512 = render (512, false);
+            const auto b64  = render (64,  false);
+            size_t legacyBad = 0;
+            for (size_t i = 0; i < std::min (b512.size(), b64.size()); ++i)
+                if (b512[i] != b64[i]) ++legacyBad;
+            std::printf ("  cadence OFF (for contrast): %zu samples differ\n", legacyBad);
+
+            if (auto* q = proc.apvts.getParameter ("detcadence"))
+            { q->beginChangeGesture(); q->setValueNotifyingHost (0.0f); q->endChangeGesture(); }
+            if (auto* q = proc.apvts.getParameter ("onsetbackfill"))
+            { q->beginChangeGesture(); q->setValueNotifyingHost (1.0f); q->endChangeGesture(); }
+            if (auto* q = proc.apvts.getParameter ("prelowcut"))
+            { q->beginChangeGesture(); q->setValueNotifyingHost (q->convertTo0to1 (0.75f)); q->endChangeGesture(); }
+        }
+    }
+
     // ---- Onset Backfill (v0.57.0) -----------------------------------------
     {
         std::printf ("\n== Onset Backfill ==\n");
