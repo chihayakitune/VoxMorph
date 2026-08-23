@@ -196,8 +196,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     // rewind, which reaches back to the start of the chunk it fires in --
     // that IS a host chunk by definition, since output already handed over
     // cannot be recalled.
+    //
+    // NOT automatable, and the engine will not take the change until the
+    // input has been quiet for a while (PsolaEngine::takeCadenceSwitch). It
+    // is an engine mode, not a knob to ride: swapping the grid re-times every
+    // mark that has not been placed yet, which mid-vowel is a step rather
+    // than a parameter move. A host lane that swept it would be asking for
+    // exactly the thing the deferral exists to prevent.
     layout.add (std::make_unique<juce::AudioParameterBool> (
-                juce::ParameterID { "detcadence", 1 }, "Analysis Cadence (Beta)", false));
+                juce::ParameterID { "detcadence", 1 }, "Analysis Cadence (Beta)", false,
+                juce::AudioParameterBoolAttributes().withAutomatable (false)));
     // Onset Repair (id "onsetbackfill", kept for compatibility). v0.59.0:
     // ON by default, adopted by the user after AB9. The root fix rather than
     // a mask: when the first voiced lock of a phrase

@@ -432,7 +432,7 @@ public:
         // it even when the mode is off, so switching it on mid-stream has a
         // grid to snap to.
         nextDetectPos = (int64_t) (kDetN + maxLag);
-        detCadenceSeen = detCadence;
+        detCadence  = detCadenceWanted;   // prepare/reset is a free moment
         readBound   = 0;
         tiltLp      = 0.0f;
         dispS1.fill (0.0f);  dispS2.fill (0.0f);
@@ -627,7 +627,12 @@ public:
         relCutMode     = std::clamp (q.releaseCutMode, 0, 2);
         relShelfAmt    = relRepairOn ? std::clamp (q.releaseShelf, 0.0f, 1.0f) : 0.0f;
         preCutAmt      = (q.pitchSemi > 2.0f) ? std::clamp (q.preLockLowCut, 0.0f, 1.0f) : 0.0f;
-        detCadence     = q.deterministicCadence;
+        // A request, not the live value. Swapping the analysis grid moves
+        // every grain mark that has not been placed yet, so doing it under a
+        // running voice is a discontinuity in the middle of a phrase rather
+        // than a parameter move. The engine takes it at a point where nothing
+        // is sounding -- see takeCadenceSwitch().
+        detCadenceWanted = q.deterministicCadence;
         setDisperse (std::clamp (q.pulseDisperse, 0.0f, 1.0f));
         hiFreq         = (q.hiRangeHz > 20.0f) ? std::clamp (q.hiRangeHz, 100.0f, 600.0f) : 0.0f;
         hiPAmt         = std::clamp (q.hiPitchAmt,   0.0f, 1.0f);
@@ -693,11 +698,6 @@ public:
         // Internally chop large host buffers into <=512-sample chunks so the
         // engine behaves identically at ANY buffer size: pitch-detection
         // cadence, grain scheduling and dezippering all stay uniform.
-        if (detCadence != detCadenceSeen)
-        {
-            detCadenceSeen = detCadence;
-            if (detCadence) seatDetectGrid();   // do not replay old frames
-        }
         while (n > 512)
         {
             processChunk (in, out, 512);
@@ -731,8 +731,56 @@ public:
         crSm += a * (consonantRatio - crSm);
     }
 
+    // Take a pending Analysis Cadence change, but only where it cannot be
+    // heard. Moving the grid re-times every mark that has not been placed
+    // yet; done mid-phrase that is a step in the middle of a vowel, not a
+    // parameter move. prepare() applies it outright (nothing is sounding);
+    // here it waits for the input to have been unvoiced for a while AND for
+    // the analysis frame to be genuinely quiet, so the marks being re-timed
+    // are ones nobody is listening to.
+    //
+    // The consequence is deliberate: on a signal that never goes quiet the
+    // switch simply does not take. That is the right failure -- the setting
+    // is an engine mode, not a knob to ride.
+    bool takeCadenceSwitch()
+    {
+        if (detCadenceWanted == detCadence) return false;
+        // Nothing has been rendered yet: this is the prepare() case seen one
+        // call later, because a host sets its parameters AFTER prepareToPlay.
+        // Without it the mode a session was saved with would sit pending
+        // until the speaker happened to pause.
+        const bool quiet = writePos == 0
+                        || (! voiced
+                            && unvoicedRun >= 8                       // ~85 ms
+                            && prevFrameE / (double) kDetN < 1.0e-7); // and actually silent
+        if (! quiet) return false;
+        detCadence = detCadenceWanted;
+        seatDetectGrid();          // never replay frames that have gone past
+        // Re-anchor the GRAIN scheduler on the same grid as well. Seating the
+        // analysis alone is not enough: nextMarkF and lastInMark carry the
+        // phase the previous mode left them in, that phase is buffer-shaped,
+        // and it never resynchronises -- measured, a live switch-on left the
+        // engine buffer-DEPENDENT even though every analysis frame was back on
+        // the shared grid. Anchoring on nextDetectPos (grid-derived, and >=
+        // writePos so nothing is ever placed behind what has been emitted)
+        // restores the guarantee.
+        //
+        // The jump is forward by roughly D - houtCap, i.e. a stretch of ~15 ms
+        // with no new marks. That is only acceptable because this runs
+        // exclusively in a confirmed silent stretch -- which is the same
+        // reason the switch is deferred at all.
+        nextMarkF  = (double) (nextDetectPos + D);
+        lastInMark = (double) nextDetectPos;
+        markResume = 0.0;
+        lastGci    = -1;
+        cadenceSwitches++;
+        return true;
+    }
+
     void processChunk (const float* in, float* out, int n)
     {
+        takeCadenceSwitch();
+
         if (pendingD != D)     // latency mode changed: soft reset
         {
             D = pendingD;
@@ -1122,6 +1170,14 @@ public:
     }
 
     // release-queue health: all three must be zero in normal latency
+    // Analysis Cadence: whether the switch the host asked for has been taken
+    // yet, and how many have been. A change waits for a silent stretch, so
+    // "I turned it on and nothing changed" is a real state the UI/tests have
+    // to be able to see rather than guess at.
+    bool cadencePending()  const { return detCadenceWanted != detCadence; }
+    bool cadenceActive()   const { return detCadence; }
+    int  cadenceSwitchCount() const { return cadenceSwitches; }
+
     int  releaseLateEvents() const { return relLateEvents; }
     int  releaseDropped()    const { return relDropped; }
     int  releaseOverflow()   const { return relOverflow; }
@@ -2611,7 +2667,8 @@ private:
     // Deterministic Analysis Cadence. `sinceDetect` stays maintained while
     // this is on so that switching back mid-stream resumes the legacy
     // schedule without a double or a missing frame.
-    bool    detCadence = false, detCadenceSeen = false;
+    bool    detCadence = false, detCadenceWanted = false;
+    int     cadenceSwitches = 0;   // how many pending switches were taken
     int64_t nextDetectPos = 0;
     // How far the input may be read while grains are being laid down. Legacy
     // is the write head, which is exactly where the host's chunk happened to
