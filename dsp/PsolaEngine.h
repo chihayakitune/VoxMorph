@@ -340,6 +340,15 @@ public:
         // Ending-side depth. Deliberately much shallower than the onset
         // cut -- 0.75 is an onset number and must not be reused here.
         float releaseShelf = 0.0f;     // 0..1
+
+        // Where the ending shelf's corner goes.
+        //   0  fixed 200 Hz
+        //   1  1.6x the last input f0, the same rule the onset cut uses
+        //   2  the geometric mean of the input and converted f0
+        // 200 Hz cannot be right for every speaker: at 80 Hz in and +9 st it
+        // lands ABOVE the converted f0 and eats the voice, and at 220 Hz in
+        // it lands below the pitch it is supposed to be removing.
+        int   releaseCutMode = 0;
     };
 
     void prepare (double sampleRate)
@@ -392,6 +401,7 @@ public:
         relLp.fill (0.0f);
         relGain = 0.0f;  relTarget = 0.0f;  relF0 = 0.0f;  relF0Age = 100000;
         onState = OnsetState::armed;  relArmed = true;  relActive = false;
+        relCutHz  = 200.0f;
         relShelfK = 1.0f - std::exp ((float) (-2.0 * M_PI * 200.0 / fs));
         relAtk = 1.0f - std::exp ((float) (-1.0 / (0.004 * fs)));   // ~4 ms in
         relRel = 1.0f - std::exp ((float) (-1.0 / (0.040 * fs)));   // ~40 ms out
@@ -564,7 +574,12 @@ public:
         // cutting the bottom out of an attack would be pure damage.
         backfillOn     = q.onsetBackfill;
         pitchSemiNow   = q.pitchSemi;
-        relRepairOn    = q.releaseRepair;
+        // Below about +2 st the two pitches are not separable by a low
+        // shelf -- and at 0 or downward there is nothing to separate, the
+        // untransposed sound IS the wanted sound. Bypass entirely, so the
+        // path is the old one to the sample.
+        relRepairOn    = q.releaseRepair && q.pitchSemi > 2.0f;
+        relCutMode     = std::clamp (q.releaseCutMode, 0, 2);
         relShelfAmt    = relRepairOn ? std::clamp (q.releaseShelf, 0.0f, 1.0f) : 0.0f;
         preCutAmt      = (q.pitchSemi > 2.0f) ? std::clamp (q.preLockLowCut, 0.0f, 1.0f) : 0.0f;
         setDisperse (std::clamp (q.pulseDisperse, 0.0f, 1.0f));
@@ -1245,6 +1260,20 @@ private:
         {
             const float want = std::clamp (1.6f * (float) fs / curP, 120.0f, 400.0f);
             if (std::abs (want - preFc) > 0.05f * preFc) { preFc = want; buildPreShelf (preFc); }
+        }
+        if (relShelfAmt > 0.0f && curP > 2.0f)
+        {
+            const float fin = (float) fs / curP;
+            const float rat = std::pow (2.0f, pitchSemiNow / 12.0f);
+            float want = 200.0f;
+            if (relCutMode == 1) want = 1.6f * fin;
+            else if (relCutMode == 2) want = fin * std::sqrt (rat);
+            want = std::clamp (want, 80.0f, 500.0f);
+            if (std::abs (want - relCutHz) > 0.05f * relCutHz)
+            {
+                relCutHz  = want;
+                relShelfK = 1.0f - std::exp ((float) (-2.0 * M_PI * (double) want / fs));
+            }
         }
 
         // octave guard: resist sudden DOWNWARD period jumps (subharmonics),
@@ -2611,6 +2640,8 @@ private:
     float   relTarget   = 0.0f;      // 1 while the release treatment applies
     float   relGain     = 0.0f;      // smoothed
     bool    relRepairOn = false;
+    int     relCutMode  = 0;
+    float   relCutHz    = 200.0f;
     float   relShelfAmt = 0.0f;
     std::array<float,4> relLp {};
     float   relShelfK   = 0.03f;

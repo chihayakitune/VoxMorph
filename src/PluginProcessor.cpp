@@ -677,6 +677,13 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     // disable that too. Verified bit-identical to v0.59.2 in ui_shot.
     p.releaseRepair    = pRelRepair->load() > 0.5f;
     p.releaseShelf     = pRelShelf->load();
+    // Geometric mean of the input and converted pitch. Swept 80/110/160/220 Hz
+    // against -5/0/+3/+9/+12: no corner rule passes every bar, because the two
+    // pitches are less than an octave apart and a shelf cannot put 10 dB
+    // between them, but this one is the gentlest on the converted voice --
+    // 7 of 12 conditions inside the 1.5 dB loss bar against 4 for a fixed
+    // 200 Hz, and 12 of 12 inside 0.5 dB at 600 Hz-5 kHz.
+    p.releaseCutMode   = 2;
     p.pitchFloorHz  = pLowOn->load() > 0.5f ? pFloor->load() : 0.0f;
     p.lowLatency    = pLowLat->load() > 0.5f;
     p.robotHz       = pRobotHz->load();
