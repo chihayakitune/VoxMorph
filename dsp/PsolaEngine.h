@@ -384,6 +384,33 @@ public:
         // its own (Repair OFF, cadence OFF vs ON) before it is judged in
         // combination with anything.
         bool  deterministicCadence = false;
+
+        // Release Pitch Continuation (v0.63.0, BETA -- false = unchanged).
+        //
+        // The ending shelf attacks the symptom: it filters the low end out of
+        // the tail. Measured, that both leaves the low band on top at some
+        // endings and takes 5 dB out of the voice body at others, because a
+        // filter cannot tell the speaker's own f0 from the converted voice
+        // sitting an octave above it.
+        //
+        // This treats the cause instead. What survives an ending is a short
+        // stretch of vowel that is still periodic but no longer confident
+        // enough for the detector, so it falls to the UNVOICED path -- which
+        // does not transpose. The bass in the tail is therefore the speaker's
+        // own pitch, passed through untouched. So: keep cutting grains as
+        // voiced for a few frames at the speaker's last stable period, and
+        // the tail comes out at the converted pitch like the rest of the
+        // phrase instead of being removed.
+        //
+        // Strictly bounded, because a wrong guess here would put periodicity
+        // into breath: only straight after a phrase, at most kRelContMax
+        // frames, and only while the frame is still quiet in zero-crossings,
+        // still has energy, and still correlates with the tracked period.
+        //
+        // The flag it sets is SEPARATE from `voiced`. Writing it back would
+        // send the VOICE/RELEASE state machine round the loop again and undo
+        // the ending detection this is meant to serve.
+        bool  releasePitchContinuation = false;
     };
 
     void prepare (double sampleRate)
@@ -445,6 +472,7 @@ public:
         relShelfSm  = relShelfAmt;   // no ramp-in on the first phrase after a reset
         relShelfSmK = (float) (1.0 - std::exp (-1.0 / (0.04 * fs)));
         relQN = 0;  prevFrameCenter = 0;  lastEmitted = 0;
+        relContActive = false;  relContLeft = 0;
         relLateEvents = 0;  relDropped = 0;  relOverflow = 0;
         relSuspend = false;  relCutWanted = 200.0f;
         onState = OnsetState::armed;  relArmed = true;  relActive = false;
@@ -656,6 +684,10 @@ public:
         // than a parameter move. The engine takes it at a point where nothing
         // is sounding -- see takeCadenceSwitch().
         detCadenceWanted = q.deterministicCadence;
+        // Same bypass rule as the rest of the ending work: below about +2 st
+        // the untransposed tail IS the wanted sound, so there is nothing to
+        // continue.
+        relContOn      = q.releasePitchContinuation && q.pitchSemi > 2.0f;
         setDisperse (std::clamp (q.pulseDisperse, 0.0f, 1.0f));
         hiFreq         = (q.hiRangeHz > 20.0f) ? std::clamp (q.hiRangeHz, 100.0f, 600.0f) : 0.0f;
         hiPAmt         = std::clamp (q.hiPitchAmt,   0.0f, 1.0f);
@@ -1200,6 +1232,10 @@ public:
     // yet, and how many have been. A change waits for a silent stretch, so
     // "I turned it on and nothing changed" is a real state the UI/tests have
     // to be able to see rather than guess at.
+    // Release Pitch Continuation: whether this frame's grains are being cut
+    // as voiced from the tail. Read by the offline harness only.
+    bool continuationActive() const { return relContActive; }
+
     bool cadencePending()  const { return detCadenceWanted != detCadence; }
     bool cadenceActive()   const { return detCadence; }
     int  cadenceSwitchCount() const { return cadenceSwitches; }
@@ -1268,6 +1304,11 @@ private:
     // one code path.
     void detectPitch (int64_t anchor)
     {
+        // One frame's worth of continuation at a time: cleared here, set only
+        // by the branch that decides this frame's tail is still a vowel. It
+        // then stands until the next analysis frame, which is exactly the
+        // span of grains it has to cover.
+        relContActive = false;
         const int effMaxLag = effMaxLagCur;
         // The frame this call analyses, and its centre. Every release
         // decision is booked against an OUTPUT position derived from this,
@@ -1521,6 +1562,40 @@ private:
                 dlPush (3);
                 return;
             }
+            // ---- Release Pitch Continuation (v0.63.0, BETA) ----
+            // This is the frame the phrase drops out on, or one of the few
+            // after it. If the tail is still a vowel -- quiet in crossings,
+            // not yet decayed away, and still correlating with the period we
+            // were tracking -- carry on cutting grains as voiced at that
+            // period, so the tail is transposed with the rest of the phrase
+            // instead of leaking through the unvoiced path at the speaker's
+            // own pitch.
+            //
+            // `voiced` itself is left false throughout. The state machine
+            // above has to keep seeing the ending it just detected.
+            if (relContOn)
+            {
+                if (voiced) relContLeft = kRelContMax;   // arm on the drop only
+                if (relContLeft > 0 && curP > 2.0f)
+                {
+                    // rho is the right test HERE even though it is the wrong
+                    // one for onset rescue: the question is not "is this a
+                    // consonant" but "is the period we were just tracking
+                    // still in the signal", and rho answers that with the
+                    // loudness divided back out. bestNormCorr only searches
+                    // +-15 % of curP, so a hit is already near the period.
+                    float lag = 0.0f;
+                    const float rho = bestNormCorr (span, &lag);
+                    const bool stillAVowel = rho > kRelContRho
+                                          && lag > 0.0f
+                                          && zcr < 0.12f
+                                          && energy > kRelContE * lastVoicedEnergy;
+                    if (stillAVowel) { relContActive = true; --relContLeft; }
+                    else             relContLeft = 0;    // breath, or gone: stop at once
+                }
+            }
+            else relContLeft = 0;
+
             voiced = false;
             holdCount = 0;
             lastGci = -1;
@@ -1958,7 +2033,11 @@ private:
     void placeGrain()
     {
         const float P = curP;
-        const bool  v = voiced;
+        // `relContActive` is the ending tail being carried at the last stable
+        // period (Release Pitch Continuation). It is separate from `voiced`
+        // on purpose -- see the Params comment -- and this is the only place
+        // that treats the two the same.
+        const bool  v = voiced || relContActive;
 
         // High Range guard: blend the shift amounts toward the high-range
         // fractions as the input pitch rises past hiFreq (full one octave up).
@@ -2972,6 +3051,14 @@ private:
     bool    relRepairOn = false;
     int     relCutMode  = 0;
     float   relCutHz    = 200.0f;
+    // Release Pitch Continuation. `relContActive` is the synthesis flag the
+    // grain path reads; it is deliberately NOT `voiced`.
+    bool    relContOn = false, relContActive = false;
+    int     relContLeft = 0;
+    static constexpr int   kRelContMax = 3;      // detection frames
+    static constexpr float kRelContRho = 0.55f;  // periodicity still present
+    static constexpr double kRelContE  = 0.02;   // of the last voiced frame
+
     float   relShelfAmt = 0.0f;
     // Release Strength, dezippered. The depth is read on EVERY sample inside
     // releaseStage, so moving the knob used to step the shelf mid-decay --

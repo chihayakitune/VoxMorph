@@ -180,14 +180,23 @@ struct Run
     int late = 0, dropped = 0, overflow = 0;
 };
 
+// Set from main: the master note fixes Cadence OFF and Formant +2 for the
+// Release Pitch Continuation work, while the v0.62.2 misclassification grid
+// was taken with Cadence ON and +4. Both conditions have to stay reachable,
+// so they are parameters of the run rather than constants.
+static bool  gCadence = true;
+static float gFormant = 4.0f;
+static bool  gContinuation = false;
+
 static Run runEngine (const std::vector<float>& in, double fs, bool repair,
                       float strength, int blk)
 {
     PsolaEngine::Params p;
-    p.pitchSemi = 9.0f;  p.formantSemi = 4.0f;
+    p.pitchSemi = 9.0f;  p.formantSemi = gFormant;
     p.grainAvg = true;   p.pulseBody = 0.75f;  p.onsetHold = 3;
     p.onsetBackfill = true;  p.preLockLowCut = 0.75f;
-    p.deterministicCadence = true;          // the baseline condition
+    p.releasePitchContinuation = gContinuation;
+    p.deterministicCadence = gCadence;
     p.releaseRepair = repair;  p.releaseShelf = strength;
 
     PsolaEngine e;
@@ -241,12 +250,19 @@ static constexpr int64_t kLookahead = 2048;
 int main (int argc, char** argv)
 {
     const double fs = 48000.0;
-    const bool doSweep = argc > 1 && std::string (argv[1]) == "strength";
+    bool doSweep = false;
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string a = argv[i];
+        if      (a == "strength") doSweep = true;
+        else if (a == "contin")   { gContinuation = true; gCadence = false; gFormant = 2.0f; }
+    }
     int failures = 0;
 
     // ------------------------------------------------------------ part 1
     std::printf ("=== 1. does RELEASE mean \"this phrase is ending\"? ===\n");
-    std::printf ("Analysis Cadence pinned ON. Repair ON at strength 0.50, buffer 256.\n");
+    std::printf ("Cadence %s, Formant %+.0f, Pitch Continuation %s. Repair ON 0.50, buffer 256.\n",
+                 gCadence ? "ON" : "OFF", gFormant, gContinuation ? "ON" : "OFF");
     std::printf ("The phrase starts ending at `from` and the voice is finished by `to`. An\n");
     std::printf ("entry before from-30 ms is a false positive; [from-30 ms, to+150 ms] is right.\n\n");
     std::printf ("%-24s %6s %5s %5s %6s %8s %8s %9s\n", "case", "end", "entr", "false",

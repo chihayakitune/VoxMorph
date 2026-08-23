@@ -1,6 +1,6 @@
 # VoxMorph 開発引き継ぎ書 (AIセッション用)
 
-最終更新: v0.62.3 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+最終更新: v0.63.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
 
 ## ⚠ いま保留中のこと(2026-08-23 時点)
 
@@ -124,6 +124,17 @@ pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, resonan
 - **v0.22.1: グレイン経路A/B実験フック+実験レポート**。低音+12stゴーストの系統実験(詳細=`GRAIN_AB_REPORT.md`)。結論: ①グレイン幅は主因でない(現行適応則がほぼ最適、0.5Pでも+1.5dB/body-13%) ②GCIは無関係(ONでむしろ悪化) ③再利用パターンの乱れとghostが強相関(-0.84) ④**可聴ゴーストの主因は有声/無声判定**: 入力の周期倍加区間(53Hz<通常モード下限60Hz)と減衰テールが無声判定→無声経路はピッチ変換しないため旧ピッチ素通し。**Low Voice Mode ONで解消方向**(+blend/avgで総合-26.9dB)。実験フック(Params: grainHalfP/grainBlend/grainAvg、全て既定オフ=bit-identical、UI非公開)と PSOLA_GRAIN_LOG(コンパイル時計測、プラグイン非影響)を追加。grainBlend=分数位置パルスクロスフェード(全シフトで艶↑・AM半減・middle ghost -48→-51dB)は実声試聴後に既定化を検討
 - **v0.22.0: Natural Air v2 スペクトルクリーンアップ(Phase 2先行)**。ユーザー実録(KITUNE、44.1kHz、+12st)で切り分け: middleレンジはair分離段階のF0周期漏れ(air完全オフ比+4.8dB)、**lowレンジのゴースト(-21.9dB)はair完全オフでも同値=グレイン再合成経路由来(+12stではグレイン幅が入力1周期を超え、奇数次入力倍音が出力倍音の中間に残る)で本件では未解決・別課題**。対策(ユーザー指示の方式2を採用): noiseBufは出力までDサンプル遅延の余裕があるため、1024点FFT/hop512/周期Hann OLA(ユニティ再構成)を**追加レイテンシゼロ**で挿入し(processAirFx)、有声時に入力F0整数倍近傍(6kHz以下のみ、幅±max(1, 2%C)を間隔の35%でキャップ)のビンを倍音間フロア(隣接中点magの小さい方×1.4)へクランプ。>6kHzは不変=**Air Shine完全維持**。f0<~130Hz(倍音間隔<3bin)はクランプ無効(低域はlowCons/クレストガードが担当)。Low Latencyモード(D<窓長)は従来どおり生バイパス+airFxHopは追従のみ。方式1(定常母音でBand0-2に上限)はairband=4000代理で比較→ゴースト低減は同等(-48.0 vs -47.8)だが中低域エアを構造的に失うため**不採用**。実測(KITUNE_middle入力をエンジン通し、+12st): air経路ghost -43.2→**-47.8dB**(air0=-48.0と一致)、6-16k・Shine特性・レベル不変。offline_testに+12st持続母音ゴースト回帰(ghostDb、fftForViz流用)追加。CPUオフライン代理: v2計1.90%(legacy 0.94%、クリーンアップ分+0.12%)。※ユーザー音声ファイルはローカル解析のみ、リポジトリ非収載
 - **v0.21.0: 低音ゴースト修正 + Air Shine**。ユーザー実声評価(v0.20.0): ウィスパー良好・ビブラート/グライドの中域ゴースト大幅改善、ただし**低い「あー」持続で旧ピッチゴースト**、高域の抜けはさらに強化したい。①原因=period doubling/交互周期/軽いフライの倍音漏れは**2Pで相関しPでは弱い**ため非周期と誤認(offline再現: サブハーモニック-15%でb1のkeepが0.99まで上昇)。対策: 漏れ判定の候補ラグを{P, 2P, P/2}に拡張(各±2%、ストライド2+±1精密化、分母エネルギーはprefix和でO(1))。②さらに**クレストファクタガード**: ランダム周期ジッタのパルス残差は「どのラグでも無相関=技術的には非周期」だが旧ピッチに聴こえる。息ノイズ(ガウス的、crest~3.5)に対しパルス残差はcrest≫6で明確分離→crest4.5-7でkeepをフェードアウト(90Hz定常のrel diff 0.042→0.006)。③低F0(<130Hz)ではb0/b1のkeep上昇レートを減速(lowCons)。検証: サブハーモニックb1 keep 0.99→0.14、全既存回帰PASS維持。**Air Shine(airshineパラメータ、0〜6dB、既定0)**: v2専用、最上段バンド(>6kHz)の**noiseBuf再加算ゲインのみ**を持ち上げる(harmBuf側の減算・中低域は不変)。breathy実測: +6dBで6-16k帯域比0.0176→0.0291、1-4k・RMSはほぼ不変。CPUオフライン代理計測: legacy 0.97%→v2 1.78%(+0.8%/コア)
+
+- **v0.63.0: Release Pitch Continuation(BETA候補、engine Paramsのみ・APVTS未登録・既定OFF)**。ChatGPT指示書 `2026-08-23_onset-release-master-status-and-next-step.md` の1実装。**Repair OFF は v0.62.3 と bitexact**
+  - **ChatGPTの判定を受けた現在地**: 語頭G4=正式採用済み / **Analysis Cadence=不採用**(語頭60-140Hzが診断22件で中央値+2.92dB悪化。BETA既定OFFのまま) / 語尾シェルフ0.35=未達(問題語尾の1つで150-600Hzが-5.19dB、別の箇所では処理後も60-140Hzが+2.58dB優勢)
+  - **方式**: 語尾をローカットで削るのをやめる。**voiced判定が外れた直後の短い母音尾を、最後の安定`curP`で有声グレインとして変換し続ける**。狙いは「変換前F0を削る」ではなく「無声経路へ漏れた尾を変換後F0へ移す」
+  - **`voiced` には書き戻さない**。合成用フラグ `relContActive` は完全に別。書き戻すと VOICE/RELEASE 状態機械が往復し、この機能が前提にしている語尾検出そのものを壊す。**`placeGrain` の `v = voiced || relContActive` が両者を同一視する唯一の場所**
+  - **境界条件**: RELEASE直後のみ / 最大3検出フレーム / `zcr < 0.12` / `energy > 0.02 × lastVoicedEnergy` / `bestNormCorr > 0.55`。1つでも外れたら即座に通常の無声経路へ戻す(`relContLeft = 0`)。息・摩擦音を有声化しないための条件
+  - **`rho` はここでは適切**。オンセット救済には不適(誤脱落と正当な子音を分離しない、中央値0.458対0.463)だが、ここでの問いは「いま追っていた周期がまだ信号にあるか」で、`bestNormCorr` は `curP` の±15%しか探索しないので当たれば周期近傍
+  - **最小検証のみ**(検証予算に従う): ビルド / Release probe 1回(Cadence OFF・Formant+2・継続ON、11ケースで誤検出0・見逃し0・句中0.00dB) / `offline_test` 1回 FAIL 0 / `bitexact` 1回 PASS / NaN 0・ピーク B0 0.534 B1 0.555
+  - **継続は実際に発火している**: 実録110秒で256サンプルチャンク234回
+  - **【既存の性質・退行ではない】Release Repair OFF ではリリースキューが排出されず overflow が出る**。`pushRelEvent` は `relShelfAmt` に関係なく積むが、排出は出力段の `relShelfAmt > 0` の中だけ。**B0とB1で同じ20回**なので出荷既定の性質。今回は指示外のため触っていない
+  - **成果物**: `~/.codex/.chatgpt-projects/g-p-.../VoxMorph-Claude-Exchange/deliveries/2026-08-23_v0.63.0_release-pitch-continuation/`(input/B0/B1のreel 6語尾、events.csv、state_B1.csv)。**次はChatGPT検証ゲート。合格までユーザー試聴には回さない**
 
 - **v0.62.3: 語頭A/Bを生成(ChatGPT指示書 項目3)。DSPは1バイトも変えていない**。新ツール = `test/onset_ab.cpp`
   - **試聴素材の置き場所: `~/Downloads/VoxMorph_ONSET_AB/`**(245MB、リポジトリ非収載)
