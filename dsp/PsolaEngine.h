@@ -471,9 +471,11 @@ public:
         relShelfSm  = relShelfAmt;   // no ramp-in on the first phrase after a reset
         relShelfSmK = (float) (1.0 - std::exp (-1.0 / (0.04 * fs)));
         relQN = 0;  prevFrameCenter = 0;  lastEmitted = 0;
-        relBfCand = false;  relBfPending = false;  relBfSpanActive = false;
-        relBfResumeIn = 0.0;  relBfRecovered = 0;  relBfResumeErr = 0;  relBfOvershoot = 0;
-        relBfDidCandidate = false;  relBfDidConfirm = false;  relBfDidFill = false;
+        relBfCand = false;  relBfRolling = false;  relBfPending = false;
+        relBfSpanActive = false;  relBfResumeIn = 0.0;
+        relBfLogCandC = relBfLogConfC = relBfLogFrom = relBfLogTo = 0.0;
+        relBfLogRho = relBfLogZcr = 0.0f;
+        relBfLogRecovered = relBfLogResumeErr = 0;
         relLateEvents = 0;  relDropped = 0;  relOverflow = 0;
         relSuspend = false;  relCutWanted = 200.0f;
         onState = OnsetState::armed;  relArmed = true;  relActive = false;
@@ -613,13 +615,16 @@ public:
         float  relF0;
         int    relF0Age;
         int    relLeft;
-        // Deferred Release Backfill, as it stood when the frame finished.
-        // `backfilled` / `recovered` / `resumeErrorSamples` are filled in by
-        // processChunk after the re-render, which happens once detectPitch
-        // has returned -- see the patch at the end of the backfill block.
-        bool   bfCandidate;
-        bool   bfConfirmed;
-        bool   bfBackfilled;
+        // Rolling Release Backfill, as it stood when the frame finished.
+        // The centres are seconds on the INPUT axis; bfFrom / bfTo are
+        // seconds on the OUTPUT axis (input + the lookahead). bfFrom, bfTo,
+        // bfRecovered and bfResumeErrorSamples are filled in by processChunk
+        // after the re-render, which happens once detectPitch has returned.
+        double bfCandidateCentre;
+        double bfConfirmCentre;
+        float  bfRho;
+        float  bfZcr;
+        double bfFrom, bfTo;
         int    bfRecovered;
         int    bfResumeErrorSamples;
     };
@@ -1104,26 +1109,29 @@ public:
 #endif
         }
 
-        // ---- Deferred Release Backfill: do the re-render --------------
-        // Same three protections as the onset backfill, for the same reason:
-        // olaFloor keeps grains off anything already handed over, the fade
-        // ramp scales accBuf and normBuf by the SAME coefficient so the join
-        // moves in the normalised domain and cannot step the level, and
+        // ---- Rolling Release Backfill: re-render one segment ----------
+        // Runs once per confirmed analysis frame, so a long ending is covered
+        // by a chain of short replacements rather than one 11.6 ms patch.
+        //
+        // The same three protections as the onset backfill, each for the same
+        // reason: olaFloor keeps grains off anything already handed over, the
+        // fade ramp scales accBuf and normBuf by the SAME coefficient so the
+        // join moves in the normalised domain and cannot step the level, and
         // markResume puts the mark grid back. lastInMark is restored too --
         // the onset backfill does not need that, but here a difference in it
-        // would keep changing grain phase for the rest of the take, which is
-        // precisely the behaviour the previous attempt was failed for.
+        // would keep changing grain phase for the rest of the take.
         if (relBfPending)
         {
             relBfPending = false;
-            relBfRecovered = 0;
-            relBfDidFill = false;
-            // never behind the emitted boundary: this chunk's own output has
-            // not been written yet, so `start` is the furthest back that is
-            // legal, exactly as in the onset case
-            const int64_t from = std::max (relBfFrom, start);
+            relBfLogRecovered = 0;
+            // A previous segment whose grid has not been handed back yet.
+            // Overwriting markResume there would strand the old value and let
+            // the difference escape the segment, which is the failure this
+            // whole mechanism is built to avoid. Skip instead.
+            const bool gridBusy = markResume > 0.0;
+            const int64_t from = std::max (relBfSegFrom, start);
             const int64_t upto = (int64_t) nextMarkF + houtCapCur;
-            if (relBfP > 2.0f && from < upto && relBfSpanEnd > from)
+            if (! gridBusy && relBfSegP > 2.0f && from < relBfSegTo && from < upto)
             {
                 const int xf = std::min (fadeN, (int) (houtCapCur / 2));
                 for (int j = 0; j < xf; ++j)
@@ -1147,22 +1155,25 @@ public:
                 fadeFrom      = from;
                 fadeLen       = xf;
                 relBfSpanActive = true;
-                relBfSpanP      = relBfP;
-                relBfRecovered  = (int) (upto - from);
-                relBfDidFill    = true;
-            }
+                relBfSpanEnd    = relBfSegTo;
+                relBfSpanP      = relBfSegP;
+                relBfLogRecovered = (int) (upto - from);
+                relBfLogFrom = (double) from / fs;
+                relBfLogTo   = (double) relBfSegTo / fs;
 #ifdef PSOLA_DETECT_LOG
-            // The confirming frame's row was pushed when detectPitch returned,
-            // before this ran. Fill in what only this block knows.
-            if (! stateLog.empty())
-            {
-                stateLog.back().bfBackfilled = relBfDidFill;
-                stateLog.back().bfRecovered  = relBfRecovered;
-            }
+                // the confirming frame's row was pushed when detectPitch
+                // returned, before this ran
+                if (! stateLog.empty())
+                {
+                    stateLog.back().bfFrom      = relBfLogFrom;
+                    stateLog.back().bfTo        = relBfLogTo;
+                    stateLog.back().bfRecovered = relBfLogRecovered;
+                }
 #endif
+            }
         }
 
-        // How far ahead grains are laid down. Legacy follows the write head,
+        // How far ahead grains are laid down.        // How far ahead grains are laid down. Legacy follows the write head,
         // so the horizon takes whatever values the host's chunking gives it
         // -- and a mark that falls just past one host's horizon but inside
         // another's is placed on OPPOSITE sides of a detection, with a
@@ -1199,34 +1210,28 @@ public:
                 // stepped forward to avoid a close-spaced pair broke that
                 // (median |diff| 0.027 over 164 joins) and fixed nothing --
                 // the close pair it was invented for did not exist.
-                // How far the last replacement mark ran past the grid before
-                // being pulled back. Non-zero and expected -- grains are
-                // placed until nextMarkF crosses markResume.
                 const double markResumeSaved = markResume;
-                relBfOvershoot = (int) std::llround (nextMarkF - markResume);
-                const bool wasRelease = relBfResumeIn > 0.0;
+                const bool   wasRelease = relBfResumeIn > 0.0;
                 const double wantIn = relBfResumeIn;
                 nextMarkF  = markResume;
                 markResume = 0.0;
                 // Release backfill only: the onset backfill deliberately does
                 // NOT touch lastInMark, and snapping nextMarkF alone is what
-                // makes it bit-identical. relBfResumeIn is non-zero only when
-                // a release backfill set it.
+                // makes it bit-identical.
                 if (wasRelease)
                 { lastInMark = wantIn; relBfResumeIn = 0.0; }
                 relBfSpanActive = false;
                 // What actually survives into the rest of the take. Both
                 // halves restored means zero; a non-zero here would say one
                 // of them was forgotten.
-                relBfResumeErr = wasRelease
+                relBfLogResumeErr = wasRelease
                     ? (int) (std::llround (nextMarkF - markResumeSaved)
                              + std::llround (lastInMark - wantIn))
                     : 0;
 #ifdef PSOLA_DETECT_LOG
                 if (wasRelease && ! stateLog.empty())
-                    stateLog.back().bfResumeErrorSamples = relBfResumeErr;
+                    stateLog.back().bfResumeErrorSamples = relBfLogResumeErr;
 #endif
-                relBfSpanActive = false;
             }
         }
 
@@ -1390,24 +1395,6 @@ private:
     static constexpr int kDetN = 1024;
 
     // ---------------- pitch detection (YIN + octave guard) ----------------
-    // A candidate has been confirmed as a real ending. Hand it to
-    // processChunk -- the re-render has to happen where the OLA buffers and
-    // the emitted boundary are, not in the middle of an analysis frame.
-    //
-    // The span the replacement voices is one detection frame: from the
-    // candidate's own output position to this frame's. That is exactly the
-    // stretch the evidence covers. Everything past it is re-placed by the
-    // ordinary unvoiced path, because there is no evidence for it.
-    void confirmReleaseBackfill (int64_t anchor)
-    {
-        relBfPending   = true;
-        relBfFrom      = relBfCandOut;
-        relBfSpanEnd   = anchor + D;
-        relBfP         = relBfCandP;
-        relBfCand      = false;
-        relBfDidConfirm = true;
-    }
-
     // `anchor` is the input position the frame ENDS at (before the lag
     // allowance). Legacy passes the write head, which is wherever the host's
     // chunk happened to stop; the deterministic cadence passes a grid point,
@@ -1420,7 +1407,9 @@ private:
         // by the branch that decides this frame's tail is still a vowel. It
         // then stands until the next analysis frame, which is exactly the
         // span of grains it has to cover.
-        relBfDidCandidate = false;  relBfDidConfirm = false;
+        relBfLogCandC = relBfLogConfC = relBfLogFrom = relBfLogTo = 0.0;
+        relBfLogRho = relBfLogZcr = 0.0f;
+        relBfLogRecovered = relBfLogResumeErr = 0;
         const int effMaxLag = effMaxLagCur;
         // The frame this call analyses, and its centre. Every release
         // decision is booked against an OUTPUT position derived from this,
@@ -1543,17 +1532,19 @@ private:
         {
             std::vector<StateLogRow>& log;
             StateLogRow row;
-            const bool*  candP;  const bool* confP;
+            const double* candP;  const double* confP;
+            const float*  rhoP;   const float*  zcrP;
             ~StateKeeper()
             {
-                row.bfCandidate = *candP;  row.bfConfirmed = *confP;
+                row.bfCandidateCentre = *candP;  row.bfConfirmCentre = *confP;
+                row.bfRho = *rhoP;               row.bfZcr = *zcrP;
                 log.push_back (row);
             }
         } stateKeeper { stateLog,
                         { (double) anchor / fs, (int) onState, voiced, relActive,
                           relTarget, energy / (double) kDetN, zcr, relF0, relF0Age,
-                          relLeft, false, false, false, 0, 0 },
-                        &relBfDidCandidate, &relBfDidConfirm };
+                          relLeft, 0.0, 0.0, 0.0f, 0.0f, 0.0, 0.0, 0, 0 },
+                        &relBfLogCandC, &relBfLogConfC, &relBfLogRho, &relBfLogZcr };
 #endif
         if (energy / kDetN < 1.0e-8)
         {
@@ -1562,8 +1553,8 @@ private:
             // phrase after atrue silence -- the commonest case of all, and the
             // only one a synthetic test ever produces -- never counted as a
             // preceding unvoiced stretch and never backfilled.
-            // decayed into silence -- the other half of the confirmation
-            if (relBfOn && relBfCand) confirmReleaseBackfill (anchor);
+            // energy gone: terminate, do not convert silence
+            relBfCand = false;  relBfRolling = false;
             voiced = false; holdCount = 0; lastGci = -1; pitchConf = 0.0f;
             preLock = false; preHold = 0;
             if (unvoicedRun < 1000) ++unvoicedRun;
@@ -1691,42 +1682,70 @@ private:
                 dlPush (3);
                 return;
             }
-            // ---- Deferred Release Backfill (v0.63.2, BETA) ----
-            // Two frames, two different jobs.
+            // ---- Frame-Centered Rolling Deferred Backfill (BETA) ----
             //
-            // The frame the voice first drops out on only REMEMBERS itself.
-            // Acting here is what the previous attempt could not do -- the
-            // state machine has not classified this frame yet, because it
-            // reads the PREVIOUS frame's voicing -- and acting one frame late
-            // meant two of the three problem endings were never touched.
+            // Positions are the ANALYSIS FRAME CENTRE plus the lookahead --
+            // the same correspondence the release queue books against. The
+            // frame END is effMaxLag + kDetN/2 later, and using it put every
+            // replacement 28.3 ms past the sound it was replacing, which is
+            // why the previous attempt changed 30-80 ms and left 0-30 ms
+            // untouched.
             //
-            // The frame after it decides. Still unvoiced, or decayed into
-            // silence, means the phrase really has ended and the remembered
-            // region can be re-rendered. Voice back means the candidate is
-            // dropped on the confident path below, and nothing ever changed.
+            // The first non-confident frame only remembers itself: the state
+            // machine reads the PREVIOUS frame's voicing, so this frame is
+            // not classified yet and acting on it would be a guess. From the
+            // next frame on, each analysis frame confirms and re-renders ONE
+            // segment -- the stretch since the last confirmed centre -- for
+            // as long as the period is still measurably there. A single
+            // 11.6 ms replacement cannot cover an ending whose old-pitch leak
+            // runs for a quarter of a second.
+            //
+            // Nothing here writes to `voiced` or to the state machine.
             if (relBfOn)
             {
                 if (voiced && curP > 2.0f)
                 {
-                    relBfCand    = true;
-                    relBfCandOut = anchor + D;   // where this frame comes out
-                    relBfCandP   = curP;         // the last stable period
-                    relBfCandRho = 0.0f;
-                    relBfCandZcr = zcr;
-                    relBfCandE   = energy;
-                    relBfDidCandidate = true;
+                    relBfCand       = true;
+                    relBfRolling    = false;
+                    relBfCandCentre = frameCenter;
+                    relBfLastCentre = frameCenter;
+                    relBfCandP      = curP;
+                    relBfLogCandC   = (double) frameCenter / fs;
                 }
-                else if (relBfCand)
+                else if ((relBfCand || relBfRolling) && relBfCandP > 2.0f)
                 {
-                    // recorded, not gated on: the confirmation asked for is
-                    // "still unvoiced or decayed", and reaching this line
-                    // already means the first of those
+                    // bestNormCorr searches +-15 % of curP, and curP is left
+                    // at the last stable period on a failed frame, so this
+                    // asks exactly "is the period the phrase ended on still
+                    // in the signal".
                     float lag = 0.0f;
-                    relBfCandRho = bestNormCorr (span, &lag);
-                    confirmReleaseBackfill (anchor);
+                    const float rho = bestNormCorr (span, &lag);
+                    relBfLogRho = rho;
+                    relBfLogZcr = zcr;
+                    const bool stillAVowel = rho > kRelBfRho
+                                          && lag > 0.0f
+                                          && zcr < kRelBfZcr
+                                          && energy > kRelBfE * lastVoicedEnergy;
+                    if (stillAVowel)
+                    {
+                        relBfPending  = true;
+                        relBfSegFrom  = relBfLastCentre + D;
+                        relBfSegTo    = frameCenter + D;
+                        relBfSegP     = relBfCandP;
+                        relBfLastCentre = frameCenter;
+                        relBfCand     = false;
+                        relBfRolling  = true;
+                        relBfLogConfC = (double) frameCenter / fs;
+                    }
+                    else
+                    {
+                        // rho down, crossings up, or the energy gone: stop at
+                        // once rather than keep converting breath
+                        relBfCand = false;  relBfRolling = false;
+                    }
                 }
             }
-            else relBfCand = false;
+            else { relBfCand = false;  relBfRolling = false; }
 
             voiced = false;
             holdCount = 0;
@@ -1833,9 +1852,9 @@ private:
         if (backfillOn && ! voiced && unvoicedRun >= 3 && (! relRepairOn || relArmed))
             backfillPending = true;
         unvoicedRun = 0;
-        // The voice came back, so whatever was remembered at the drop was not
-        // an ending: drop it, and this run stays identical to the baseline.
-        relBfCand = false;
+        // The voice is back. Whatever was remembered at the drop was not an
+        // ending, and a run in progress ends here.
+        relBfCand = false;  relBfRolling = false;
         curP  = voiced ? smooth * curP + (1.0f - smooth) * newP : newP;
         voiced = true;
         dlPush (0);
@@ -3188,27 +3207,34 @@ private:
     bool    relRepairOn = false;
     int     relCutMode  = 0;
     float   relCutHz    = 200.0f;
-    // ---- Deferred Release Backfill -------------------------------------
+    // ---- Frame-Centered Rolling Deferred Backfill ----------------------
     bool    relBfOn = false;
-    // the candidate: the first non-confident frame of a phrase. Saved, not
-    // acted on -- if the voice comes straight back it is simply dropped and
-    // the output never differed from the baseline.
-    bool    relBfCand = false;
-    int64_t relBfCandOut = 0;      // OUTPUT position that frame corresponds to
-    float   relBfCandP = 0.0f;     // last stable period
-    float   relBfCandRho = 0.0f, relBfCandZcr = 0.0f;
-    double  relBfCandE = 0.0;
-    // confirmed, waiting for processChunk to do the re-render
+    // A candidate is the first non-confident frame of a phrase: remembered,
+    // never acted on. Positions are the ANALYSIS FRAME CENTRE, not the frame
+    // end -- the centre is where the evidence actually is, and the end is
+    // effMaxLag + kDetN/2 later, which at 44.1 kHz put every replacement
+    // 28.3 ms past the sound it was meant to replace.
+    bool    relBfCand = false, relBfRolling = false;
+    int64_t relBfCandCentre = 0;   // input position, frame centre
+    int64_t relBfLastCentre = 0;   // centre up to which segments are done
+    float   relBfCandP = 0.0f;     // the period the phrase ended on
+    // one confirmed segment, waiting for processChunk
     bool    relBfPending = false;
-    int64_t relBfFrom = 0, relBfSpanEnd = 0;
-    float   relBfP = 0.0f;
-    // in force while the replacement grains are being laid down
+    int64_t relBfSegFrom = 0, relBfSegTo = 0;
+    float   relBfSegP = 0.0f;
+    // in force while a segment's replacement grains are being laid down
     bool    relBfSpanActive = false;
+    int64_t relBfSpanEnd = 0;
     float   relBfSpanP = 0.0f;
     double  relBfResumeIn = 0.0;   // lastInMark to restore at the snap-back
+    static constexpr float  kRelBfRho = 0.55f;   // periodicity still present
+    static constexpr float  kRelBfZcr = 0.12f;   // still a vowel, not friction
+    static constexpr double kRelBfE   = 0.02;    // of the last voiced frame
     // observability (offline log only)
-    bool    relBfDidCandidate = false, relBfDidConfirm = false, relBfDidFill = false;
-    int     relBfRecovered = 0, relBfResumeErr = 0, relBfOvershoot = 0;
+    double  relBfLogCandC = 0.0, relBfLogConfC = 0.0;
+    double  relBfLogFrom = 0.0, relBfLogTo = 0.0;
+    float   relBfLogRho = 0.0f, relBfLogZcr = 0.0f;
+    int     relBfLogRecovered = 0, relBfLogResumeErr = 0;
 
     float   relShelfAmt = 0.0f;
     // Release Strength, dezippered. The depth is read on EVERY sample inside

@@ -197,25 +197,15 @@ int main (int argc, char** argv)
     std::printf ("queue B1: late %d dropped %d overflow %d\n",
                  b1.late, b1.dropped, b1.overflow);
 
-    // how many frames the continuation actually carried, so the report can
-    // say whether the feature engaged at all
-    int contFrames = 0;
+    // How many analysis frames actually re-rendered a segment. Counted from
+    // the log rather than from a live flag: the span flag is cleared inside
+    // the same processChunk that sets it, so polling it after process()
+    // returns reports zero however hard the feature is working.
     {
-        PsolaEngine::Params p;
-        p.pitchSemi = 9.0f;  p.formantSemi = 2.0f;
-        p.grainAvg = true;   p.pulseBody = 0.75f;  p.onsetHold = 3;
-        p.onsetBackfill = true;  p.preLockLowCut = 0.75f;
-        p.releasePitchContinuation = true;
-        PsolaEngine e;  e.prepare (fs);  e.setParams (p);
-        std::vector<float> o (in.size(), 0.0f);
-        for (size_t i = 0; i < in.size(); i += 256)
-        {
-            const int c = (int) std::min ((size_t) 256, in.size() - i);
-            e.process (in.data() + i, o.data() + i, c);
-            if (e.continuationActive()) ++contFrames;
-        }
+        int fired = 0;
+        for (const auto& r : b1.st) if (r.bfTo > 0.0) ++fired;
+        std::printf ("rolling backfill re-rendered %d segments\n", fired);
     }
-    std::printf ("continuation engaged on %d chunks of 256\n", contFrames);
 
     const auto phrases = findPhrases (in, fs);
     double speakerF0 = 150.0;
@@ -284,18 +274,20 @@ int main (int argc, char** argv)
     if (FILE* lf = std::fopen ((dir + "/logs/state_B1.csv").c_str(), "w"))
     {
         std::fprintf (lf, "t,state,voicedRead,relActive,energyPerSample,zcr,relF0,"
-                          "candidate,confirmed,backfilled,recovered,resumeErrorSamples\n");
+                          "candidateFrameCenter,confirmFrameCenter,rho,zcrGate,"
+                          "backfilledFrom,backfilledTo,recovered,resumeErrorSamples\n");
         for (const auto& r : b1.st)
         {
             bool near = false;
             for (const auto& pk : pick)
                 if (std::fabs (r.t - (double) pk.off / fs) < 0.5) near = true;
             if (! near) continue;
-            std::fprintf (lf, "%.4f,%d,%d,%d,%.6g,%.4f,%.1f,%d,%d,%d,%d,%d\n",
+            std::fprintf (lf, "%.4f,%d,%d,%d,%.6g,%.4f,%.1f,%.4f,%.4f,%.4f,%.4f,"
+                              "%.4f,%.4f,%d,%d\n",
                           r.t, r.state, (int) r.voicedRead, (int) r.relActive,
                           r.energyPerSample, r.zcr, r.relF0,
-                          (int) r.bfCandidate, (int) r.bfConfirmed,
-                          (int) r.bfBackfilled, r.bfRecovered, r.bfResumeErrorSamples);
+                          r.bfCandidateCentre, r.bfConfirmCentre, r.bfRho, r.bfZcr,
+                          r.bfFrom, r.bfTo, r.bfRecovered, r.bfResumeErrorSamples);
         }
         std::fclose (lf);
     }
