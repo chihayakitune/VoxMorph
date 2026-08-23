@@ -400,6 +400,8 @@ public:
         buildPreShelf (preFc);
         relLp.fill (0.0f);
         relGain = 0.0f;  relTarget = 0.0f;  relF0 = 0.0f;  relF0Age = 100000;
+        relQN = 0;  prevFrameCenter = 0;  lastEmitted = 0;
+        relLateEvents = 0;  relDropped = 0;
         onState = OnsetState::armed;  relArmed = true;  relActive = false;
         relCutHz  = 200.0f;
         relShelfK = 1.0f - std::exp ((float) (-2.0 * M_PI * 200.0 / fs));
@@ -930,6 +932,12 @@ public:
 
             if (relShelfAmt > 0.0f)
             {
+                while (relQN > 0 && oi >= relQ[0].applyPos)
+                {
+                    relTarget = relQ[0].target;
+                    for (int k = 1; k < relQN; ++k) relQ[(size_t) (k - 1)] = relQ[(size_t) k];
+                    --relQN;
+                }
                 // Attack fast enough to catch the start of the tail, release
                 // slowly so the treatment does not step out mid-decay. The
                 // filter state is updated on EVERY sample, gain or no gain:
@@ -967,6 +975,7 @@ public:
             accBuf[idx]  = 0.0f;
             normBuf[idx] = 0.0f;
             candBuf[idx] = 0.0f;
+            lastEmitted  = oi + 1;
 #ifdef PSOLA_DETECT_LOG
             lastEmitted = oi + 1;
 #endif
@@ -1028,6 +1037,16 @@ private:
     void detectPitch()
     {
         const int effMaxLag = effMaxLagCur;
+        // The frame this call analyses, and its centre. Every release
+        // decision is booked against an OUTPUT position derived from this,
+        // never against whatever chunk boundary happened to trigger the call.
+        //   start  = writePos - kDetN - effMaxLag
+        //   end    = writePos - effMaxLag
+        //   centre = end - kDetN/2
+        const int64_t frameEnd    = writePos - effMaxLag;
+        const int64_t frameCenter = frameEnd - kDetN / 2;
+        struct CentreKeeper { int64_t& dst; int64_t v; ~CentreKeeper() { dst = v; } }
+            centreKeeper { prevFrameCenter, frameCenter };
         const int span = kDetN + effMaxLag;
         const int64_t s0 = writePos - span;
         for (int i = 0; i < span; ++i)
@@ -1110,7 +1129,25 @@ private:
         {
             const bool usable = relF0 > 40.0f && relF0Age < kRelF0MaxAge;
             const float want = (relActive && usable) ? 1.0f : 0.0f;
-            relTarget = want;
+            // Book it against an absolute output position -- applying it to
+            // the chunk about to be written lets the decision reach backwards
+            // by however many samples the host handed over, which measured
+            // 4.2 dB apart between 32 and 512.
+            //
+            // The two edges do NOT come from the same frame:
+            //   ON  entering RELEASE is decided from `voiced`, and this
+            //       function has not run its own analysis yet when the state
+            //       machine reads it, so the frame that actually went
+            //       unvoiced is the PREVIOUS one.
+            //   OFF leaving RELEASE is decided from THIS frame's energy and
+            //       zero-crossing rate.
+            // One frame is 512 samples and a stop-ending RELEASE lasts three
+            // or four, so getting this wrong erases the feature.
+            const int64_t src = (want > 0.5f && prevFrameCenter > 0) ? prevFrameCenter
+                                                                     : frameCenter;
+            const float pending = relQN > 0 ? relQ[(size_t) (relQN - 1)].target : relTarget;
+            if (want != pending)
+                pushRelEvent (src + D, want, relF0, relCutHz, want > 0.5f ? 1 : 2, src);
         }
         if (energy / kDetN < 1.0e-8)
         {
@@ -2543,6 +2580,38 @@ private:
         return x;
     }
 
+    struct RelEvent
+    {
+        int64_t applyPos, frameCenter;
+        float   target, f0, cutHz;
+        int     reason;        // 1 = enter RELEASE, 2 = leave it
+    };
+
+    void pushRelEvent (int64_t at, float target, float f0, float cut, int reason, int64_t src)
+    {
+        if (at < lastEmitted)
+        {
+            // Not enough lookahead to put it where it belongs; Low Latency
+            // and Low Voice can reach here. Clamping to the current position
+            // would put the buffer dependence straight back, so drop the
+            // event and record that it happened.
+            ++relLateEvents;
+            return;
+        }
+        if (relQN > 0 && relQ[(size_t) (relQN - 1)].applyPos == at)
+        {
+            relQ[(size_t) (relQN - 1)] = { at, src, target, f0, cut, reason };
+            return;
+        }
+        if (relQN >= (int) relQ.size())
+        {
+            for (int k = 1; k < relQN; ++k) relQ[(size_t) (k - 1)] = relQ[(size_t) k];
+            --relQN;
+            ++relDropped;
+        }
+        relQ[(size_t) relQN++] = { at, src, target, f0, cut, reason };
+    }
+
     inline float releaseStage (float x, float g)
     {
         const float k = 1.0f - std::pow (10.0f, -0.3f * relShelfAmt * g);
@@ -2624,9 +2693,6 @@ private:
     int64_t fadeFrom        = 0;
     int     fadeLen         = 0;
     double  markResume      = 0.0;
-#ifdef PSOLA_DETECT_LOG
-    int64_t lastEmitted = 0;
-#endif
     float   pitchSemiNow = 0.0f;
 
     // release-side state
@@ -2638,6 +2704,11 @@ private:
     float   relF0       = 0.0f;      // last confident input f0
     int     relF0Age    = 100000;    // detection frames since it was set
     float   relTarget   = 0.0f;      // 1 while the release treatment applies
+    std::array<RelEvent, 16> relQ {};
+    int     relQN = 0;
+    int64_t prevFrameCenter = 0;
+    int64_t lastEmitted = 0;         // one past the last sample given to the host
+    int     relLateEvents = 0, relDropped = 0;
     float   relGain     = 0.0f;      // smoothed
     bool    relRepairOn = false;
     int     relCutMode  = 0;
