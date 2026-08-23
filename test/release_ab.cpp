@@ -284,17 +284,18 @@ int main (int argc, char** argv)
     if (FILE* lf = std::fopen ((dir + "/logs/state_B1.csv").c_str(), "w"))
     {
         std::fprintf (lf, "t,state,voicedRead,relActive,energyPerSample,zcr,relF0,"
-                          "relContActive,relContLeft,relContRho\n");
+                          "candidate,confirmed,backfilled,recovered,resumeErrorSamples\n");
         for (const auto& r : b1.st)
         {
             bool near = false;
             for (const auto& pk : pick)
                 if (std::fabs (r.t - (double) pk.off / fs) < 0.5) near = true;
             if (! near) continue;
-            std::fprintf (lf, "%.4f,%d,%d,%d,%.6g,%.4f,%.1f,%d,%d,%.4f\n",
+            std::fprintf (lf, "%.4f,%d,%d,%d,%.6g,%.4f,%.1f,%d,%d,%d,%d,%d\n",
                           r.t, r.state, (int) r.voicedRead, (int) r.relActive,
                           r.energyPerSample, r.zcr, r.relF0,
-                          (int) r.relContActive, r.relContLeft, r.relContRho);
+                          (int) r.bfCandidate, (int) r.bfConfirmed,
+                          (int) r.bfBackfilled, r.bfRecovered, r.bfResumeErrorSamples);
         }
         std::fclose (lf);
     }
