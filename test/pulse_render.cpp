@@ -134,6 +134,8 @@ int main (int argc, char** argv)
         e.process (in.data() + i, out.data() + i, c);
     }
     writeWav (argv[2], out, fs);
+    std::printf ("  release queue: late %d, dropped %d, overflow %d\n",
+                 e.releaseLateEvents(), e.releaseDropped(), e.releaseOverflow());
 #ifdef PSOLA_DETECT_LOG
     {
         FILE* bf = std::fopen ("/tmp/bflog.csv", "w");

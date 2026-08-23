@@ -401,7 +401,8 @@ public:
         relLp.fill (0.0f);
         relGain = 0.0f;  relTarget = 0.0f;  relF0 = 0.0f;  relF0Age = 100000;
         relQN = 0;  prevFrameCenter = 0;  lastEmitted = 0;
-        relLateEvents = 0;  relDropped = 0;
+        relLateEvents = 0;  relDropped = 0;  relOverflow = 0;
+        relSuspend = false;  relCutWanted = 200.0f;
         onState = OnsetState::armed;  relArmed = true;  relActive = false;
         relCutHz  = 200.0f;
         relShelfK = 1.0f - std::exp ((float) (-2.0 * M_PI * 200.0 / fs));
@@ -935,6 +936,15 @@ public:
                 while (relQN > 0 && oi >= relQ[0].applyPos)
                 {
                     relTarget = relQ[0].target;
+                    // install the corner the event was booked with, at the
+                    // event's own position -- not whatever the detector has
+                    // arrived at since
+                    if (relQ[0].reason == 1 && relQ[0].cutHz > 0.0f
+                        && std::abs (relQ[0].cutHz - relCutHz) > 0.001f)
+                    {
+                        relCutHz  = relQ[0].cutHz;
+                        relShelfK = 1.0f - std::exp ((float) (-2.0 * M_PI * (double) relCutHz / fs));
+                    }
                     for (int k = 1; k < relQN; ++k) relQ[(size_t) (k - 1)] = relQ[(size_t) k];
                     --relQN;
                 }
@@ -981,6 +991,11 @@ public:
 #endif
         }
     }
+
+    // release-queue health: all three must be zero in normal latency
+    int  releaseLateEvents() const { return relLateEvents; }
+    int  releaseDropped()    const { return relDropped; }
+    int  releaseOverflow()   const { return relOverflow; }
 
     bool  isVoiced()  const { return voiced; }
     float currentF0() const { return voiced ? (float) fs / curP : 0.0f; }
@@ -1080,6 +1095,7 @@ private:
             if (curP > 2.0f) { relF0 = (float) (fs / curP); relF0Age = 0; }
             onState = OnsetState::voice;
             relArmed = false;
+            relSuspend = false;      // a new voiced stretch clears the latch
         }
         else switch (onState)
         {
@@ -1146,8 +1162,8 @@ private:
             const int64_t src = (want > 0.5f && prevFrameCenter > 0) ? prevFrameCenter
                                                                      : frameCenter;
             const float pending = relQN > 0 ? relQ[(size_t) (relQN - 1)].target : relTarget;
-            if (want != pending)
-                pushRelEvent (src + D, want, relF0, relCutHz, want > 0.5f ? 1 : 2, src);
+            if (want != pending && ! relSuspend)
+                pushRelEvent (src + D, want, relF0, relCutWanted, want > 0.5f ? 1 : 2, src);
         }
         if (energy / kDetN < 1.0e-8)
         {
@@ -1300,17 +1316,16 @@ private:
         }
         if (relShelfAmt > 0.0f && curP > 2.0f)
         {
+            // Only a CANDIDATE. The value that gets used is the one carried
+            // by the ON event and installed at its own sample position; the
+            // live filter must not be re-tuned by a later detection while a
+            // release is already running on the old corner.
             const float fin = (float) fs / curP;
             const float rat = std::pow (2.0f, pitchSemiNow / 12.0f);
             float want = 200.0f;
             if (relCutMode == 1) want = 1.6f * fin;
             else if (relCutMode == 2) want = fin * std::sqrt (rat);
-            want = std::clamp (want, 80.0f, 500.0f);
-            if (std::abs (want - relCutHz) > 0.05f * relCutHz)
-            {
-                relCutHz  = want;
-                relShelfK = 1.0f - std::exp ((float) (-2.0 * M_PI * (double) want / fs));
-            }
+            relCutWanted = std::clamp (want, 80.0f, 500.0f);
         }
 
         // octave guard: resist sudden DOWNWARD period jumps (subharmonics),
@@ -2605,9 +2620,14 @@ private:
         }
         if (relQN >= (int) relQ.size())
         {
-            for (int k = 1; k < relQN; ++k) relQ[(size_t) (k - 1)] = relQ[(size_t) k];
-            --relQN;
-            ++relDropped;
+            // Sixteen pending transitions is not a situation that should
+            // arise. Quietly discarding the oldest would silently reorder
+            // what the tail hears; shutting the feature off until the next
+            // voiced stretch is the honest failure, and it gets counted.
+            ++relOverflow;
+            relSuspend = true;
+            relQN = 0;
+            return;
         }
         relQ[(size_t) relQN++] = { at, src, target, f0, cut, reason };
     }
@@ -2708,7 +2728,9 @@ private:
     int     relQN = 0;
     int64_t prevFrameCenter = 0;
     int64_t lastEmitted = 0;         // one past the last sample given to the host
-    int     relLateEvents = 0, relDropped = 0;
+    int     relLateEvents = 0, relDropped = 0, relOverflow = 0;
+    bool    relSuspend = false;
+    float   relCutWanted = 200.0f;
     float   relGain     = 0.0f;      // smoothed
     bool    relRepairOn = false;
     int     relCutMode  = 0;
