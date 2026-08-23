@@ -283,16 +283,18 @@ int main (int argc, char** argv)
     // the state machine around those endings only -- not the whole take
     if (FILE* lf = std::fopen ((dir + "/logs/state_B1.csv").c_str(), "w"))
     {
-        std::fprintf (lf, "t,state,voicedRead,relActive,energyPerSample,zcr,relF0\n");
+        std::fprintf (lf, "t,state,voicedRead,relActive,energyPerSample,zcr,relF0,"
+                          "relContActive,relContLeft,relContRho\n");
         for (const auto& r : b1.st)
         {
             bool near = false;
             for (const auto& pk : pick)
                 if (std::fabs (r.t - (double) pk.off / fs) < 0.5) near = true;
             if (! near) continue;
-            std::fprintf (lf, "%.4f,%d,%d,%d,%.6g,%.4f,%.1f\n",
+            std::fprintf (lf, "%.4f,%d,%d,%d,%.6g,%.4f,%.1f,%d,%d,%.4f\n",
                           r.t, r.state, (int) r.voicedRead, (int) r.relActive,
-                          r.energyPerSample, r.zcr, r.relF0);
+                          r.energyPerSample, r.zcr, r.relF0,
+                          (int) r.relContActive, r.relContLeft, r.relContRho);
         }
         std::fclose (lf);
     }

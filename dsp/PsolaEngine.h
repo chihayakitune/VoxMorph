@@ -472,7 +472,7 @@ public:
         relShelfSm  = relShelfAmt;   // no ramp-in on the first phrase after a reset
         relShelfSmK = (float) (1.0 - std::exp (-1.0 / (0.04 * fs)));
         relQN = 0;  prevFrameCenter = 0;  lastEmitted = 0;
-        relContActive = false;  relContLeft = 0;
+        relContActive = false;  relContLeft = 0;  relContRho = 0.0f;
         relLateEvents = 0;  relDropped = 0;  relOverflow = 0;
         relSuspend = false;  relCutWanted = 200.0f;
         onState = OnsetState::armed;  relArmed = true;  relActive = false;
@@ -612,6 +612,10 @@ public:
         float  relF0;
         int    relF0Age;
         int    relLeft;
+        // Release Pitch Continuation, as it stood when the frame finished
+        bool   relContActive;
+        int    relContLeft;
+        float  relContRho;
     };
     std::vector<StateLogRow> stateLog;
 #endif
@@ -1309,6 +1313,7 @@ private:
         // then stands until the next analysis frame, which is exactly the
         // span of grains it has to cover.
         relContActive = false;
+        relContRho    = 0.0f;
         const int effMaxLag = effMaxLagCur;
         // The frame this call analyses, and its centre. Every release
         // decision is booked against an OUTPUT position derived from this,
@@ -1354,6 +1359,8 @@ private:
             onState = OnsetState::voice;
             relArmed = false;
             relSuspend = false;      // a new voiced stretch clears the latch
+            relContLeft = 0;         // back in VOICE: nothing to continue
+            relContActive = false;
         }
         else switch (onState)
         {
@@ -1363,6 +1370,14 @@ private:
                 if (curP > 2.0f) { relF0 = (float) (fs / curP); relF0Age = 0; }
                 onState = OnsetState::release;
                 relLeft = kReleaseMax;
+                // Release Pitch Continuation arms HERE and nowhere else: this
+                // is the actual VOICE -> RELEASE edge. Arming it wherever a
+                // voiced frame was followed by a failed one -- which is what
+                // v0.63.0 did -- also fires in the middle of a phrase, and
+                // measurement found it changing the 250-50 ms BEFORE the
+                // ending by up to 2.9 dB and taking 4-6 dB out of ordinary
+                // endings.
+                relContLeft = kRelContMax;
                 break;
             case OnsetState::release:
                 // A release decays. If the level turns round and climbs, this
@@ -1372,9 +1387,9 @@ private:
                 // and the onset cut stopped covering them: measured, p95 went
                 // -6.2 -> -3.7 dB and time over 0 dB 50 -> 80 ms.
                 if (zcr < 0.12f && energy > 1.3 * preE)
-                { onState = OnsetState::preLock; relArmed = true; }
+                { onState = OnsetState::preLock; relArmed = true; relContLeft = 0; }
                 else if (energy < 0.06 * lastVoicedEnergy || zcr >= 0.12f || --relLeft <= 0)
-                { onState = OnsetState::armed; relArmed = true; }
+                { onState = OnsetState::armed; relArmed = true; relContLeft = 0; }
                 break;
             case OnsetState::armed:
                 if (looksVoiced) onState = OnsetState::preLock;
@@ -1424,9 +1439,25 @@ private:
                 pushRelEvent (src + D, want, relF0, relCutWanted, want > 0.5f ? 1 : 2, src);
         }
 #ifdef PSOLA_DETECT_LOG
-        stateLog.push_back ({ (double) anchor / fs, (int) onState, voiced, relActive,
-                              relTarget, energy / (double) kDetN, zcr, relF0, relF0Age,
-                              relLeft });
+        // Pushed on the way OUT, not here: the continuation gate sits far
+        // below and behind several early returns, and a row written now would
+        // report it as never having fired. Same idiom as CentreKeeper above.
+        struct StateKeeper
+        {
+            std::vector<StateLogRow>& log;
+            StateLogRow row;
+            const bool*  actP;  const int* leftP;  const float* rhoP;
+            ~StateKeeper()
+            {
+                row.relContActive = *actP;  row.relContLeft = *leftP;
+                row.relContRho    = *rhoP;
+                log.push_back (row);
+            }
+        } stateKeeper { stateLog,
+                        { (double) anchor / fs, (int) onState, voiced, relActive,
+                          relTarget, energy / (double) kDetN, zcr, relF0, relF0Age,
+                          relLeft, false, 0, 0.0f },
+                        &relContActive, &relContLeft, &relContRho };
 #endif
         if (energy / kDetN < 1.0e-8)
         {
@@ -1573,9 +1604,12 @@ private:
             //
             // `voiced` itself is left false throughout. The state machine
             // above has to keep seeing the ending it just detected.
-            if (relContOn)
+            // Armed only by the VOICE -> RELEASE edge above, and only usable
+            // while the state machine still says RELEASE. Both halves matter:
+            // without the edge it arms mid-phrase, without the state test it
+            // keeps running after the machine has moved on.
+            if (relContOn && onState == OnsetState::release)
             {
-                if (voiced) relContLeft = kRelContMax;   // arm on the drop only
                 if (relContLeft > 0 && curP > 2.0f)
                 {
                     // rho is the right test HERE even though it is the wrong
@@ -1590,11 +1624,14 @@ private:
                                           && lag > 0.0f
                                           && zcr < 0.12f
                                           && energy > kRelContE * lastVoicedEnergy;
+                    relContRho = rho;
                     if (stillAVowel) { relContActive = true; --relContLeft; }
-                    else             relContLeft = 0;    // breath, or gone: stop at once
+                    // breath, gone quiet, or the period has left the signal:
+                    // stop at once rather than spend the remaining frames
+                    else { relContLeft = 0; relContActive = false; }
                 }
             }
-            else relContLeft = 0;
+            else { relContLeft = 0; relContActive = false; }
 
             voiced = false;
             holdCount = 0;
@@ -3055,6 +3092,7 @@ private:
     // grain path reads; it is deliberately NOT `voiced`.
     bool    relContOn = false, relContActive = false;
     int     relContLeft = 0;
+    float   relContRho = 0.0f;      // last correlation the gate saw (log only)
     static constexpr int   kRelContMax = 3;      // detection frames
     static constexpr float kRelContRho = 0.55f;  // periodicity still present
     static constexpr double kRelContE  = 0.02;   // of the last voiced frame

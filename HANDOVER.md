@@ -1,6 +1,6 @@
 # VoxMorph 開発引き継ぎ書 (AIセッション用)
 
-最終更新: v0.63.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+最終更新: v0.63.1 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
 
 ## ⚠ いま保留中のこと(2026-08-23 時点)
 
@@ -124,6 +124,18 @@ pitch, formant, consonant, f1shift/f1gain/f2shift/f2gain/f3shift/f3gain, resonan
 - **v0.22.1: グレイン経路A/B実験フック+実験レポート**。低音+12stゴーストの系統実験(詳細=`GRAIN_AB_REPORT.md`)。結論: ①グレイン幅は主因でない(現行適応則がほぼ最適、0.5Pでも+1.5dB/body-13%) ②GCIは無関係(ONでむしろ悪化) ③再利用パターンの乱れとghostが強相関(-0.84) ④**可聴ゴーストの主因は有声/無声判定**: 入力の周期倍加区間(53Hz<通常モード下限60Hz)と減衰テールが無声判定→無声経路はピッチ変換しないため旧ピッチ素通し。**Low Voice Mode ONで解消方向**(+blend/avgで総合-26.9dB)。実験フック(Params: grainHalfP/grainBlend/grainAvg、全て既定オフ=bit-identical、UI非公開)と PSOLA_GRAIN_LOG(コンパイル時計測、プラグイン非影響)を追加。grainBlend=分数位置パルスクロスフェード(全シフトで艶↑・AM半減・middle ghost -48→-51dB)は実声試聴後に既定化を検討
 - **v0.22.0: Natural Air v2 スペクトルクリーンアップ(Phase 2先行)**。ユーザー実録(KITUNE、44.1kHz、+12st)で切り分け: middleレンジはair分離段階のF0周期漏れ(air完全オフ比+4.8dB)、**lowレンジのゴースト(-21.9dB)はair完全オフでも同値=グレイン再合成経路由来(+12stではグレイン幅が入力1周期を超え、奇数次入力倍音が出力倍音の中間に残る)で本件では未解決・別課題**。対策(ユーザー指示の方式2を採用): noiseBufは出力までDサンプル遅延の余裕があるため、1024点FFT/hop512/周期Hann OLA(ユニティ再構成)を**追加レイテンシゼロ**で挿入し(processAirFx)、有声時に入力F0整数倍近傍(6kHz以下のみ、幅±max(1, 2%C)を間隔の35%でキャップ)のビンを倍音間フロア(隣接中点magの小さい方×1.4)へクランプ。>6kHzは不変=**Air Shine完全維持**。f0<~130Hz(倍音間隔<3bin)はクランプ無効(低域はlowCons/クレストガードが担当)。Low Latencyモード(D<窓長)は従来どおり生バイパス+airFxHopは追従のみ。方式1(定常母音でBand0-2に上限)はairband=4000代理で比較→ゴースト低減は同等(-48.0 vs -47.8)だが中低域エアを構造的に失うため**不採用**。実測(KITUNE_middle入力をエンジン通し、+12st): air経路ghost -43.2→**-47.8dB**(air0=-48.0と一致)、6-16k・Shine特性・レベル不変。offline_testに+12st持続母音ゴースト回帰(ghostDb、fftForViz流用)追加。CPUオフライン代理: v2計1.90%(legacy 0.94%、クリーンアップ分+0.12%)。※ユーザー音声ファイルはローカル解析のみ、リポジトリ非収載
 - **v0.21.0: 低音ゴースト修正 + Air Shine**。ユーザー実声評価(v0.20.0): ウィスパー良好・ビブラート/グライドの中域ゴースト大幅改善、ただし**低い「あー」持続で旧ピッチゴースト**、高域の抜けはさらに強化したい。①原因=period doubling/交互周期/軽いフライの倍音漏れは**2Pで相関しPでは弱い**ため非周期と誤認(offline再現: サブハーモニック-15%でb1のkeepが0.99まで上昇)。対策: 漏れ判定の候補ラグを{P, 2P, P/2}に拡張(各±2%、ストライド2+±1精密化、分母エネルギーはprefix和でO(1))。②さらに**クレストファクタガード**: ランダム周期ジッタのパルス残差は「どのラグでも無相関=技術的には非周期」だが旧ピッチに聴こえる。息ノイズ(ガウス的、crest~3.5)に対しパルス残差はcrest≫6で明確分離→crest4.5-7でkeepをフェードアウト(90Hz定常のrel diff 0.042→0.006)。③低F0(<130Hz)ではb0/b1のkeep上昇レートを減速(lowCons)。検証: サブハーモニックb1 keep 0.99→0.14、全既存回帰PASS維持。**Air Shine(airshineパラメータ、0〜6dB、既定0)**: v2専用、最上段バンド(>6kHz)の**noiseBuf再加算ゲインのみ**を持ち上げる(harmBuf側の減算・中低域は不変)。breathy実測: +6dBで6-16k帯域比0.0176→0.0291、1-4k・RMSはほぼ不変。CPUオフライン代理計測: legacy 0.97%→v2 1.78%(+0.8%/コア)
+
+- **v0.63.1: Continuationの武装を本物の `VOICE → RELEASE` 遷移だけに限定(ChatGPT検証ゲート不合格を受けた1修正)**。**Repair OFF は bitexact 維持**
+  - **v0.63.0 は不合格**。方向性は維持だが「RELEASE直後のみ」という必須条件をコードが満たしていなかった。非confidence分岐の武装が `if (voiced) relContLeft = kRelContMax;` だけで、**`onState == release` の条件が無かった**。結果、句中でも voiced だったフレームの直後にYINが失敗すれば武装していた
+    - 実害(ChatGPT解析): **語尾の250〜50ms前**が B1−B0 で 60-140Hz -2.94〜+2.57dB / 600Hz-5k -1.52〜+0.59dB と動いた(語尾前は実質不変が条件)。**通常語尾**も 30〜80ms で 150-600Hz が -4.21dB / -6.57dB。目標0dB以下に届いたのは問題3語尾中1件のみ。クリックだけは問題なし
+  - **修正(指示された4点のみ)**: ①非confidence分岐の `if (voiced) relContLeft = ...` を削除 ②`case OnsetState::voice:` の `VOICE → RELEASE` 遷移でだけ `relContLeft = kRelContMax` ③非confidence分岐に `onState == OnsetState::release` を必須条件として追加 ④VOICEへ復帰・ARMED/PRE_LOCKへ移行・高ZCR・rho低下・エネルギー低下で `relContLeft = 0` と `relContActive = false`
+  - **閾値は変更していない**(rho 0.55 / energy 2% / 最大3フレーム)。シェルフ0・Cadence OFF・Pitch +9・Formant +2 も維持
+  - **状態ログに3列追加**(`relContActive` / `relContLeft` / `relContRho`)。**継続判定は複数の早期returnより後ろにある**ので、行を積む位置を「フレーム終了時」へ移した(`StateKeeper`、既存の `CentreKeeper` と同じ書き方)。**従来位置のままだと継続が常にfalseで記録される**
+  - **結果**: 継続の発火は110秒で 234 → **158チャンク**に減少。ログ上、発火はすべて `state=1`(RELEASE)・`voicedRead=0`・`relActive=1`。ピークは B1 0.555 → **0.533**(B0 0.534 を超えなくなった)
+  - **6イベント別の継続フレーム数**: worst1(90.24s) 0 / worst2(26.29s) 0 / worst3(60.38s) 2 / ordinary4(13.04s) 5 / ordinary5(11.72s) 0 / ordinary6(43.98s) 0。**問題語尾の2件では継続が全く発火していない**。ChatGPTが予告した「最初のconfidence脱落フレームを変換できない可能性」に該当しうるが、**別方式を足す理由にはしない**(指示どおり)。効果開始が遅すぎるとChatGPTが判断した場合のみ、次段階で未出力領域のrelease backfillを検討する
+  - **最小検証のみ**: ビルド / Release probe 1回(誤検出0・見逃し0・句中0.00dB) / `offline_test` 1回 FAIL 0 / `bitexact` 1回 PASS / NaN 0
+  - **別件として記録済み(今回は混ぜない)**: Release Repair OFF時のキュー overflow 20。B0/B1差の原因ではないが、正式採用前に直すべき潜在バグ。Pitch Continuationの合否が決まった後の独立修正とする
+  - **成果物**: `VoxMorph-Claude-Exchange/deliveries/2026-08-23_v0.63.1_release-pitch-continuation-armfix/`。**ChatGPT再検証待ちで停止**
 
 - **v0.63.0: Release Pitch Continuation(BETA候補、engine Paramsのみ・APVTS未登録・既定OFF)**。ChatGPT指示書 `2026-08-23_onset-release-master-status-and-next-step.md` の1実装。**Repair OFF は v0.62.3 と bitexact**
   - **ChatGPTの判定を受けた現在地**: 語頭G4=正式採用済み / **Analysis Cadence=不採用**(語頭60-140Hzが診断22件で中央値+2.92dB悪化。BETA既定OFFのまま) / 語尾シェルフ0.35=未達(問題語尾の1つで150-600Hzが-5.19dB、別の箇所では処理後も60-140Hzが+2.58dB優勢)
