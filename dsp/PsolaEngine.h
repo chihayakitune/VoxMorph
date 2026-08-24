@@ -472,8 +472,10 @@ public:
         relShelfSm  = relShelfAmt;   // no ramp-in on the first phrase after a reset
         relShelfSmK = (float) (1.0 - std::exp (-1.0 / (0.04 * fs)));
         relQN = 0;  prevFrameCenter = 0;  lastEmitted = 0;
-        relClampFrom = relClampTo = 0;
+        relPermitFrom = relPermitUntil = 0;
         relClampEnv = 0.0f;
+        relGateELo = relGateEBody = 0.0f;
+        relGateA = (float) (1.0 - std::exp (-1.0 / (kRelGateSmooth * fs)));
         relClampG   = std::pow (10.0f, kRelClampDb / 20.0f);
         relClampAtk = (float) (1.0 - std::exp (-1.0 / (kRelClampAtk * fs)));
         relClampRel = (float) (1.0 - std::exp (-1.0 / (kRelClampRel * fs)));
@@ -623,6 +625,12 @@ public:
         double clampFrom, clampTo;
     };
     std::vector<StateLogRow> stateLog;
+
+    // Every stretch the Release Low-Band Clamp's symptom gate actually held
+    // open, in OUTPUT seconds. The gate is decided per sample, so it cannot
+    // be carried on the per-frame rows.
+    struct ClampSpan { double from, to; };
+    std::vector<ClampSpan> clampSpans;
 #endif
 
 #ifdef PSOLA_GRAIN_LOG
@@ -1205,13 +1213,37 @@ public:
 
             if (relClampOn)
             {
-                // An absolute output window, so it lands on the same samples
-                // whatever the host buffer is. Attack is short enough to be
-                // inside the 0-30 ms the criteria measure; release is long
-                // enough that the band comes back without a step.
-                const bool inWin = oi >= relClampFrom && oi < relClampTo;
-                relClampEnv += (inWin ? relClampAtk : relClampRel)
-                             * ((inWin ? 1.0f : 0.0f) - relClampEnv);
+                // Measured on `wet` as it stands BEFORE the clamp. Tapping
+                // the clamped signal instead would shut the gate the moment
+                // it started working.
+                float lo = wet, bo = wet;
+                for (int k = 0; k < 2; ++k)
+                { lo = relGateLo[k] (lo);  bo = relGateBody[k] (bo); }
+                relGateELo   += relGateA * (lo * lo - relGateELo);
+                relGateEBody += relGateA * (bo * bo - relGateEBody);
+
+                // The whole decision: inside a plausible ending, is the low
+                // band actually above the body? Both halves are needed --
+                // the ratio alone would fire inside a sustained low vowel,
+                // and the permission alone is what put the previous window
+                // 197 ms off the symptom.
+                const bool permitted = oi >= relPermitFrom && oi < relPermitUntil;
+                const bool symptom   = relGateELo > relGateEBody;
+                const float target   = (permitted && symptom) ? 1.0f : 0.0f;
+#ifdef PSOLA_DETECT_LOG
+                {
+                    const bool open = target > 0.5f;
+                    if (open && ! relGateWasOpen)
+                        clampSpans.push_back ({ (double) oi / fs, (double) oi / fs });
+                    else if (! open && relGateWasOpen && ! clampSpans.empty())
+                        clampSpans.back().to = (double) oi / fs;
+                    else if (open && ! clampSpans.empty())
+                        clampSpans.back().to = (double) oi / fs;
+                    relGateWasOpen = open;
+                }
+#endif
+                relClampEnv += (target > relClampEnv ? relClampAtk : relClampRel)
+                             * (target - relClampEnv);
                 wet = relClampStage (wet, relClampEnv);
             }
 
@@ -1419,6 +1451,40 @@ private:
             --preHold;
         preLock = preHold > 0;
 
+        // ---- Release Low-Band Clamp: coarse permission ----------------
+        // Not the decision -- the decision is the symptom test in the output
+        // loop. This only says where an ending could be, and it deliberately
+        // opens BEFORE `voiced` is confirmed false: worst 2's symptom starts
+        // 27 ms ahead of the drop, so a permission that waits for the drop
+        // cannot cover the window it is judged on. A falling frame while
+        // still voiced is enough to open it.
+        if (relClampOn)
+        {
+            // The base is the state machine: not voiced means RELEASE, ARMED
+            // or PRE_LOCK, which is where an ending lives.
+            //
+            // The extension exists for one measured reason. worst 2's symptom
+            // starts 27 ms BEFORE the detector confirms the drop, so a
+            // permission that waits for it cannot cover the window the result
+            // is judged on. But "still voiced" on its own is far too wide --
+            // tried, and the gate opened 921 times across the take and pulled
+            // a decibel off the peak, because energy falls between frames all
+            // through ordinary speech. What distinguishes the run-out of a
+            // phrase is that the level has left the phrase's OWN level, so
+            // that is the test: half of lastVoicedEnergy, one value, not swept.
+            const bool inDecay   = energy < kRelPermitDecay * lastVoicedEnergy;
+            const bool recovered = voiced && ! inDecay;   // clearly going again
+            if (recovered)
+                relPermitUntil = 0;
+            else if (frameCenter + D >= relPermitUntil && (! voiced || inDecay))
+            {
+                relPermitFrom  = frameCenter + D;
+                relPermitUntil = relPermitFrom + (int64_t) (kRelPermitSec * fs);
+                relClampLogFrom = (double) relPermitFrom / fs;
+                relClampLogTo   = (double) relPermitUntil / fs;
+            }
+        }
+
         // release-side processing, and the notch's own gate
         relActive = (onState == OnsetState::release);
         {
@@ -1472,7 +1538,7 @@ private:
             // only one a synthetic test ever produces -- never counted as a
             // preceding unvoiced stretch and never backfilled.
             // below the absolute energy floor: nothing left to hold down
-            relClampTo = 0;
+            relPermitUntil = 0;
             voiced = false; holdCount = 0; lastGci = -1; pitchConf = 0.0f;
             preLock = false; preHold = 0;
             if (unvoicedRun < 1000) ++unvoicedRun;
@@ -1613,14 +1679,6 @@ private:
             // CENTRE plus the lookahead. The frame END is effMaxLag + kDetN/2
             // later, which at 44.1 kHz is 28.3 ms -- the whole of the 0-30 ms
             // the pass criteria are measured over.
-            if (relClampOn && voiced)
-            {
-                relClampFrom    = frameCenter + D;
-                relClampTo      = relClampFrom + (int64_t) (kRelClampSec * fs);
-                relClampLogFrom = (double) relClampFrom / fs;
-                relClampLogTo   = (double) relClampTo / fs;
-            }
-
             voiced = false;
             holdCount = 0;
             lastGci = -1;
@@ -1726,9 +1784,7 @@ private:
         if (backfillOn && ! voiced && unvoicedRun >= 3 && (! relRepairOn || relArmed))
             backfillPending = true;
         unvoicedRun = 0;
-        // The voice is back: end the window now rather than hold the band
-        // down over a sound that has started again.
-        relClampTo = 0;
+
         curP  = voiced ? smooth * curP + (1.0f - smooth) * newP : newP;
         voiced = true;
         dlPush (0);
@@ -2975,8 +3031,45 @@ private:
     // 4th-order Linkwitz-Riley at kRelClampFc: two identical Butterworth
     // sections per branch. Built once in prepare -- the corner is fixed, so
     // nothing here runs on the audio thread.
+    struct Biquad
+    {
+        float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
+        float z1 = 0.0f, z2 = 0.0f;                     // transposed direct II
+        inline float operator() (float x)
+        {
+            const float y = b0 * x + z1;
+            z1 = b1 * x - a1 * y + z2 + 1.0e-25f;       // denormal guard
+            z2 = b2 * x - a2 * y;
+            return y;
+        }
+        void reset() { z1 = z2 = 0.0f; }
+    };
+
+    // One Butterworth 2nd-order section. `high` selects high-pass.
+    Biquad makeButter (double fc, bool high) const
+    {
+        const double w0 = 2.0 * M_PI * fc / fs;
+        const double cw = std::cos (w0), sw = std::sin (w0);
+        const double alpha = sw / (2.0 * 0.70710678);
+        const double a0 = 1.0 + alpha;
+        Biquad q;
+        q.a1 = (float) (-2.0 * cw / a0);
+        q.a2 = (float) ((1.0 - alpha) / a0);
+        if (high) { q.b0 = (float) (((1.0 + cw) / 2.0) / a0);
+                    q.b1 = (float) (-(1.0 + cw) / a0);  q.b2 = q.b0; }
+        else      { q.b0 = (float) (((1.0 - cw) / 2.0) / a0);
+                    q.b1 = (float) ((1.0 - cw) / a0);   q.b2 = q.b0; }
+        return q;
+    }
+
     void buildRelClamp()
     {
+        // the gate's two measurement band-passes, one section each end
+        relGateLo[0]   = makeButter (60.0,  true);
+        relGateLo[1]   = makeButter (140.0, false);
+        relGateBody[0] = makeButter (150.0, true);
+        relGateBody[1] = makeButter (600.0, false);
+
         const double w0 = 2.0 * M_PI * (double) kRelClampFc / fs;
         const double cw = std::cos (w0), sw = std::sin (w0);
         const double alpha = sw / (2.0 * 0.70710678);      // Butterworth Q
@@ -3116,30 +3209,49 @@ private:
     // sections per branch. LP4 + HP4 is flat in magnitude, so scaling the low
     // branch alone gives a clean 24 dB/oct shelf instead of the gentle slope
     // a one-pole subtraction would leave across the voice body.
-    struct Biquad
-    {
-        float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
-        float z1 = 0.0f, z2 = 0.0f;                     // transposed direct II
-        inline float operator() (float x)
-        {
-            const float y = b0 * x + z1;
-            z1 = b1 * x - a1 * y + z2 + 1.0e-25f;       // denormal guard
-            z2 = b2 * x - a2 * y;
-            return y;
-        }
-        void reset() { z1 = z2 = 0.0f; }
-    };
     bool    relClampOn = false;
-    int64_t relClampFrom = 0, relClampTo = 0;   // OUTPUT positions
     float   relClampEnv = 0.0f, relClampAtk = 0.0f, relClampRel = 0.0f;
     float   relClampG = 1.0f;
     Biquad  relClampLp[2], relClampHp[2];
     static constexpr float  kRelClampFc  = 150.0f;   // crossover
     static constexpr float  kRelClampDb  = -9.0f;    // low branch
-    static constexpr double kRelClampSec = 0.080;    // window
     static constexpr double kRelClampAtk = 0.003;
     static constexpr double kRelClampRel = 0.030;
+
+    // ---- symptom gate ---------------------------------------------------
+    // What decides whether the clamp is open is no longer a fixed window from
+    // the voicing drop. That window was right for one ending out of three and
+    // 197 ms early for another, because the detector's first `voiced` drop is
+    // not the same instant as the audible ending. So the gate watches the
+    // symptom itself: 60-140 Hz standing above 150-600 Hz in the output.
+    //
+    // The measurement taps the signal BEFORE the clamp. Reading it after
+    // would close the gate as soon as the clamp worked, and the two would
+    // chase each other.
+    Biquad  relGateLo[2], relGateBody[2];   // 60-140 and 150-600 band-passes
+    float   relGateELo = 0.0f, relGateEBody = 0.0f, relGateA = 0.0f;
+    // Coarse permission: the region a real ending can be in. Wide on purpose
+    // -- 250 ms, enough to cover the worst measured offset -- because the
+    // narrow decision is the symptom test, not this.
+    int64_t relPermitFrom = 0, relPermitUntil = 0;
+    // 10 ms. Two values were measured, and this is the one that keeps the
+    // side-effect criteria:
+    //   10 ms  the ratio still carries the phrase body when the ending
+    //          starts, so the gate opens 40-62 ms late on three of the six
+    //          endings -- but 600 Hz-5 kHz stays inside 0.4 dB and no body
+    //          loss exceeds 0.9 dB.
+    //    3 ms  fast enough to open in the window, but the ratio then flips
+    //          continuously: 2755 openings across the take instead of 907,
+    //          and the constant re-ramping put 600 Hz-5 kHz 2.9 dB out, well
+    //          past the 0.5 dB bar.
+    // Not swept further.
+    static constexpr double kRelGateSmooth = 0.010;
+    static constexpr double kRelPermitSec   = 0.250;  // upper bound
+    static constexpr double kRelPermitDecay = 0.50;   // of the phrase's own level
     double  relClampLogFrom = 0.0, relClampLogTo = 0.0;
+#ifdef PSOLA_DETECT_LOG
+    bool    relGateWasOpen = false;
+#endif
 
     float   relShelfAmt = 0.0f;
     // Release Strength, dezippered. The depth is read on EVERY sample inside

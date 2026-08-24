@@ -125,6 +125,7 @@ static std::vector<Phrase> findPhrases (const std::vector<float>& in, double fs)
 static constexpr int64_t kLookahead = 2048;
 
 struct Result { std::vector<float> out; std::vector<PsolaEngine::StateLogRow> st;
+                std::vector<PsolaEngine::ClampSpan> spans;
                 int late, dropped, overflow; };
 
 static Result render (const std::vector<float>& in, double fs, bool continuation)
@@ -141,7 +142,7 @@ static Result render (const std::vector<float>& in, double fs, bool continuation
     Result r;  r.out.assign (in.size(), 0.0f);
     for (size_t i = 0; i < in.size(); i += 256)
         e.process (in.data() + i, r.out.data() + i, (int) std::min ((size_t) 256, in.size() - i));
-    r.st = e.stateLog;
+    r.st = e.stateLog;  r.spans = e.clampSpans;
     r.late = e.releaseLateEvents(); r.dropped = e.releaseDropped(); r.overflow = e.releaseOverflow();
     return r;
 }
@@ -218,11 +219,7 @@ int main (int argc, char** argv)
     std::printf ("queue B1: late %d dropped %d overflow %d\n",
                  b1.late, b1.dropped, b1.overflow);
 
-    {
-        int armed = 0;
-        for (const auto& r : b1.st) if (r.clampTo > 0.0) ++armed;
-        std::printf ("clamp armed %d times\n", armed);
-    }
+    std::printf ("symptom gate opened %zu times\n", b1.spans.size());
 
     const auto phrases = findPhrases (in, fs);
     double speakerF0 = 150.0;
@@ -318,15 +315,19 @@ int main (int argc, char** argv)
                            "b0_600_5k,b1_600_5k,d_600_5k,"
                            "b0_lowMinusBody,b1_lowMinusBody,d_lowMinusBody,"
                            "b0_rms_dbfs,b1_rms_dbfs,d_rms,"
-                           "clamp_from_s,clamp_to_s\n");
+                           "gate_from_s,gate_to_s\n");
         for (size_t i = 0; i < pick.size(); ++i)
         {
             const int64_t e0 = pick[i].off + kLookahead;
             // the clamp window that belongs to this ending, from the log
+            // the gate openings that touch this ending's 0-80 ms window
             double cf = 0.0, ct = 0.0;
-            for (const auto& r : b1.st)
-                if (r.clampTo > 0.0 && std::fabs (r.clampFrom - (double) e0 / fs) < 0.20)
-                { cf = r.clampFrom; ct = r.clampTo; }
+            {
+                const double w0 = (double) e0 / fs, w1 = w0 + 0.080;
+                for (const auto& sp : b1.spans)
+                    if (sp.to > w0 - 0.050 && sp.from < w1)
+                    { if (cf == 0.0) cf = sp.from;  ct = sp.to; }
+            }
             for (double win : { 0.030, 0.080 })
             {
                 const int n = (int) (fs * win);
@@ -355,7 +356,27 @@ int main (int argc, char** argv)
         }
         std::fclose (bf2);
     }
-    std::printf ("wrote logs/events.csv, logs/state_B1.csv and logs/bands.csv\n");
+    // Where the symptom gate actually held open, on the output axis, and
+    // which ending each opening belongs to.
+    if (FILE* gf = std::fopen ((dir + "/logs/gate.csv").c_str(), "w"))
+    {
+        std::fprintf (gf, "from_s,to_s,length_ms,nearest_event,rel_to_output_end_ms\n");
+        for (const auto& sp : b1.spans)
+        {
+            int best = -1;  double bestD = 1e9;
+            for (size_t i = 0; i < pick.size(); ++i)
+            {
+                const double oe = (double) (pick[i].off + kLookahead) / fs;
+                if (std::fabs (sp.from - oe) < bestD) { bestD = std::fabs (sp.from - oe); best = (int) i + 1; }
+            }
+            const double oe = best > 0 ? (double) (pick[(size_t) best - 1].off + kLookahead) / fs : 0.0;
+            std::fprintf (gf, "%.4f,%.4f,%.1f,%d,%+.1f\n",
+                          sp.from, sp.to, (sp.to - sp.from) * 1000.0, best,
+                          (sp.from - oe) * 1000.0);
+        }
+        std::fclose (gf);
+    }
+    std::printf ("wrote logs/events.csv, logs/state_B1.csv, logs/bands.csv and logs/gate.csv\n");
     std::printf ("speaker f0 %.0f Hz -> %.0f Hz, lookahead %lld samples (%.1f ms)\n",
                  speakerF0, f0out, (long long) kLookahead, 1000.0 * kLookahead / fs);
     return bad ? 1 : 0;
