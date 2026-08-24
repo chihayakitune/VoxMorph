@@ -126,6 +126,7 @@ static constexpr int64_t kLookahead = 2048;
 
 struct Result { std::vector<float> out; std::vector<PsolaEngine::StateLogRow> st;
                 std::vector<PsolaEngine::ClampSpan> spans;
+                std::vector<PsolaEngine::PermitSpan> permits;
                 int late, dropped, overflow; };
 
 static Result render (const std::vector<float>& in, double fs, bool continuation)
@@ -142,7 +143,7 @@ static Result render (const std::vector<float>& in, double fs, bool continuation
     Result r;  r.out.assign (in.size(), 0.0f);
     for (size_t i = 0; i < in.size(); i += 256)
         e.process (in.data() + i, r.out.data() + i, (int) std::min ((size_t) 256, in.size() - i));
-    r.st = e.stateLog;  r.spans = e.clampSpans;
+    r.st = e.stateLog;  r.spans = e.clampSpans;  r.permits = e.permitSpans;
     r.late = e.releaseLateEvents(); r.dropped = e.releaseDropped(); r.overflow = e.releaseOverflow();
     return r;
 }
@@ -219,7 +220,21 @@ int main (int argc, char** argv)
     std::printf ("queue B1: late %d dropped %d overflow %d\n",
                  b1.late, b1.dropped, b1.overflow);
 
-    std::printf ("symptom gate opened %zu times\n", b1.spans.size());
+    std::printf ("symptom gate opened %zu times, %zu permission grants\n",
+                 b1.spans.size(), b1.permits.size());
+    {
+        // the two structural conditions, checked here rather than left to the
+        // reader: at most one grant per re-arm, none longer than the cap
+        int    worstIdx = 0;  double worstLen = 0.0;
+        for (const auto& q : b1.permits)
+        {
+            worstIdx = std::max (worstIdx, q.indexSinceRearm);
+            worstLen = std::max (worstLen, q.to - q.from);
+        }
+        std::printf ("permission: max %d grant(s) per VOICE recovery, longest %.1f ms  %s\n",
+                     worstIdx, worstLen * 1000.0,
+                     (worstIdx <= 1 && worstLen <= 0.2505) ? "PASS" : "FAIL");
+    }
 
     const auto phrases = findPhrases (in, fs);
     double speakerF0 = 150.0;
@@ -376,7 +391,26 @@ int main (int argc, char** argv)
         }
         std::fclose (gf);
     }
-    std::printf ("wrote logs/events.csv, logs/state_B1.csv, logs/bands.csv and logs/gate.csv\n");
+    if (FILE* pf = std::fopen ((dir + "/logs/permits.csv").c_str(), "w"))
+    {
+        std::fprintf (pf, "from_s,to_s,length_ms,index_since_rearm,"
+                          "nearest_event,rel_to_output_end_ms\n");
+        for (const auto& q : b1.permits)
+        {
+            int best = -1;  double bestD = 1e9;
+            for (size_t i = 0; i < pick.size(); ++i)
+            {
+                const double oe = (double) (pick[i].off + kLookahead) / fs;
+                if (std::fabs (q.from - oe) < bestD) { bestD = std::fabs (q.from - oe); best = (int) i + 1; }
+            }
+            const double oe = best > 0 ? (double) (pick[(size_t) best - 1].off + kLookahead) / fs : 0.0;
+            std::fprintf (pf, "%.4f,%.4f,%.1f,%d,%d,%+.1f\n",
+                          q.from, q.to, (q.to - q.from) * 1000.0, q.indexSinceRearm,
+                          best, (q.from - oe) * 1000.0);
+        }
+        std::fclose (pf);
+    }
+    std::printf ("wrote logs/events.csv, state_B1.csv, bands.csv, gate.csv and permits.csv\n");
     std::printf ("speaker f0 %.0f Hz -> %.0f Hz, lookahead %lld samples (%.1f ms)\n",
                  speakerF0, f0out, (long long) kLookahead, 1000.0 * kLookahead / fs);
     return bad ? 1 : 0;

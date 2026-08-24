@@ -474,8 +474,11 @@ public:
         relQN = 0;  prevFrameCenter = 0;  lastEmitted = 0;
         relPermitFrom = relPermitUntil = 0;
         relClampEnv = 0.0f;
-        relGateELo = relGateEBody = 0.0f;
-        relGateA = (float) (1.0 - std::exp (-1.0 / (kRelGateSmooth * fs)));
+        relGateN = std::max (1, (int) std::lround (kRelGateWin * fs));
+        relGateBufLo.assign ((size_t) relGateN, 0.0f);
+        relGateBufBody.assign ((size_t) relGateN, 0.0f);
+        relGateIdx = 0;  relGateSumLo = relGateSumBody = 0.0;
+        relPermitArmed = true;  relPermitCount = 0;
         relClampG   = std::pow (10.0f, kRelClampDb / 20.0f);
         relClampAtk = (float) (1.0 - std::exp (-1.0 / (kRelClampAtk * fs)));
         relClampRel = (float) (1.0 - std::exp (-1.0 / (kRelClampRel * fs)));
@@ -631,6 +634,12 @@ public:
     // be carried on the per-frame rows.
     struct ClampSpan { double from, to; };
     std::vector<ClampSpan> clampSpans;
+
+    // Every coarse permission grant, and its index since the last clear
+    // return of the voice. The pass condition is that this index never goes
+    // above 1 and no span is longer than the 250 ms cap.
+    struct PermitSpan { double from, to; int indexSinceRearm; };
+    std::vector<PermitSpan> permitSpans;
 #endif
 
 #ifdef PSOLA_GRAIN_LOG
@@ -1219,8 +1228,13 @@ public:
                 float lo = wet, bo = wet;
                 for (int k = 0; k < 2; ++k)
                 { lo = relGateLo[k] (lo);  bo = relGateBody[k] (bo); }
-                relGateELo   += relGateA * (lo * lo - relGateELo);
-                relGateEBody += relGateA * (bo * bo - relGateEBody);
+                // add the new sample, drop the one leaving the window
+                const size_t gi = (size_t) relGateIdx;
+                relGateSumLo   += (double) lo * lo - (double) relGateBufLo[gi];
+                relGateSumBody += (double) bo * bo - (double) relGateBufBody[gi];
+                relGateBufLo[gi]   = lo * lo;
+                relGateBufBody[gi] = bo * bo;
+                if (++relGateIdx >= relGateN) relGateIdx = 0;
 
                 // The whole decision: inside a plausible ending, is the low
                 // band actually above the body? Both halves are needed --
@@ -1228,7 +1242,7 @@ public:
                 // and the permission alone is what put the previous window
                 // 197 ms off the symptom.
                 const bool permitted = oi >= relPermitFrom && oi < relPermitUntil;
-                const bool symptom   = relGateELo > relGateEBody;
+                const bool symptom   = relGateSumLo > relGateSumBody;
                 const float target   = (permitted && symptom) ? 1.0f : 0.0f;
 #ifdef PSOLA_DETECT_LOG
                 {
@@ -1475,14 +1489,26 @@ private:
             const bool inDecay   = energy < kRelPermitDecay * lastVoicedEnergy;
             const bool recovered = voiced && ! inDecay;   // clearly going again
             if (recovered)
-                relPermitUntil = 0;
-            else if (frameCenter + D >= relPermitUntil && (! voiced || inDecay))
+            {
+                closeRelPermit (frameCenter + D);
+                relPermitArmed = true;       // and only here
+                relPermitCount = 0;
+            }
+            else if (relPermitArmed && relPermitUntil == 0 && (! voiced || inDecay))
             {
                 relPermitFrom  = frameCenter + D;
                 relPermitUntil = relPermitFrom + (int64_t) (kRelPermitSec * fs);
+                relPermitArmed = false;      // spent until the voice returns
+                ++relPermitCount;
                 relClampLogFrom = (double) relPermitFrom / fs;
                 relClampLogTo   = (double) relPermitUntil / fs;
+#ifdef PSOLA_DETECT_LOG
+                permitSpans.push_back ({ (double) relPermitFrom / fs,
+                                         (double) relPermitUntil / fs, relPermitCount });
+#endif
             }
+            else if (relPermitUntil > 0 && frameCenter + D >= relPermitUntil)
+                closeRelPermit (relPermitUntil);   // expired; NOT re-armed
         }
 
         // release-side processing, and the notch's own gate
@@ -1537,8 +1563,9 @@ private:
             // phrase after atrue silence -- the commonest case of all, and the
             // only one a synthetic test ever produces -- never counted as a
             // preceding unvoiced stretch and never backfilled.
-            // below the absolute energy floor: nothing left to hold down
-            relPermitUntil = 0;
+            // Below the absolute energy floor: close what is open, but do
+            // NOT re-arm -- a silent frame is not the voice coming back.
+            closeRelPermit (anchor - effMaxLagCur - kDetN / 2 + D);
             voiced = false; holdCount = 0; lastGci = -1; pitchConf = 0.0f;
             preLock = false; preHold = 0;
             if (unvoicedRun < 1000) ++unvoicedRun;
@@ -3045,6 +3072,19 @@ private:
         void reset() { z1 = z2 = 0.0f; }
     };
 
+    // Shut the current permission, recording where it actually ended.
+    // Re-arming is deliberately NOT done here: only a clear return of the
+    // voice does that.
+    void closeRelPermit (int64_t at)
+    {
+        if (relPermitUntil == 0) return;
+#ifdef PSOLA_DETECT_LOG
+        if (! permitSpans.empty())
+            permitSpans.back().to = std::min (permitSpans.back().to, (double) at / fs);
+#endif
+        relPermitUntil = 0;
+    }
+
     // One Butterworth 2nd-order section. `high` selects high-pass.
     Biquad makeButter (double fc, bool high) const
     {
@@ -3229,23 +3269,29 @@ private:
     // would close the gate as soon as the clamp worked, and the two would
     // chase each other.
     Biquad  relGateLo[2], relGateBody[2];   // 60-140 and 150-600 band-passes
-    float   relGateELo = 0.0f, relGateEBody = 0.0f, relGateA = 0.0f;
+    // A FINITE 10 ms window, not an exponential average. The distinction is
+    // the whole of v0.63.5's failure: a one-pole with a 10 ms time constant
+    // does not forget 10 ms ago, it decays towards it, and with the phrase
+    // body sitting 20 dB above the low band the ratio took 62-75 ms to turn
+    // over. A moving sum drops the sample that left the window outright, so
+    // history older than 10 ms has no weight at all.
+    //
+    // Buffers are sized in prepare(); nothing here allocates on the audio
+    // thread.
+    std::vector<float> relGateBufLo, relGateBufBody;
+    int     relGateN = 0, relGateIdx = 0;
+    double  relGateSumLo = 0.0, relGateSumBody = 0.0;
     // Coarse permission: the region a real ending can be in. Wide on purpose
     // -- 250 ms, enough to cover the worst measured offset -- because the
     // narrow decision is the symptom test, not this.
     int64_t relPermitFrom = 0, relPermitUntil = 0;
-    // 10 ms. Two values were measured, and this is the one that keeps the
-    // side-effect criteria:
-    //   10 ms  the ratio still carries the phrase body when the ending
-    //          starts, so the gate opens 40-62 ms late on three of the six
-    //          endings -- but 600 Hz-5 kHz stays inside 0.4 dB and no body
-    //          loss exceeds 0.9 dB.
-    //    3 ms  fast enough to open in the window, but the ratio then flips
-    //          continuously: 2755 openings across the take instead of 907,
-    //          and the constant re-ramping put 600 Hz-5 kHz 2.9 dB out, well
-    //          past the 0.5 dB bar.
-    // Not swept further.
-    static constexpr double kRelGateSmooth = 0.010;
+    // One shot per ending. Once a permission has been spent it cannot be
+    // re-armed by another unvoiced frame -- only by the voice clearly coming
+    // back. Without this the 250 ms cap was a cap on each grant rather than
+    // on the ending, and ordinary 5 collected two back-to-back 235 ms grants.
+    bool    relPermitArmed = true;
+    int     relPermitCount = 0;      // grants since the last re-arm
+    static constexpr double kRelGateWin = 0.010;   // the moving window
     static constexpr double kRelPermitSec   = 0.250;  // upper bound
     static constexpr double kRelPermitDecay = 0.50;   // of the phrase's own level
     double  relClampLogFrom = 0.0, relClampLogTo = 0.0;
