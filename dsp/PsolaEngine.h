@@ -385,30 +385,31 @@ public:
         // combination with anything.
         bool  deterministicCadence = false;
 
-        // Deferred Release Backfill (v0.63.2, BETA -- false = unchanged).
-        // Replaces the live continuation that used to sit behind this flag;
-        // the two are never run together.
+        // Release Low-Band Residual Clamp (v0.63.4, BETA -- false =
+        // unchanged). Replaces the rolling backfill that used to sit behind
+        // this flag; the two are never run together.
         //
-        // The ending shelf treated the symptom and cost 5-6 dB of voice body.
-        // The live continuation treated the cause but could not reach the
-        // frame that matters: the state machine reads the PREVIOUS frame's
-        // voicing, so the first dropped frame is still VOICE and nothing arms
-        // until the one after it. Measured, two of three problem endings were
-        // never touched at all, and because a continued grain moves nextMarkF
-        // the difference did not stay local either.
+        // Three attempts re-pitched the tail and none of them worked. The
+        // last one made it worse where it did fire -- re-rendering 22 short
+        // segments at one frozen period lifted the ending by 14 dB RMS -- and
+        // could not fire at all on the two endings whose tails measure
+        // rho 0.10-0.20, because those tails are friction, not a vowel
+        // carrying on. The three problem endings do not share a cause.
         //
-        // So: do nothing on the first dropped frame except REMEMBER it. If
-        // the next frame confirms the voice really has gone, go back and
-        // re-render the part of that region the host has not been given yet,
-        // at the last stable period. If the voice came straight back, throw
-        // the candidate away and the output is the baseline, sample for
-        // sample.
+        // What they DO share is the symptom: 60-140 Hz sitting above the
+        // 150-600 Hz body. So this stops trying to reconstruct the tail and
+        // just holds that band down for the first 80 ms of an ending. It
+        // touches no decision and no grain: `voiced`, the state machine, the
+        // pitch marks, nextMarkF and lastInMark are all left exactly as they
+        // were, and the only thing that changes is the level of one band of
+        // the finished output.
         //
-        // Three properties make it safe to reach backwards: nothing already
-        // handed over is touched (olaFloor), the join is the same 3 ms cosine
-        // ramp the onset backfill uses with accBuf and normBuf scaled by the
-        // SAME coefficient, and both nextMarkF and lastInMark are put back
-        // where they were so no grid difference survives past the join.
+        // The split is a 4th-order Linkwitz-Riley pair, deliberately not
+        // `dry - LP`: a one-pole at 150 Hz is still only 6 dB down an octave
+        // up, so cutting "the low branch" with one takes the body with it,
+        // which is exactly how the earlier shelf lost 5 dB of voice. LR4 is
+        // 24 dB/oct, so 300 Hz keeps its level, and the two branches sum flat
+        // rather than through a phase difference.
         bool  releasePitchContinuation = false;
     };
 
@@ -471,11 +472,13 @@ public:
         relShelfSm  = relShelfAmt;   // no ramp-in on the first phrase after a reset
         relShelfSmK = (float) (1.0 - std::exp (-1.0 / (0.04 * fs)));
         relQN = 0;  prevFrameCenter = 0;  lastEmitted = 0;
-        relBfCand = false;  relBfRolling = false;  relBfPending = false;
-        relBfSpanActive = false;  relBfResumeIn = 0.0;
-        relBfLogCandC = relBfLogConfC = relBfLogFrom = relBfLogTo = 0.0;
-        relBfLogRho = relBfLogZcr = 0.0f;
-        relBfLogRecovered = relBfLogResumeErr = 0;
+        relClampFrom = relClampTo = 0;
+        relClampEnv = 0.0f;
+        relClampG   = std::pow (10.0f, kRelClampDb / 20.0f);
+        relClampAtk = (float) (1.0 - std::exp (-1.0 / (kRelClampAtk * fs)));
+        relClampRel = (float) (1.0 - std::exp (-1.0 / (kRelClampRel * fs)));
+        buildRelClamp();
+        relClampLogFrom = relClampLogTo = 0.0;
         relLateEvents = 0;  relDropped = 0;  relOverflow = 0;
         relSuspend = false;  relCutWanted = 200.0f;
         onState = OnsetState::armed;  relArmed = true;  relActive = false;
@@ -615,18 +618,9 @@ public:
         float  relF0;
         int    relF0Age;
         int    relLeft;
-        // Rolling Release Backfill, as it stood when the frame finished.
-        // The centres are seconds on the INPUT axis; bfFrom / bfTo are
-        // seconds on the OUTPUT axis (input + the lookahead). bfFrom, bfTo,
-        // bfRecovered and bfResumeErrorSamples are filled in by processChunk
-        // after the re-render, which happens once detectPitch has returned.
-        double bfCandidateCentre;
-        double bfConfirmCentre;
-        float  bfRho;
-        float  bfZcr;
-        double bfFrom, bfTo;
-        int    bfRecovered;
-        int    bfResumeErrorSamples;
+        // Release Low-Band Residual Clamp window, seconds on the OUTPUT axis
+        // (input position + the lookahead). 0 = this frame armed nothing.
+        double clampFrom, clampTo;
     };
     std::vector<StateLogRow> stateLog;
 #endif
@@ -702,7 +696,7 @@ public:
         // Same bypass rule as the rest of the ending work: below about +2 st
         // the untransposed tail IS the wanted sound, so there is nothing to
         // continue.
-        relBfOn        = q.releasePitchContinuation && q.pitchSemi > 2.0f;
+        relClampOn     = q.releasePitchContinuation && q.pitchSemi > 2.0f;
         setDisperse (std::clamp (q.pulseDisperse, 0.0f, 1.0f));
         hiFreq         = (q.hiRangeHz > 20.0f) ? std::clamp (q.hiRangeHz, 100.0f, 600.0f) : 0.0f;
         hiPAmt         = std::clamp (q.hiPitchAmt,   0.0f, 1.0f);
@@ -1109,70 +1103,6 @@ public:
 #endif
         }
 
-        // ---- Rolling Release Backfill: re-render one segment ----------
-        // Runs once per confirmed analysis frame, so a long ending is covered
-        // by a chain of short replacements rather than one 11.6 ms patch.
-        //
-        // The same three protections as the onset backfill, each for the same
-        // reason: olaFloor keeps grains off anything already handed over, the
-        // fade ramp scales accBuf and normBuf by the SAME coefficient so the
-        // join moves in the normalised domain and cannot step the level, and
-        // markResume puts the mark grid back. lastInMark is restored too --
-        // the onset backfill does not need that, but here a difference in it
-        // would keep changing grain phase for the rest of the take.
-        if (relBfPending)
-        {
-            relBfPending = false;
-            relBfLogRecovered = 0;
-            // A previous segment whose grid has not been handed back yet.
-            // Overwriting markResume there would strand the old value and let
-            // the difference escape the segment, which is the failure this
-            // whole mechanism is built to avoid. Skip instead.
-            const bool gridBusy = markResume > 0.0;
-            const int64_t from = std::max (relBfSegFrom, start);
-            const int64_t upto = (int64_t) nextMarkF + houtCapCur;
-            if (! gridBusy && relBfSegP > 2.0f && from < relBfSegTo && from < upto)
-            {
-                const int xf = std::min (fadeN, (int) (houtCapCur / 2));
-                for (int j = 0; j < xf; ++j)
-                {
-                    const float r = 0.5f * (1.0f - std::cos ((float) M_PI * (float) j / (float) xf));
-                    const size_t k = (size_t) ((from + j) & kMask);
-                    accBuf[k]  *= (1.0f - r);
-                    normBuf[k] *= (1.0f - r);
-                    candBuf[k] *= (1.0f - r);
-                }
-                for (int64_t p2 = from + xf; p2 < upto; ++p2)
-                {
-                    const size_t k = (size_t) (p2 & kMask);
-                    accBuf[k] = 0.0f;  normBuf[k] = 0.0f;  candBuf[k] = 0.0f;
-                }
-                markResume    = nextMarkF;      // the grid this interrupted
-                relBfResumeIn = lastInMark;     // and its input-side partner
-                nextMarkF     = (double) from;
-                lastInMark    = (double) (from - D);
-                olaFloor      = from;
-                fadeFrom      = from;
-                fadeLen       = xf;
-                relBfSpanActive = true;
-                relBfSpanEnd    = relBfSegTo;
-                relBfSpanP      = relBfSegP;
-                relBfLogRecovered = (int) (upto - from);
-                relBfLogFrom = (double) from / fs;
-                relBfLogTo   = (double) relBfSegTo / fs;
-#ifdef PSOLA_DETECT_LOG
-                // the confirming frame's row was pushed when detectPitch
-                // returned, before this ran
-                if (! stateLog.empty())
-                {
-                    stateLog.back().bfFrom      = relBfLogFrom;
-                    stateLog.back().bfTo        = relBfLogTo;
-                    stateLog.back().bfRecovered = relBfLogRecovered;
-                }
-#endif
-            }
-        }
-
         // How far ahead grains are laid down.        // How far ahead grains are laid down. Legacy follows the write head,
         // so the horizon takes whatever values the host's chunking gives it
         // -- and a mark that falls just past one host's horizon but inside
@@ -1210,28 +1140,8 @@ public:
                 // stepped forward to avoid a close-spaced pair broke that
                 // (median |diff| 0.027 over 164 joins) and fixed nothing --
                 // the close pair it was invented for did not exist.
-                const double markResumeSaved = markResume;
-                const bool   wasRelease = relBfResumeIn > 0.0;
-                const double wantIn = relBfResumeIn;
                 nextMarkF  = markResume;
                 markResume = 0.0;
-                // Release backfill only: the onset backfill deliberately does
-                // NOT touch lastInMark, and snapping nextMarkF alone is what
-                // makes it bit-identical.
-                if (wasRelease)
-                { lastInMark = wantIn; relBfResumeIn = 0.0; }
-                relBfSpanActive = false;
-                // What actually survives into the rest of the take. Both
-                // halves restored means zero; a non-zero here would say one
-                // of them was forgotten.
-                relBfLogResumeErr = wasRelease
-                    ? (int) (std::llround (nextMarkF - markResumeSaved)
-                             + std::llround (lastInMark - wantIn))
-                    : 0;
-#ifdef PSOLA_DETECT_LOG
-                if (wasRelease && ! stateLog.empty())
-                    stateLog.back().bfResumeErrorSamples = relBfLogResumeErr;
-#endif
             }
         }
 
@@ -1293,6 +1203,18 @@ public:
                 wet = releaseStage (wet, relGain);
             }
 
+            if (relClampOn)
+            {
+                // An absolute output window, so it lands on the same samples
+                // whatever the host buffer is. Attack is short enough to be
+                // inside the 0-30 ms the criteria measure; release is long
+                // enough that the band comes back without a step.
+                const bool inWin = oi >= relClampFrom && oi < relClampTo;
+                relClampEnv += (inWin ? relClampAtk : relClampRel)
+                             * ((inWin ? 1.0f : 0.0f) - relClampEnv);
+                wet = relClampStage (wet, relClampEnv);
+            }
+
             if (preCutAmt > 0.0f)
             {
                 // The depth is the amount times how much of THIS sample came
@@ -1331,9 +1253,9 @@ public:
     // yet, and how many have been. A change waits for a silent stretch, so
     // "I turned it on and nothing changed" is a real state the UI/tests have
     // to be able to see rather than guess at.
-    // Deferred Release Backfill: whether a replacement is currently laying
-    // grains down. Read by the offline harness only.
-    bool continuationActive() const { return relBfSpanActive; }
+    // Release Low-Band Residual Clamp: how far the envelope is open right
+    // now. Read by the offline harness only.
+    float clampEnvelope() const { return relClampEnv; }
 
     bool cadencePending()  const { return detCadenceWanted != detCadence; }
     bool cadenceActive()   const { return detCadence; }
@@ -1407,9 +1329,7 @@ private:
         // by the branch that decides this frame's tail is still a vowel. It
         // then stands until the next analysis frame, which is exactly the
         // span of grains it has to cover.
-        relBfLogCandC = relBfLogConfC = relBfLogFrom = relBfLogTo = 0.0;
-        relBfLogRho = relBfLogZcr = 0.0f;
-        relBfLogRecovered = relBfLogResumeErr = 0;
+        relClampLogFrom = relClampLogTo = 0.0;
         const int effMaxLag = effMaxLagCur;
         // The frame this call analyses, and its centre. Every release
         // decision is booked against an OUTPUT position derived from this,
@@ -1532,19 +1452,17 @@ private:
         {
             std::vector<StateLogRow>& log;
             StateLogRow row;
-            const double* candP;  const double* confP;
-            const float*  rhoP;   const float*  zcrP;
+            const double* fromP;  const double* toP;
             ~StateKeeper()
             {
-                row.bfCandidateCentre = *candP;  row.bfConfirmCentre = *confP;
-                row.bfRho = *rhoP;               row.bfZcr = *zcrP;
+                row.clampFrom = *fromP;  row.clampTo = *toP;
                 log.push_back (row);
             }
         } stateKeeper { stateLog,
                         { (double) anchor / fs, (int) onState, voiced, relActive,
                           relTarget, energy / (double) kDetN, zcr, relF0, relF0Age,
-                          relLeft, 0.0, 0.0, 0.0f, 0.0f, 0.0, 0.0, 0, 0 },
-                        &relBfLogCandC, &relBfLogConfC, &relBfLogRho, &relBfLogZcr };
+                          relLeft, 0.0, 0.0 },
+                        &relClampLogFrom, &relClampLogTo };
 #endif
         if (energy / kDetN < 1.0e-8)
         {
@@ -1553,8 +1471,8 @@ private:
             // phrase after atrue silence -- the commonest case of all, and the
             // only one a synthetic test ever produces -- never counted as a
             // preceding unvoiced stretch and never backfilled.
-            // energy gone: terminate, do not convert silence
-            relBfCand = false;  relBfRolling = false;
+            // below the absolute energy floor: nothing left to hold down
+            relClampTo = 0;
             voiced = false; holdCount = 0; lastGci = -1; pitchConf = 0.0f;
             preLock = false; preHold = 0;
             if (unvoicedRun < 1000) ++unvoicedRun;
@@ -1682,70 +1600,26 @@ private:
                 dlPush (3);
                 return;
             }
-            // ---- Frame-Centered Rolling Deferred Backfill (BETA) ----
+            // ---- Release Low-Band Residual Clamp (BETA) ----
+            // Armed on the frame the voice drops out, and on no other
+            // condition: rho and zero-crossings are deliberately NOT required
+            // here. Two of the three problem endings measure rho 0.10-0.20 --
+            // they are friction, not a vowel carrying on -- and any test that
+            // asks "is this still a vowel" excludes exactly the endings that
+            // need help. Their shared symptom is the low band sitting on top
+            // of the body, and that is what this addresses.
             //
-            // Positions are the ANALYSIS FRAME CENTRE plus the lookahead --
-            // the same correspondence the release queue books against. The
-            // frame END is effMaxLag + kDetN/2 later, and using it put every
-            // replacement 28.3 ms past the sound it was replacing, which is
-            // why the previous attempt changed 30-80 ms and left 0-30 ms
-            // untouched.
-            //
-            // The first non-confident frame only remembers itself: the state
-            // machine reads the PREVIOUS frame's voicing, so this frame is
-            // not classified yet and acting on it would be a guess. From the
-            // next frame on, each analysis frame confirms and re-renders ONE
-            // segment -- the stretch since the last confirmed centre -- for
-            // as long as the period is still measurably there. A single
-            // 11.6 ms replacement cannot cover an ending whose old-pitch leak
-            // runs for a quarter of a second.
-            //
-            // Nothing here writes to `voiced` or to the state machine.
-            if (relBfOn)
+            // The window is an absolute OUTPUT span from the analysis frame's
+            // CENTRE plus the lookahead. The frame END is effMaxLag + kDetN/2
+            // later, which at 44.1 kHz is 28.3 ms -- the whole of the 0-30 ms
+            // the pass criteria are measured over.
+            if (relClampOn && voiced)
             {
-                if (voiced && curP > 2.0f)
-                {
-                    relBfCand       = true;
-                    relBfRolling    = false;
-                    relBfCandCentre = frameCenter;
-                    relBfLastCentre = frameCenter;
-                    relBfCandP      = curP;
-                    relBfLogCandC   = (double) frameCenter / fs;
-                }
-                else if ((relBfCand || relBfRolling) && relBfCandP > 2.0f)
-                {
-                    // bestNormCorr searches +-15 % of curP, and curP is left
-                    // at the last stable period on a failed frame, so this
-                    // asks exactly "is the period the phrase ended on still
-                    // in the signal".
-                    float lag = 0.0f;
-                    const float rho = bestNormCorr (span, &lag);
-                    relBfLogRho = rho;
-                    relBfLogZcr = zcr;
-                    const bool stillAVowel = rho > kRelBfRho
-                                          && lag > 0.0f
-                                          && zcr < kRelBfZcr
-                                          && energy > kRelBfE * lastVoicedEnergy;
-                    if (stillAVowel)
-                    {
-                        relBfPending  = true;
-                        relBfSegFrom  = relBfLastCentre + D;
-                        relBfSegTo    = frameCenter + D;
-                        relBfSegP     = relBfCandP;
-                        relBfLastCentre = frameCenter;
-                        relBfCand     = false;
-                        relBfRolling  = true;
-                        relBfLogConfC = (double) frameCenter / fs;
-                    }
-                    else
-                    {
-                        // rho down, crossings up, or the energy gone: stop at
-                        // once rather than keep converting breath
-                        relBfCand = false;  relBfRolling = false;
-                    }
-                }
+                relClampFrom    = frameCenter + D;
+                relClampTo      = relClampFrom + (int64_t) (kRelClampSec * fs);
+                relClampLogFrom = (double) relClampFrom / fs;
+                relClampLogTo   = (double) relClampTo / fs;
             }
-            else { relBfCand = false;  relBfRolling = false; }
 
             voiced = false;
             holdCount = 0;
@@ -1852,9 +1726,9 @@ private:
         if (backfillOn && ! voiced && unvoicedRun >= 3 && (! relRepairOn || relArmed))
             backfillPending = true;
         unvoicedRun = 0;
-        // The voice is back. Whatever was remembered at the drop was not an
-        // ending, and a run in progress ends here.
-        relBfCand = false;  relBfRolling = false;
+        // The voice is back: end the window now rather than hold the band
+        // down over a sound that has started again.
+        relClampTo = 0;
         curP  = voiced ? smooth * curP + (1.0f - smooth) * newP : newP;
         voiced = true;
         dlPush (0);
@@ -2186,14 +2060,8 @@ private:
     // ---------------- grain placement ----------------
     void placeGrain()
     {
-        // Inside a Deferred Release Backfill replacement the marks are cut as
-        // voiced at the period the phrase ended on, so the tail comes out at
-        // the converted pitch instead of leaking through the unvoiced path at
-        // the speaker's own. The span is bounded by relBfSpanEnd; past it the
-        // ordinary unvoiced path takes over again.
-        const bool  inBf = relBfSpanActive && (int64_t) nextMarkF < relBfSpanEnd;
-        const float P = inBf ? relBfSpanP : curP;
-        const bool  v = voiced || inBf;
+        const float P = curP;
+        const bool  v = voiced;
 
         // High Range guard: blend the shift amounts toward the high-range
         // fractions as the input pitch rises past hiFreq (full one octave up).
@@ -3104,6 +2972,42 @@ private:
         relQ[(size_t) relQN++] = { at, src, target, f0, cut, reason };
     }
 
+    // 4th-order Linkwitz-Riley at kRelClampFc: two identical Butterworth
+    // sections per branch. Built once in prepare -- the corner is fixed, so
+    // nothing here runs on the audio thread.
+    void buildRelClamp()
+    {
+        const double w0 = 2.0 * M_PI * (double) kRelClampFc / fs;
+        const double cw = std::cos (w0), sw = std::sin (w0);
+        const double alpha = sw / (2.0 * 0.70710678);      // Butterworth Q
+        const double a0 = 1.0 + alpha;
+        const float a1 = (float) (-2.0 * cw / a0);
+        const float a2 = (float) ((1.0 - alpha) / a0);
+        const float lb0 = (float) (((1.0 - cw) / 2.0) / a0);
+        const float lb1 = (float) ((1.0 - cw) / a0);
+        const float hb0 = (float) (((1.0 + cw) / 2.0) / a0);
+        const float hb1 = (float) (-(1.0 + cw) / a0);
+        for (int i = 0; i < 2; ++i)
+        {
+            relClampLp[i] = Biquad { lb0, lb1, lb0, a1, a2, 0.0f, 0.0f };
+            relClampHp[i] = Biquad { hb0, hb1, hb0, a1, a2, 0.0f, 0.0f };
+        }
+    }
+
+    // One sample through the clamp. The branches are always filtered, even
+    // while the envelope is shut: letting the states go stale would mean the
+    // next ending starts by mixing in whatever the last one left behind --
+    // the same reason releaseStage keeps its one-poles running.
+    inline float relClampStage (float x, float env)
+    {
+        float lo = x, hi = x;
+        for (int i = 0; i < 2; ++i) { lo = relClampLp[i] (lo); hi = relClampHp[i] (hi); }
+        // env 0 gives exactly x, so opening and closing the window cannot
+        // step: at full open the sum is the LR pair with the low branch down
+        // by kRelClampDb, and in between it crossfades from the dry sample.
+        return x + env * ((relClampG * lo + hi) - x);
+    }
+
     inline float releaseStage (float x, float g)
     {
         const float k = 1.0f - std::pow (10.0f, -0.3f * relShelfSm * g);
@@ -3207,34 +3111,35 @@ private:
     bool    relRepairOn = false;
     int     relCutMode  = 0;
     float   relCutHz    = 200.0f;
-    // ---- Frame-Centered Rolling Deferred Backfill ----------------------
-    bool    relBfOn = false;
-    // A candidate is the first non-confident frame of a phrase: remembered,
-    // never acted on. Positions are the ANALYSIS FRAME CENTRE, not the frame
-    // end -- the centre is where the evidence actually is, and the end is
-    // effMaxLag + kDetN/2 later, which at 44.1 kHz put every replacement
-    // 28.3 ms past the sound it was meant to replace.
-    bool    relBfCand = false, relBfRolling = false;
-    int64_t relBfCandCentre = 0;   // input position, frame centre
-    int64_t relBfLastCentre = 0;   // centre up to which segments are done
-    float   relBfCandP = 0.0f;     // the period the phrase ended on
-    // one confirmed segment, waiting for processChunk
-    bool    relBfPending = false;
-    int64_t relBfSegFrom = 0, relBfSegTo = 0;
-    float   relBfSegP = 0.0f;
-    // in force while a segment's replacement grains are being laid down
-    bool    relBfSpanActive = false;
-    int64_t relBfSpanEnd = 0;
-    float   relBfSpanP = 0.0f;
-    double  relBfResumeIn = 0.0;   // lastInMark to restore at the snap-back
-    static constexpr float  kRelBfRho = 0.55f;   // periodicity still present
-    static constexpr float  kRelBfZcr = 0.12f;   // still a vowel, not friction
-    static constexpr double kRelBfE   = 0.02;    // of the last voiced frame
-    // observability (offline log only)
-    double  relBfLogCandC = 0.0, relBfLogConfC = 0.0;
-    double  relBfLogFrom = 0.0, relBfLogTo = 0.0;
-    float   relBfLogRho = 0.0f, relBfLogZcr = 0.0f;
-    int     relBfLogRecovered = 0, relBfLogResumeErr = 0;
+    // ---- Release Low-Band Residual Clamp -------------------------------
+    // A 4th-order Linkwitz-Riley crossover, as two cascaded Butterworth
+    // sections per branch. LP4 + HP4 is flat in magnitude, so scaling the low
+    // branch alone gives a clean 24 dB/oct shelf instead of the gentle slope
+    // a one-pole subtraction would leave across the voice body.
+    struct Biquad
+    {
+        float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
+        float z1 = 0.0f, z2 = 0.0f;                     // transposed direct II
+        inline float operator() (float x)
+        {
+            const float y = b0 * x + z1;
+            z1 = b1 * x - a1 * y + z2 + 1.0e-25f;       // denormal guard
+            z2 = b2 * x - a2 * y;
+            return y;
+        }
+        void reset() { z1 = z2 = 0.0f; }
+    };
+    bool    relClampOn = false;
+    int64_t relClampFrom = 0, relClampTo = 0;   // OUTPUT positions
+    float   relClampEnv = 0.0f, relClampAtk = 0.0f, relClampRel = 0.0f;
+    float   relClampG = 1.0f;
+    Biquad  relClampLp[2], relClampHp[2];
+    static constexpr float  kRelClampFc  = 150.0f;   // crossover
+    static constexpr float  kRelClampDb  = -9.0f;    // low branch
+    static constexpr double kRelClampSec = 0.080;    // window
+    static constexpr double kRelClampAtk = 0.003;
+    static constexpr double kRelClampRel = 0.030;
+    double  relClampLogFrom = 0.0, relClampLogTo = 0.0;
 
     float   relShelfAmt = 0.0f;
     // Release Strength, dezippered. The depth is read on EVERY sample inside

@@ -136,7 +136,7 @@ static Result render (const std::vector<float>& in, double fs, bool continuation
     p.onsetBackfill = true;  p.preLockLowCut = 0.75f;    // shipping Onset Repair
     p.deterministicCadence = false;                      // fixed OFF
     p.releaseRepair = false;  p.releaseShelf = 0.0f;     // shelf out of the way
-    p.releasePitchContinuation = continuation;
+    p.releasePitchContinuation = continuation;   // = the clamp from v0.63.4
     PsolaEngine e;  e.prepare (fs);  e.setParams (p);
     Result r;  r.out.assign (in.size(), 0.0f);
     for (size_t i = 0; i < in.size(); i += 256)
@@ -144,6 +144,27 @@ static Result render (const std::vector<float>& in, double fs, bool continuation
     r.st = e.stateLog;
     r.late = e.releaseLateEvents(); r.dropped = e.releaseDropped(); r.overflow = e.releaseOverflow();
     return r;
+}
+
+// Several bands from one transform.
+static void bandsDb (const std::vector<float>& x, double fs, int64_t a, int n,
+                     const double (*bands)[2], int nb, double* out)
+{
+    if (a < 0 || a + n > (int64_t) x.size())
+    { for (int k = 0; k < nb; ++k) out[k] = -200.0; return; }
+    const int N = 32768;
+    static std::vector<float> re, im;
+    re.assign ((size_t) N, 0.0f);  im.assign ((size_t) N, 0.0f);
+    for (int i = 0; i < n && i < N; ++i)
+        re[(size_t) i] = x[(size_t) (a + i)] * (0.5f - 0.5f * std::cos (2.0f * (float) M_PI * i / n));
+    PsolaEngine::fftForViz (re.data(), im.data(), N);
+    for (int b = 0; b < nb; ++b)
+    {
+        double acc = 0.0;
+        for (int k = (int) (bands[b][0] * N / fs); k <= (int) (bands[b][1] * N / fs) && k <= N / 2; ++k)
+            acc += re[(size_t) k] * re[(size_t) k] + im[(size_t) k] * im[(size_t) k];
+        out[b] = 10.0 * std::log10 (acc + 1e-20);
+    }
 }
 
 // only to RANK the endings, so the six passages are the ones worth looking at
@@ -197,14 +218,10 @@ int main (int argc, char** argv)
     std::printf ("queue B1: late %d dropped %d overflow %d\n",
                  b1.late, b1.dropped, b1.overflow);
 
-    // How many analysis frames actually re-rendered a segment. Counted from
-    // the log rather than from a live flag: the span flag is cleared inside
-    // the same processChunk that sets it, so polling it after process()
-    // returns reports zero however hard the feature is working.
     {
-        int fired = 0;
-        for (const auto& r : b1.st) if (r.bfTo > 0.0) ++fired;
-        std::printf ("rolling backfill re-rendered %d segments\n", fired);
+        int armed = 0;
+        for (const auto& r : b1.st) if (r.clampTo > 0.0) ++armed;
+        std::printf ("clamp armed %d times\n", armed);
     }
 
     const auto phrases = findPhrases (in, fs);
@@ -274,24 +291,71 @@ int main (int argc, char** argv)
     if (FILE* lf = std::fopen ((dir + "/logs/state_B1.csv").c_str(), "w"))
     {
         std::fprintf (lf, "t,state,voicedRead,relActive,energyPerSample,zcr,relF0,"
-                          "candidateFrameCenter,confirmFrameCenter,rho,zcrGate,"
-                          "backfilledFrom,backfilledTo,recovered,resumeErrorSamples\n");
+                          "clampFrom,clampTo\n");
         for (const auto& r : b1.st)
         {
             bool near = false;
             for (const auto& pk : pick)
                 if (std::fabs (r.t - (double) pk.off / fs) < 0.5) near = true;
             if (! near) continue;
-            std::fprintf (lf, "%.4f,%d,%d,%d,%.6g,%.4f,%.1f,%.4f,%.4f,%.4f,%.4f,"
-                              "%.4f,%.4f,%d,%d\n",
+            std::fprintf (lf, "%.4f,%d,%d,%d,%.6g,%.4f,%.1f,%.4f,%.4f\n",
                           r.t, r.state, (int) r.voicedRead, (int) r.relActive,
-                          r.energyPerSample, r.zcr, r.relF0,
-                          r.bfCandidateCentre, r.bfConfirmCentre, r.bfRho, r.bfZcr,
-                          r.bfFrom, r.bfTo, r.bfRecovered, r.bfResumeErrorSamples);
+                          r.energyPerSample, r.zcr, r.relF0, r.clampFrom, r.clampTo);
         }
         std::fclose (lf);
     }
-    std::printf ("wrote logs/events.csv and logs/state_B1.csv\n");
+    // The measurements the review asked to be logged: three bands and RMS,
+    // over 0-30 ms and 0-80 ms from the ending.
+    //
+    // The ending on the OUTPUT axis is source_end + D. Subtracting source_end
+    // alone -- which the v0.63.3 report did -- puts every window 46.4 ms
+    // early and mislabels which part of the tail was touched.
+    if (FILE* bf2 = std::fopen ((dir + "/logs/bands.csv").c_str(), "w"))
+    {
+        std::fprintf (bf2, "index,kind,source_end_s,output_end_s,window_ms,"
+                           "b0_60_140,b1_60_140,d_60_140,"
+                           "b0_150_600,b1_150_600,d_150_600,"
+                           "b0_600_5k,b1_600_5k,d_600_5k,"
+                           "b0_lowMinusBody,b1_lowMinusBody,d_lowMinusBody,"
+                           "b0_rms_dbfs,b1_rms_dbfs,d_rms,"
+                           "clamp_from_s,clamp_to_s\n");
+        for (size_t i = 0; i < pick.size(); ++i)
+        {
+            const int64_t e0 = pick[i].off + kLookahead;
+            // the clamp window that belongs to this ending, from the log
+            double cf = 0.0, ct = 0.0;
+            for (const auto& r : b1.st)
+                if (r.clampTo > 0.0 && std::fabs (r.clampFrom - (double) e0 / fs) < 0.20)
+                { cf = r.clampFrom; ct = r.clampTo; }
+            for (double win : { 0.030, 0.080 })
+            {
+                const int n = (int) (fs * win);
+                const double bands[3][2] = { { 60.0, 140.0 }, { 150.0, 600.0 }, { 600.0, 5000.0 } };
+                double a[3], b[3];
+                bandsDb (b0.out, fs, e0, n, bands, 3, a);
+                bandsDb (b1.out, fs, e0, n, bands, 3, b);
+                auto rms = [&] (const std::vector<float>& x)
+                {
+                    double acc = 0.0;  int cnt = 0;
+                    for (int k = 0; k < n && e0 + k < (int64_t) x.size(); ++k)
+                    { acc += (double) x[(size_t) (e0 + k)] * x[(size_t) (e0 + k)]; ++cnt; }
+                    return 20.0 * std::log10 (std::sqrt (acc / std::max (1, cnt)) + 1e-12);
+                };
+                const double r0 = rms (b0.out), r1 = rms (b1.out);
+                std::fprintf (bf2, "%zu,%s,%.4f,%.4f,%.0f,"
+                                   "%.3f,%.3f,%+.3f,%.3f,%.3f,%+.3f,%.3f,%.3f,%+.3f,"
+                                   "%+.3f,%+.3f,%+.3f,%.3f,%.3f,%+.3f,%.4f,%.4f\n",
+                              i + 1, i < 3 ? "worst" : "ordinary",
+                              (double) pick[i].off / fs, (double) e0 / fs, win * 1000.0,
+                              a[0], b[0], b[0] - a[0], a[1], b[1], b[1] - a[1],
+                              a[2], b[2], b[2] - a[2],
+                              a[0] - a[1], b[0] - b[1], (b[0] - b[1]) - (a[0] - a[1]),
+                              r0, r1, r1 - r0, cf, ct);
+            }
+        }
+        std::fclose (bf2);
+    }
+    std::printf ("wrote logs/events.csv, logs/state_B1.csv and logs/bands.csv\n");
     std::printf ("speaker f0 %.0f Hz -> %.0f Hz, lookahead %lld samples (%.1f ms)\n",
                  speakerF0, f0out, (long long) kLookahead, 1000.0 * kLookahead / fs);
     return bad ? 1 : 0;
