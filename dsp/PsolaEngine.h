@@ -3131,14 +3131,25 @@ private:
     // while the envelope is shut: letting the states go stale would mean the
     // next ending starts by mixing in whatever the last one left behind --
     // the same reason releaseStage keeps its one-poles running.
+    //
+    // The envelope moves the LOW BRANCH GAIN, not a crossfade against the dry
+    // sample. That distinction was the whole of v0.63.6's damage. lo and hi
+    // are phase-aligned with each other, so lo + hi is flat in magnitude --
+    // but it is NOT in phase with x, because an LR4 pair sums to an allpass.
+    // The old form `x + env*((g*lo + hi) - x)` therefore mixed two signals
+    // with different phase at every intermediate env, and with the gate
+    // flickering in 1-13 ms pieces that interference reached the body and the
+    // top: ordinary 4 came out +1.366 dB at 600 Hz-5 kHz and +2.454 dB in the
+    // very band the clamp is supposed to be pulling down.
+    //
+    // Interpolating inside the pair cannot do that. Only the low branch's
+    // contribution changes; hi passes at unity throughout.
     inline float relClampStage (float x, float env)
     {
         float lo = x, hi = x;
         for (int i = 0; i < 2; ++i) { lo = relClampLp[i] (lo); hi = relClampHp[i] (hi); }
-        // env 0 gives exactly x, so opening and closing the window cannot
-        // step: at full open the sum is the LR pair with the low branch down
-        // by kRelClampDb, and in between it crossfades from the dry sample.
-        return x + env * ((relClampG * lo + hi) - x);
+        const float lowGain = 1.0f + env * (relClampG - 1.0f);
+        return hi + lowGain * lo;
     }
 
     inline float releaseStage (float x, float g)

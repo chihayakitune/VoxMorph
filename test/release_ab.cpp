@@ -410,7 +410,63 @@ int main (int argc, char** argv)
         }
         std::fclose (pf);
     }
-    std::printf ("wrote logs/events.csv, state_B1.csv, bands.csv, gate.csv and permits.csv\n");
+    // One steady stretch with the clamp ENABLED but the gate never open.
+    // With the recombination interpolating inside the LR pair, that stretch
+    // should differ from baseline only by the pair's allpass phase, so every
+    // band and the RMS have to land within 0.1 dB.
+    if (FILE* sf = std::fopen ((dir + "/logs/steady.csv").c_str(), "w"))
+    {
+        std::fprintf (sf, "from_s,length_ms,band,b0_db,b1_db,abs_diff_db\n");
+        // the middle of the longest phrase that no gate opening touches
+        int64_t bestAt = -1;  int64_t bestLen = 0;
+        const int64_t need = (int64_t) (fs * 0.150);
+        for (const auto& ph : phrases)
+        {
+            const int64_t a = ph.on + kLookahead + (int64_t) (fs * 0.10);
+            const int64_t b = ph.off + kLookahead - (int64_t) (fs * 0.05);
+            if (b - a < need) continue;
+            bool clear = true;
+            for (const auto& sp : b1.spans)
+                if (sp.to > (double) a / fs && sp.from < (double) b / fs) { clear = false; break; }
+            if (clear && b - a > bestLen) { bestLen = b - a; bestAt = a; }
+        }
+        if (bestAt < 0)
+            std::fprintf (sf, "none,0,,,,\n");
+        else
+        {
+            const int n = (int) need;
+            const double bands[3][2] = { { 60.0, 140.0 }, { 150.0, 600.0 }, { 600.0, 5000.0 } };
+            double a3[3], b3[3];
+            bandsDb (b0.out, fs, bestAt, n, bands, 3, a3);
+            bandsDb (b1.out, fs, bestAt, n, bands, 3, b3);
+            const char* nm[3] = { "60-140", "150-600", "600-5k" };
+            double worst = 0.0;
+            for (int k = 0; k < 3; ++k)
+            {
+                std::fprintf (sf, "%.4f,%.0f,%s,%.4f,%.4f,%.4f\n",
+                              (double) bestAt / fs, 150.0, nm[k], a3[k], b3[k],
+                              std::fabs (b3[k] - a3[k]));
+                worst = std::max (worst, std::fabs (b3[k] - a3[k]));
+            }
+            auto rms = [&] (const std::vector<float>& x)
+            {
+                double acc = 0.0;
+                for (int k = 0; k < n; ++k)
+                    acc += (double) x[(size_t) (bestAt + k)] * x[(size_t) (bestAt + k)];
+                return 20.0 * std::log10 (std::sqrt (acc / n) + 1e-12);
+            };
+            const double r0 = rms (b0.out), r1 = rms (b1.out);
+            std::fprintf (sf, "%.4f,%.0f,RMS,%.4f,%.4f,%.4f\n",
+                          (double) bestAt / fs, 150.0, r0, r1, std::fabs (r1 - r0));
+            worst = std::max (worst, std::fabs (r1 - r0));
+            std::printf ("gate-inactive steady stretch at %.3f s: worst band/RMS difference "
+                         "%.4f dB  %s\n", (double) bestAt / fs, worst,
+                         worst <= 0.1 ? "PASS" : "FAIL");
+        }
+        std::fclose (sf);
+    }
+    std::printf ("wrote logs/events.csv, state_B1.csv, bands.csv, gate.csv, permits.csv "
+                 "and steady.csv\n");
     std::printf ("speaker f0 %.0f Hz -> %.0f Hz, lookahead %lld samples (%.1f ms)\n",
                  speakerF0, f0out, (long long) kLookahead, 1000.0 * kLookahead / fs);
     return bad ? 1 : 0;
