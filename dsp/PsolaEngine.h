@@ -3104,52 +3104,37 @@ private:
 
     void buildRelClamp()
     {
-        // the gate's two measurement band-passes, one section each end
+        // the gate's two measurement band-passes, one section each end --
+        // unchanged, the gate is not part of this
         relGateLo[0]   = makeButter (60.0,  true);
         relGateLo[1]   = makeButter (140.0, false);
         relGateBody[0] = makeButter (150.0, true);
         relGateBody[1] = makeButter (600.0, false);
 
-        const double w0 = 2.0 * M_PI * (double) kRelClampFc / fs;
-        const double cw = std::cos (w0), sw = std::sin (w0);
-        const double alpha = sw / (2.0 * 0.70710678);      // Butterworth Q
-        const double a0 = 1.0 + alpha;
-        const float a1 = (float) (-2.0 * cw / a0);
-        const float a2 = (float) ((1.0 - alpha) / a0);
-        const float lb0 = (float) (((1.0 - cw) / 2.0) / a0);
-        const float lb1 = (float) ((1.0 - cw) / a0);
-        const float hb0 = (float) (((1.0 + cw) / 2.0) / a0);
-        const float hb1 = (float) (-(1.0 + cw) / a0);
-        for (int i = 0; i < 2; ++i)
-        {
-            relClampLp[i] = Biquad { lb0, lb1, lb0, a1, a2, 0.0f, 0.0f };
-            relClampHp[i] = Biquad { hb0, hb1, hb0, a1, a2, 0.0f, 0.0f };
-        }
+        relClampAlpha = (float) (1.0 - std::exp (-2.0 * M_PI * (double) kRelClampFc / fs));
+        for (int i = 0; i < 4; ++i) relClampLp[i] = 0.0f;
     }
 
-    // One sample through the clamp. The branches are always filtered, even
-    // while the envelope is shut: letting the states go stale would mean the
-    // next ending starts by mixing in whatever the last one left behind --
-    // the same reason releaseStage keeps its one-poles running.
+    // One sample through the clamp: four cascaded one-pole low shelves whose
+    // per-stage DC gain is relClampG^(env/4), so the cascade lands on
+    // relClampG at env = 1.
     //
-    // The envelope moves the LOW BRANCH GAIN, not a crossfade against the dry
-    // sample. That distinction was the whole of v0.63.6's damage. lo and hi
-    // are phase-aligned with each other, so lo + hi is flat in magnitude --
-    // but it is NOT in phase with x, because an LR4 pair sums to an allpass.
-    // The old form `x + env*((g*lo + hi) - x)` therefore mixed two signals
-    // with different phase at every intermediate env, and with the gate
-    // flickering in 1-13 ms pieces that interference reached the body and the
-    // top: ordinary 4 came out +1.366 dB at 600 Hz-5 kHz and +2.454 dB in the
-    // very band the clamp is supposed to be pulling down.
-    //
-    // Interpolating inside the pair cannot do that. Only the low branch's
-    // contribution changes; hi passes at unity throughout.
+    // The property that matters is at the other end. env = 0 gives
+    // stageGain = 1, so k = 0 and every `x -= k * lp[i]` is a subtraction of
+    // zero: the sample comes out exactly as it went in, not approximately.
+    // The states still update on every sample, so an ending does not start by
+    // mixing in whatever the last one left behind -- the same reason
+    // releaseStage keeps its one-poles running.
     inline float relClampStage (float x, float env)
     {
-        float lo = x, hi = x;
-        for (int i = 0; i < 2; ++i) { lo = relClampLp[i] (lo); hi = relClampHp[i] (hi); }
-        const float lowGain = 1.0f + env * (relClampG - 1.0f);
-        return hi + lowGain * lo;
+        const float stageGain = std::pow (relClampG, 0.25f * env);
+        const float k = 1.0f - stageGain;
+        for (int i = 0; i < 4; ++i)
+        {
+            relClampLp[i] += relClampAlpha * (x - relClampLp[i]) + 1.0e-25f;
+            x -= k * relClampLp[i];
+        }
+        return x;
     }
 
     inline float releaseStage (float x, float g)
@@ -3263,8 +3248,19 @@ private:
     bool    relClampOn = false;
     float   relClampEnv = 0.0f, relClampAtk = 0.0f, relClampRel = 0.0f;
     float   relClampG = 1.0f;
-    Biquad  relClampLp[2], relClampHp[2];
-    static constexpr float  kRelClampFc  = 150.0f;   // crossover
+    // Four cascaded one-pole low shelves, not a Linkwitz-Riley split. The
+    // split was magnitude-flat but its two branches sum to an ALLPASS, so
+    // with the clamp merely enabled -- env sitting at 0, nothing being asked
+    // for -- the whole take still went through a phase rotation. Measured,
+    // that moved 30 ms RMS by up to 2 dB at endings the gate never opened on.
+    // A feature that is not acting has no business changing the sound.
+    //
+    // Here env scales each stage's DC gain, so env = 0 leaves k = 0 and the
+    // sample passes through untouched, bit for bit, while the states keep
+    // tracking.
+    float   relClampLp[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float   relClampAlpha = 0.0f;
+    static constexpr float  kRelClampFc  = 150.0f;   // corner
     static constexpr float  kRelClampDb  = -9.0f;    // low branch
     static constexpr double kRelClampAtk = 0.003;
     static constexpr double kRelClampRel = 0.030;

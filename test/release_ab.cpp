@@ -416,7 +416,7 @@ int main (int argc, char** argv)
     // band and the RMS have to land within 0.1 dB.
     if (FILE* sf = std::fopen ((dir + "/logs/steady.csv").c_str(), "w"))
     {
-        std::fprintf (sf, "from_s,length_ms,band,b0_db,b1_db,abs_diff_db\n");
+        std::fprintf (sf, "from_s,length_ms,metric,b0,b1,abs_diff\n");
         // the middle of the longest phrase that no gate opening touches
         int64_t bestAt = -1;  int64_t bestLen = 0;
         const int64_t need = (int64_t) (fs * 0.150);
@@ -425,9 +425,15 @@ int main (int argc, char** argv)
             const int64_t a = ph.on + kLookahead + (int64_t) (fs * 0.10);
             const int64_t b = ph.off + kLookahead - (int64_t) (fs * 0.05);
             if (b - a < need) continue;
+            // Not merely "no opening inside the window": the envelope has a
+            // 30 ms release and decays geometrically, so a window that starts
+            // just after an opening still has env well above zero. Require
+            // half a second of clearance ahead of it -- more than sixteen
+            // time constants -- so env really has returned to 0.
             bool clear = true;
             for (const auto& sp : b1.spans)
-                if (sp.to > (double) a / fs && sp.from < (double) b / fs) { clear = false; break; }
+                if (sp.to > (double) a / fs - 0.50 && sp.from < (double) b / fs)
+                { clear = false; break; }
             if (clear && b - a > bestLen) { bestLen = b - a; bestAt = a; }
         }
         if (bestAt < 0)
@@ -459,9 +465,22 @@ int main (int argc, char** argv)
             std::fprintf (sf, "%.4f,%.0f,RMS,%.4f,%.4f,%.4f\n",
                           (double) bestAt / fs, 150.0, r0, r1, std::fabs (r1 - r0));
             worst = std::max (worst, std::fabs (r1 - r0));
+            // The sharper test now that env = 0 is meant to be exact: how far
+            // apart are the SAMPLES, in the int16 the reels are written at.
+            double maxAbs = 0.0;  int maxLsb = 0;
+            for (int k = 0; k < n; ++k)
+            {
+                const double d = std::fabs ((double) b1.out[(size_t) (bestAt + k)]
+                                          - (double) b0.out[(size_t) (bestAt + k)]);
+                maxAbs = std::max (maxAbs, d);
+                maxLsb = std::max (maxLsb, (int) std::llround (d * 32767.0));
+            }
+            std::fprintf (sf, "%.4f,%.0f,maxSampleDiff,%.9g,%d,\n",
+                          (double) bestAt / fs, 150.0, maxAbs, maxLsb);
             std::printf ("gate-inactive steady stretch at %.3f s: worst band/RMS difference "
-                         "%.4f dB  %s\n", (double) bestAt / fs, worst,
-                         worst <= 0.1 ? "PASS" : "FAIL");
+                         "%.4f dB (bar 0.01), max sample difference %.3g = %d LSB (bar 1)  %s\n",
+                         (double) bestAt / fs, worst, maxAbs, maxLsb,
+                         (worst <= 0.01 && maxLsb <= 1) ? "PASS" : "FAIL");
         }
         std::fclose (sf);
     }
