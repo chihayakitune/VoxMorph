@@ -474,6 +474,8 @@ public:
         relQN = 0;  prevFrameCenter = 0;  lastEmitted = 0;
         relPermitFrom = relPermitUntil = 0;
         relClampEnv = 0.0f;
+        relPreviewLead = (int) std::lround (kRelPreviewSec * fs);
+        relPreviewUsed = relPreviewFallback = relPreviewOOR = 0;
         relGateN = std::max (1, (int) std::lround (kRelGateWin * fs));
         relGateBufLo.assign ((size_t) relGateN, 0.0f);
         relGateBufBody.assign ((size_t) relGateN, 0.0f);
@@ -1222,10 +1224,46 @@ public:
 
             if (relClampOn)
             {
-                // Measured on `wet` as it stands BEFORE the clamp. Tapping
-                // the clamped signal instead would shut the gate the moment
-                // it started working.
-                float lo = wet, bo = wet;
+                // The gate is measured on a sample about 20 ms AHEAD, read
+                // straight out of the overlap-add ring. Those samples are
+                // already rendered -- they are simply not due yet -- so this
+                // adds no latency and takes nothing away from the future:
+                // accBuf and normBuf are read, never written.
+                //
+                // Availability is not assumed. `nextMarkF` is the frontier
+                // grains have been laid down to, so a position at or past it
+                // is not generated yet and must not be read; the lead also
+                // has to fit inside the overlap-add lookahead. Outside
+                // either, the gate falls back to the current sample -- never
+                // to uninitialised ring contents.
+                //
+                // Inside the frontier, a norm below the floor is a READING,
+                // not a gap: it is how the output path itself says "silence
+                // here". Only the ungenerated case is a fallback.
+                float gateIn = wet;
+                {
+                    const int64_t pi = oi + relPreviewLead;
+                    const bool inRange = relPreviewLead > 0
+                                      && relPreviewLead <= houtCapCur
+                                      && (double) pi < nextMarkF;
+                    if (inRange)
+                    {
+                        const size_t pk = (size_t) (pi & kMask);
+                        const float  pn = normBuf[pk];
+                        gateIn = pn > 1.0e-3f ? accBuf[pk] / std::max (pn, 0.25f) : 0.0f;
+                        // Natural Air's un-pitched re-addition, exactly as the
+                        // output path adds it. No other stage is run forward:
+                        // tilt, the release shelf and the clamp all carry
+                        // state that must not be advanced out of order.
+                        const int64_t pdi = pi - D;
+                        if (airOut && pdi >= 0)
+                            gateIn += airFxOn ? noiseFx[(size_t) (pdi & kMask)]
+                                              : noiseBuf[(size_t) (pdi & kMask)];
+                        ++relPreviewUsed;
+                    }
+                    else { ++relPreviewFallback; ++relPreviewOOR; }
+                }
+                float lo = gateIn, bo = gateIn;
                 for (int k = 0; k < 2; ++k)
                 { lo = relGateLo[k] (lo);  bo = relGateBody[k] (bo); }
                 // add the new sample, drop the one leaving the window
@@ -1302,6 +1340,11 @@ public:
     // Release Low-Band Residual Clamp: how far the envelope is open right
     // now. Read by the offline harness only.
     float clampEnvelope() const { return relClampEnv; }
+    // Gate preview health, for the offline harness.
+    int  previewLead()      const { return relPreviewLead; }
+    long previewUsed()      const { return relPreviewUsed; }
+    long previewFallback()  const { return relPreviewFallback; }
+    long previewOutOfRange() const { return relPreviewOOR; }
 
     bool cadencePending()  const { return detCadenceWanted != detCadence; }
     bool cadenceActive()   const { return detCadence; }
@@ -3299,6 +3342,20 @@ private:
     bool    relPermitArmed = true;
     int     relPermitCount = 0;      // grants since the last re-arm
     static constexpr double kRelGateWin = 0.010;   // the moving window
+    // 20 ms of preview for the GATE ONLY. The OLA ring already holds
+    // converted output that has not been handed to the host, so looking
+    // ahead into it costs no latency -- the samples exist, they are simply
+    // not due yet. It is what the gate is measured on that moves, never what
+    // is written: the envelope and the shelf still act on the current sample.
+    //
+    // Why: worst 1 and worst 2 have the gate opening at +17.6 and +19.4 ms,
+    // so roughly six tenths of the 30 ms window they are judged on goes past
+    // untouched before the 3 ms attack even starts. worst 3, the one that
+    // passes, is the one whose gate opens at -42.8 ms.
+    static constexpr double kRelPreviewSec = 0.020;
+    int     relPreviewLead = 0;
+    // observability: how often the preview was actually available
+    long    relPreviewUsed = 0, relPreviewFallback = 0, relPreviewOOR = 0;
     static constexpr double kRelPermitSec   = 0.250;  // upper bound
     static constexpr double kRelPermitDecay = 0.50;   // of the phrase's own level
     double  relClampLogFrom = 0.0, relClampLogTo = 0.0;

@@ -127,7 +127,9 @@ static constexpr int64_t kLookahead = 2048;
 struct Result { std::vector<float> out; std::vector<PsolaEngine::StateLogRow> st;
                 std::vector<PsolaEngine::ClampSpan> spans;
                 std::vector<PsolaEngine::PermitSpan> permits;
-                int late, dropped, overflow; };
+                int late, dropped, overflow;
+                int  previewLead = 0;
+                long previewUsed = 0, previewFallback = 0, previewOOR = 0; };
 
 static Result render (const std::vector<float>& in, double fs, bool continuation)
 {
@@ -145,6 +147,8 @@ static Result render (const std::vector<float>& in, double fs, bool continuation
         e.process (in.data() + i, r.out.data() + i, (int) std::min ((size_t) 256, in.size() - i));
     r.st = e.stateLog;  r.spans = e.clampSpans;  r.permits = e.permitSpans;
     r.late = e.releaseLateEvents(); r.dropped = e.releaseDropped(); r.overflow = e.releaseOverflow();
+    r.previewLead = e.previewLead();  r.previewUsed = e.previewUsed();
+    r.previewFallback = e.previewFallback();  r.previewOOR = e.previewOutOfRange();
     return r;
 }
 
@@ -220,6 +224,25 @@ int main (int argc, char** argv)
     std::printf ("queue B1: late %d dropped %d overflow %d\n",
                  b1.late, b1.dropped, b1.overflow);
 
+    {
+        const long tot = b1.previewUsed + b1.previewFallback;
+        std::printf ("preview lead %d samples (%.1f ms): used %ld, fallback %ld, "
+                     "out of range %ld  (%.2f%% of %ld gate samples)\n",
+                     b1.previewLead, 1000.0 * b1.previewLead / fs,
+                     b1.previewUsed, b1.previewFallback, b1.previewOOR,
+                     tot ? 100.0 * (double) b1.previewUsed / (double) tot : 0.0, tot);
+        if (FILE* qf = std::fopen ((dir + "/logs/preview.csv").c_str(), "w"))
+        {
+            std::fprintf (qf, "metric,value\n");
+            std::fprintf (qf, "previewLeadSamples,%d\n", b1.previewLead);
+            std::fprintf (qf, "previewLeadMs,%.3f\n", 1000.0 * b1.previewLead / fs);
+            std::fprintf (qf, "used,%ld\n", b1.previewUsed);
+            std::fprintf (qf, "fallback,%ld\n", b1.previewFallback);
+            std::fprintf (qf, "outOfRange,%ld\n", b1.previewOOR);
+            std::fprintf (qf, "totalGateSamples,%ld\n", tot);
+            std::fclose (qf);
+        }
+    }
     std::printf ("symptom gate opened %zu times, %zu permission grants\n",
                  b1.spans.size(), b1.permits.size());
     {
