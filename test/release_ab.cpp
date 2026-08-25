@@ -125,11 +125,9 @@ static std::vector<Phrase> findPhrases (const std::vector<float>& in, double fs)
 static constexpr int64_t kLookahead = 2048;
 
 struct Result { std::vector<float> out; std::vector<PsolaEngine::StateLogRow> st;
-                std::vector<PsolaEngine::ClampSpan> spans;
-                std::vector<PsolaEngine::PermitSpan> permits;
+                std::vector<PsolaEngine::RsSpan> rs;
                 int late, dropped, overflow;
-                int  previewLead = 0;
-                long previewUsed = 0, previewFallback = 0, previewOOR = 0; };
+                int rsLate = 0, rsAlreadyEmitted = 0, rsRingOverflow = 0; };
 
 static Result render (const std::vector<float>& in, double fs, bool continuation)
 {
@@ -145,10 +143,10 @@ static Result render (const std::vector<float>& in, double fs, bool continuation
     Result r;  r.out.assign (in.size(), 0.0f);
     for (size_t i = 0; i < in.size(); i += 256)
         e.process (in.data() + i, r.out.data() + i, (int) std::min ((size_t) 256, in.size() - i));
-    r.st = e.stateLog;  r.spans = e.clampSpans;  r.permits = e.permitSpans;
+    r.st = e.stateLog;  r.rs = e.rsSpans;
     r.late = e.releaseLateEvents(); r.dropped = e.releaseDropped(); r.overflow = e.releaseOverflow();
-    r.previewLead = e.previewLead();  r.previewUsed = e.previewUsed();
-    r.previewFallback = e.previewFallback();  r.previewOOR = e.previewOutOfRange();
+    r.rsLate = e.rsLate();  r.rsAlreadyEmitted = e.rsAlreadyEmitted();
+    r.rsRingOverflow = e.rsRingOverflow();
     return r;
 }
 
@@ -225,40 +223,12 @@ int main (int argc, char** argv)
                  b1.late, b1.dropped, b1.overflow);
 
     {
-        const long tot = b1.previewUsed + b1.previewFallback;
-        std::printf ("preview lead %d samples (%.1f ms): used %ld, fallback %ld, "
-                     "out of range %ld  (%.2f%% of %ld gate samples)\n",
-                     b1.previewLead, 1000.0 * b1.previewLead / fs,
-                     b1.previewUsed, b1.previewFallback, b1.previewOOR,
-                     tot ? 100.0 * (double) b1.previewUsed / (double) tot : 0.0, tot);
-        if (FILE* qf = std::fopen ((dir + "/logs/preview.csv").c_str(), "w"))
-        {
-            std::fprintf (qf, "metric,value\n");
-            std::fprintf (qf, "previewLeadSamples,%d\n", b1.previewLead);
-            std::fprintf (qf, "previewLeadMs,%.3f\n", 1000.0 * b1.previewLead / fs);
-            std::fprintf (qf, "used,%ld\n", b1.previewUsed);
-            std::fprintf (qf, "fallback,%ld\n", b1.previewFallback);
-            std::fprintf (qf, "outOfRange,%ld\n", b1.previewOOR);
-            std::fprintf (qf, "totalGateSamples,%ld\n", tot);
-            std::fclose (qf);
-        }
+        int nan = 0;
+        for (float v : b1.out) if (! std::isfinite (v)) ++nan;
+        std::printf ("re-synthesis: %zu spans, late %d, alreadyEmitted %d, ringOverflow %d, "
+                     "NaN %d\n", b1.rs.size(), b1.rsLate, b1.rsAlreadyEmitted,
+                     b1.rsRingOverflow, nan);
     }
-    std::printf ("symptom gate opened %zu times, %zu permission grants\n",
-                 b1.spans.size(), b1.permits.size());
-    {
-        // the two structural conditions, checked here rather than left to the
-        // reader: at most one grant per re-arm, none longer than the cap
-        int    worstIdx = 0;  double worstLen = 0.0;
-        for (const auto& q : b1.permits)
-        {
-            worstIdx = std::max (worstIdx, q.indexSinceRearm);
-            worstLen = std::max (worstLen, q.to - q.from);
-        }
-        std::printf ("permission: max %d grant(s) per VOICE recovery, longest %.1f ms  %s\n",
-                     worstIdx, worstLen * 1000.0,
-                     (worstIdx <= 1 && worstLen <= 0.2505) ? "PASS" : "FAIL");
-    }
-
     const auto phrases = findPhrases (in, fs);
     double speakerF0 = 150.0;
     {
@@ -326,7 +296,7 @@ int main (int argc, char** argv)
     if (FILE* lf = std::fopen ((dir + "/logs/state_B1.csv").c_str(), "w"))
     {
         std::fprintf (lf, "t,state,voicedRead,relActive,energyPerSample,zcr,relF0,"
-                          "clampFrom,clampTo\n");
+                          "rsFrom,rsTo\n");
         for (const auto& r : b1.st)
         {
             bool near = false;
@@ -335,7 +305,7 @@ int main (int argc, char** argv)
             if (! near) continue;
             std::fprintf (lf, "%.4f,%d,%d,%d,%.6g,%.4f,%.1f,%.4f,%.4f\n",
                           r.t, r.state, (int) r.voicedRead, (int) r.relActive,
-                          r.energyPerSample, r.zcr, r.relF0, r.clampFrom, r.clampTo);
+                          r.energyPerSample, r.zcr, r.relF0, r.rsFrom, r.rsTo);
         }
         std::fclose (lf);
     }
@@ -353,18 +323,17 @@ int main (int argc, char** argv)
                            "b0_600_5k,b1_600_5k,d_600_5k,"
                            "b0_lowMinusBody,b1_lowMinusBody,d_lowMinusBody,"
                            "b0_rms_dbfs,b1_rms_dbfs,d_rms,"
-                           "gate_from_s,gate_to_s\n");
+                           "rs_from_s,rs_to_s\n");
         for (size_t i = 0; i < pick.size(); ++i)
         {
             const int64_t e0 = pick[i].off + kLookahead;
             // the clamp window that belongs to this ending, from the log
-            // the gate openings that touch this ending's 0-80 ms window
+            // the re-synthesis span that belongs to this ending, if any
             double cf = 0.0, ct = 0.0;
             {
-                const double w0 = (double) e0 / fs, w1 = w0 + 0.080;
-                for (const auto& sp : b1.spans)
-                    if (sp.to > w0 - 0.050 && sp.from < w1)
-                    { if (cf == 0.0) cf = sp.from;  ct = sp.to; }
+                const double w0 = (double) e0 / fs;
+                for (const auto& sp : b1.rs)
+                    if (std::fabs (sp.from - w0) < 0.20) { cf = sp.from;  ct = sp.to; }
             }
             for (double win : { 0.030, 0.080 })
             {
@@ -394,12 +363,15 @@ int main (int argc, char** argv)
         }
         std::fclose (bf2);
     }
-    // Where the symptom gate actually held open, on the output axis, and
-    // which ending each opening belongs to.
-    if (FILE* gf = std::fopen ((dir + "/logs/gate.csv").c_str(), "w"))
+    // Every bounded re-synthesis: where it ran, how long, at what period,
+    // how many grains it placed and why it ended.
+    if (FILE* gf = std::fopen ((dir + "/logs/resynth.csv").c_str(), "w"))
     {
-        std::fprintf (gf, "from_s,to_s,length_ms,nearest_event,rel_to_output_end_ms\n");
-        for (const auto& sp : b1.spans)
+        static const char* why[5] = { "reached20ms", "highZcr", "energyRose",
+                                      "voiceReturned", "absoluteFloor" };
+        std::fprintf (gf, "from_s,to_s,length_ms,period_hz,grains,stop_reason,"
+                          "nearest_event,rel_to_output_end_ms\n");
+        for (const auto& sp : b1.rs)
         {
             int best = -1;  double bestD = 1e9;
             for (size_t i = 0; i < pick.size(); ++i)
@@ -408,35 +380,17 @@ int main (int argc, char** argv)
                 if (std::fabs (sp.from - oe) < bestD) { bestD = std::fabs (sp.from - oe); best = (int) i + 1; }
             }
             const double oe = best > 0 ? (double) (pick[(size_t) best - 1].off + kLookahead) / fs : 0.0;
-            std::fprintf (gf, "%.4f,%.4f,%.1f,%d,%+.1f\n",
-                          sp.from, sp.to, (sp.to - sp.from) * 1000.0, best,
-                          (sp.from - oe) * 1000.0);
+            const int r = (sp.stopReason >= 0 && sp.stopReason < 5) ? sp.stopReason : 0;
+            std::fprintf (gf, "%.4f,%.4f,%.1f,%.1f,%d,%s,%d,%+.1f\n",
+                          sp.from, sp.to, (sp.to - sp.from) * 1000.0, sp.periodHz,
+                          sp.grains, why[r], best, (sp.from - oe) * 1000.0);
         }
         std::fclose (gf);
     }
-    if (FILE* pf = std::fopen ((dir + "/logs/permits.csv").c_str(), "w"))
-    {
-        std::fprintf (pf, "from_s,to_s,length_ms,index_since_rearm,"
-                          "nearest_event,rel_to_output_end_ms\n");
-        for (const auto& q : b1.permits)
-        {
-            int best = -1;  double bestD = 1e9;
-            for (size_t i = 0; i < pick.size(); ++i)
-            {
-                const double oe = (double) (pick[i].off + kLookahead) / fs;
-                if (std::fabs (q.from - oe) < bestD) { bestD = std::fabs (q.from - oe); best = (int) i + 1; }
-            }
-            const double oe = best > 0 ? (double) (pick[(size_t) best - 1].off + kLookahead) / fs : 0.0;
-            std::fprintf (pf, "%.4f,%.4f,%.1f,%d,%d,%+.1f\n",
-                          q.from, q.to, (q.to - q.from) * 1000.0, q.indexSinceRearm,
-                          best, (q.from - oe) * 1000.0);
-        }
-        std::fclose (pf);
-    }
-    // One steady stretch with the clamp ENABLED but the gate never open.
-    // With the recombination interpolating inside the LR pair, that stretch
-    // should differ from baseline only by the pair's allpass phase, so every
-    // band and the RMS have to land within 0.1 dB.
+
+    // One steady stretch with the feature ENABLED but no re-synthesis
+    // anywhere near it. Nothing should have happened there at all, so the
+    // samples must match the baseline exactly.
     if (FILE* sf = std::fopen ((dir + "/logs/steady.csv").c_str(), "w"))
     {
         std::fprintf (sf, "from_s,length_ms,metric,b0,b1,abs_diff\n");
@@ -454,7 +408,7 @@ int main (int argc, char** argv)
             // half a second of clearance ahead of it -- more than sixteen
             // time constants -- so env really has returned to 0.
             bool clear = true;
-            for (const auto& sp : b1.spans)
+            for (const auto& sp : b1.rs)
                 if (sp.to > (double) a / fs - 0.50 && sp.from < (double) b / fs)
                 { clear = false; break; }
             if (clear && b - a > bestLen) { bestLen = b - a; bestAt = a; }
@@ -507,8 +461,7 @@ int main (int argc, char** argv)
         }
         std::fclose (sf);
     }
-    std::printf ("wrote logs/events.csv, state_B1.csv, bands.csv, gate.csv, permits.csv "
-                 "and steady.csv\n");
+    std::printf ("wrote logs/events.csv, state_B1.csv, bands.csv, resynth.csv and steady.csv\n");
     std::printf ("speaker f0 %.0f Hz -> %.0f Hz, lookahead %lld samples (%.1f ms)\n",
                  speakerF0, f0out, (long long) kLookahead, 1000.0 * kLookahead / fs);
     return bad ? 1 : 0;

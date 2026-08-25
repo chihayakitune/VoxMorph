@@ -472,20 +472,10 @@ public:
         relShelfSm  = relShelfAmt;   // no ramp-in on the first phrase after a reset
         relShelfSmK = (float) (1.0 - std::exp (-1.0 / (0.04 * fs)));
         relQN = 0;  prevFrameCenter = 0;  lastEmitted = 0;
-        relPermitFrom = relPermitUntil = 0;
-        relClampEnv = 0.0f;
-        relPreviewLead = (int) std::lround (kRelPreviewSec * fs);
-        relPreviewUsed = relPreviewFallback = relPreviewOOR = 0;
-        relGateN = std::max (1, (int) std::lround (kRelGateWin * fs));
-        relGateBufLo.assign ((size_t) relGateN, 0.0f);
-        relGateBufBody.assign ((size_t) relGateN, 0.0f);
-        relGateIdx = 0;  relGateSumLo = relGateSumBody = 0.0;
-        relPermitArmed = true;  relPermitCount = 0;
-        relClampG   = std::pow (10.0f, kRelClampDb / 20.0f);
-        relClampAtk = (float) (1.0 - std::exp (-1.0 / (kRelClampAtk * fs)));
-        relClampRel = (float) (1.0 - std::exp (-1.0 / (kRelClampRel * fs)));
-        buildRelClamp();
-        relClampLogFrom = relClampLogTo = 0.0;
+        relRsPending = false;  relRsSpanActive = false;  relRsResumeIn = 0.0;
+        relRsFrom = relRsTo = relRsSpanEnd = 0;  relRsP = relRsSpanP = 0.0f;
+        relRsGrains = 0;
+        relRsLate = relRsAlreadyEmitted = relRsRingOverflow = 0;
         relLateEvents = 0;  relDropped = 0;  relOverflow = 0;
         relSuspend = false;  relCutWanted = 200.0f;
         onState = OnsetState::armed;  relArmed = true;  relActive = false;
@@ -627,21 +617,15 @@ public:
         int    relLeft;
         // Release Low-Band Residual Clamp window, seconds on the OUTPUT axis
         // (input position + the lookahead). 0 = this frame armed nothing.
-        double clampFrom, clampTo;
+        double rsFrom, rsTo;
     };
     std::vector<StateLogRow> stateLog;
 
-    // Every stretch the Release Low-Band Clamp's symptom gate actually held
-    // open, in OUTPUT seconds. The gate is decided per sample, so it cannot
-    // be carried on the per-frame rows.
-    struct ClampSpan { double from, to; };
-    std::vector<ClampSpan> clampSpans;
-
-    // Every coarse permission grant, and its index since the last clear
-    // return of the voice. The pass condition is that this index never goes
-    // above 1 and no span is longer than the 250 ms cap.
-    struct PermitSpan { double from, to; int indexSinceRearm; };
-    std::vector<PermitSpan> permitSpans;
+    // Every bounded re-synthesis, in OUTPUT seconds, with why it ended:
+    // -1 still open, 0 ran to the 20 ms bound, 1 crossings up, 2 level rose,
+    // 3 the voice came back, 4 the absolute floor.
+    struct RsSpan { double from, to; float periodHz; int grains; int stopReason; };
+    std::vector<RsSpan> rsSpans;
 #endif
 
 #ifdef PSOLA_GRAIN_LOG
@@ -715,7 +699,7 @@ public:
         // Same bypass rule as the rest of the ending work: below about +2 st
         // the untransposed tail IS the wanted sound, so there is nothing to
         // continue.
-        relClampOn     = q.releasePitchContinuation && q.pitchSemi > 2.0f;
+        relRsOn        = q.releasePitchContinuation && q.pitchSemi > 2.0f;
         setDisperse (std::clamp (q.pulseDisperse, 0.0f, 1.0f));
         hiFreq         = (q.hiRangeHz > 20.0f) ? std::clamp (q.hiRangeHz, 100.0f, 600.0f) : 0.0f;
         hiPAmt         = std::clamp (q.hiPitchAmt,   0.0f, 1.0f);
@@ -1122,7 +1106,60 @@ public:
 #endif
         }
 
-        // How far ahead grains are laid down.        // How far ahead grains are laid down. Legacy follows the write head,
+        // ---- Bounded Release Tail Re-synthesis: do the re-render ------
+        // Same rewind the onset backfill uses, and for the same reasons:
+        // olaFloor keeps grains off anything already handed over, the 3 ms
+        // ramp scales accBuf and normBuf by the SAME coefficient so the join
+        // moves in the normalised domain and cannot step the level, and
+        // markResume puts the mark grid back afterwards.
+        if (relRsPending)
+        {
+            relRsPending = false;
+            // never behind the emitted boundary -- this chunk's own output
+            // has not been written yet, so `start` is the furthest back that
+            // is legal
+            const int64_t floor0 = std::max (start, lastEmitted);
+            if (relRsFrom < floor0) ++relRsAlreadyEmitted;
+            const int64_t from = std::max (relRsFrom, floor0);
+            const int64_t upto = (int64_t) nextMarkF + houtCapCur;
+            if (upto - from >= kRing)      ++relRsRingOverflow;
+            else if (markResume > 0.0)     ++relRsLate;
+            else if (! (relRsP > 2.0f && from < relRsTo && from < upto)) ++relRsLate;
+            else
+            {
+                const int xf = std::min (fadeN, (int) (houtCapCur / 2));
+                for (int j = 0; j < xf; ++j)
+                {
+                    const float r = 0.5f * (1.0f - std::cos ((float) M_PI * (float) j / (float) xf));
+                    const size_t k = (size_t) ((from + j) & kMask);
+                    accBuf[k]  *= (1.0f - r);
+                    normBuf[k] *= (1.0f - r);
+                    candBuf[k] *= (1.0f - r);
+                }
+                for (int64_t p2 = from + xf; p2 < upto; ++p2)
+                {
+                    const size_t k = (size_t) (p2 & kMask);
+                    accBuf[k] = 0.0f;  normBuf[k] = 0.0f;  candBuf[k] = 0.0f;
+                }
+                markResume      = nextMarkF;
+                relRsResumeIn   = lastInMark;
+                nextMarkF       = (double) from;
+                lastInMark      = (double) (from - D);
+                olaFloor        = from;
+                fadeFrom        = from;
+                fadeLen         = xf;
+                relRsSpanActive = true;
+                relRsSpanEnd    = relRsTo;
+                relRsSpanP      = relRsP;
+                relRsGrains     = 0;
+#ifdef PSOLA_DETECT_LOG
+                rsSpans.push_back ({ (double) from / fs, (double) relRsTo / fs,
+                                     (float) (fs / relRsP), 0, -1 });
+#endif
+            }
+        }
+
+        // How far ahead grains are laid down. Legacy follows the write head,
         // so the horizon takes whatever values the host's chunking gives it
         // -- and a mark that falls just past one host's horizon but inside
         // another's is placed on OPPOSITE sides of a detection, with a
@@ -1161,6 +1198,23 @@ public:
                 // the close pair it was invented for did not exist.
                 nextMarkF  = markResume;
                 markResume = 0.0;
+                // Release re-synthesis only: the onset backfill deliberately
+                // restores nextMarkF alone, and that is what keeps it
+                // bit-identical. relRsResumeIn is non-zero only when a
+                // re-synthesis set it.
+                if (relRsResumeIn > 0.0)
+                { lastInMark = relRsResumeIn; relRsResumeIn = 0.0; }
+                if (relRsSpanActive)
+                {
+                    relRsSpanActive = false;
+#ifdef PSOLA_DETECT_LOG
+                    if (! rsSpans.empty())
+                    {
+                        if (rsSpans.back().stopReason < 0) rsSpans.back().stopReason = 0;
+                        rsSpans.back().grains = relRsGrains;
+                    }
+#endif
+                }
             }
         }
 
@@ -1222,83 +1276,6 @@ public:
                 wet = releaseStage (wet, relGain);
             }
 
-            if (relClampOn)
-            {
-                // The gate is measured on a sample about 20 ms AHEAD, read
-                // straight out of the overlap-add ring. Those samples are
-                // already rendered -- they are simply not due yet -- so this
-                // adds no latency and takes nothing away from the future:
-                // accBuf and normBuf are read, never written.
-                //
-                // Availability is not assumed. `nextMarkF` is the frontier
-                // grains have been laid down to, so a position at or past it
-                // is not generated yet and must not be read; the lead also
-                // has to fit inside the overlap-add lookahead. Outside
-                // either, the gate falls back to the current sample -- never
-                // to uninitialised ring contents.
-                //
-                // Inside the frontier, a norm below the floor is a READING,
-                // not a gap: it is how the output path itself says "silence
-                // here". Only the ungenerated case is a fallback.
-                float gateIn = wet;
-                {
-                    const int64_t pi = oi + relPreviewLead;
-                    const bool inRange = relPreviewLead > 0
-                                      && relPreviewLead <= houtCapCur
-                                      && (double) pi < nextMarkF;
-                    if (inRange)
-                    {
-                        const size_t pk = (size_t) (pi & kMask);
-                        const float  pn = normBuf[pk];
-                        gateIn = pn > 1.0e-3f ? accBuf[pk] / std::max (pn, 0.25f) : 0.0f;
-                        // Natural Air's un-pitched re-addition, exactly as the
-                        // output path adds it. No other stage is run forward:
-                        // tilt, the release shelf and the clamp all carry
-                        // state that must not be advanced out of order.
-                        const int64_t pdi = pi - D;
-                        if (airOut && pdi >= 0)
-                            gateIn += airFxOn ? noiseFx[(size_t) (pdi & kMask)]
-                                              : noiseBuf[(size_t) (pdi & kMask)];
-                        ++relPreviewUsed;
-                    }
-                    else { ++relPreviewFallback; ++relPreviewOOR; }
-                }
-                float lo = gateIn, bo = gateIn;
-                for (int k = 0; k < 2; ++k)
-                { lo = relGateLo[k] (lo);  bo = relGateBody[k] (bo); }
-                // add the new sample, drop the one leaving the window
-                const size_t gi = (size_t) relGateIdx;
-                relGateSumLo   += (double) lo * lo - (double) relGateBufLo[gi];
-                relGateSumBody += (double) bo * bo - (double) relGateBufBody[gi];
-                relGateBufLo[gi]   = lo * lo;
-                relGateBufBody[gi] = bo * bo;
-                if (++relGateIdx >= relGateN) relGateIdx = 0;
-
-                // The whole decision: inside a plausible ending, is the low
-                // band actually above the body? Both halves are needed --
-                // the ratio alone would fire inside a sustained low vowel,
-                // and the permission alone is what put the previous window
-                // 197 ms off the symptom.
-                const bool permitted = oi >= relPermitFrom && oi < relPermitUntil;
-                const bool symptom   = relGateSumLo > relGateSumBody;
-                const float target   = (permitted && symptom) ? 1.0f : 0.0f;
-#ifdef PSOLA_DETECT_LOG
-                {
-                    const bool open = target > 0.5f;
-                    if (open && ! relGateWasOpen)
-                        clampSpans.push_back ({ (double) oi / fs, (double) oi / fs });
-                    else if (! open && relGateWasOpen && ! clampSpans.empty())
-                        clampSpans.back().to = (double) oi / fs;
-                    else if (open && ! clampSpans.empty())
-                        clampSpans.back().to = (double) oi / fs;
-                    relGateWasOpen = open;
-                }
-#endif
-                relClampEnv += (target > relClampEnv ? relClampAtk : relClampRel)
-                             * (target - relClampEnv);
-                wet = relClampStage (wet, relClampEnv);
-            }
-
             if (preCutAmt > 0.0f)
             {
                 // The depth is the amount times how much of THIS sample came
@@ -1337,14 +1314,10 @@ public:
     // yet, and how many have been. A change waits for a silent stretch, so
     // "I turned it on and nothing changed" is a real state the UI/tests have
     // to be able to see rather than guess at.
-    // Release Low-Band Residual Clamp: how far the envelope is open right
-    // now. Read by the offline harness only.
-    float clampEnvelope() const { return relClampEnv; }
-    // Gate preview health, for the offline harness.
-    int  previewLead()      const { return relPreviewLead; }
-    long previewUsed()      const { return relPreviewUsed; }
-    long previewFallback()  const { return relPreviewFallback; }
-    long previewOutOfRange() const { return relPreviewOOR; }
+    // Bounded Release Tail Re-synthesis health, for the offline harness.
+    int  rsLate()          const { return relRsLate; }
+    int  rsAlreadyEmitted() const { return relRsAlreadyEmitted; }
+    int  rsRingOverflow()  const { return relRsRingOverflow; }
 
     bool cadencePending()  const { return detCadenceWanted != detCadence; }
     bool cadenceActive()   const { return detCadence; }
@@ -1418,7 +1391,7 @@ private:
         // by the branch that decides this frame's tail is still a vowel. It
         // then stands until the next analysis frame, which is exactly the
         // span of grains it has to cover.
-        relClampLogFrom = relClampLogTo = 0.0;
+        relRsLogFrom = relRsLogTo = 0.0;
         const int effMaxLag = effMaxLagCur;
         // The frame this call analyses, and its centre. Every release
         // decision is booked against an OUTPUT position derived from this,
@@ -1473,6 +1446,25 @@ private:
                 if (curP > 2.0f) { relF0 = (float) (fs / curP); relF0Age = 0; }
                 onState = OnsetState::release;
                 relLeft = kReleaseMax;
+                // ---- Bounded Release Tail Re-synthesis: book the span ----
+                // This is the confirmed edge, and the only place it is armed.
+                // curP still holds the period of the last frame that locked,
+                // which is the "last reliable" one by construction.
+                //
+                // Permission is the release itself plus the two the review
+                // asked for: the frame must be quiet in crossings and going
+                // DOWN. A tail that is climbing or full of crossings is not a
+                // vowel running out, and converting it would put periodicity
+                // into friction.
+                if (relRsOn && curP > 2.0f && zcr < 0.12f && energy < preE)
+                {
+                    relRsFrom    = frameCenter + D;
+                    relRsTo      = relRsFrom + (int64_t) (kRelRsSec * fs);
+                    relRsP       = curP;
+                    relRsPending = true;
+                    relRsLogFrom = (double) relRsFrom / fs;
+                    relRsLogTo   = (double) relRsTo / fs;
+                }
                 break;
             case OnsetState::release:
                 // A release decays. If the level turns round and climbs, this
@@ -1515,43 +1507,31 @@ private:
         // 27 ms ahead of the drop, so a permission that waits for the drop
         // cannot cover the window it is judged on. A falling frame while
         // still voiced is enough to open it.
-        if (relClampOn)
+        // ---- Bounded Release Tail Re-synthesis: stop conditions -------
+        // The trigger itself is at the VOICE -> RELEASE edge above. Here the
+        // span is cut short if the frame stops looking like a decaying vowel:
+        // crossings up, level turning back up, the voice returning, or the
+        // absolute floor. The 20 ms bound is applied when the span is booked.
+        if (relRsOn && relRsSpanActive)
         {
-            // The base is the state machine: not voiced means RELEASE, ARMED
-            // or PRE_LOCK, which is where an ending lives.
-            //
-            // The extension exists for one measured reason. worst 2's symptom
-            // starts 27 ms BEFORE the detector confirms the drop, so a
-            // permission that waits for it cannot cover the window the result
-            // is judged on. But "still voiced" on its own is far too wide --
-            // tried, and the gate opened 921 times across the take and pulled
-            // a decibel off the peak, because energy falls between frames all
-            // through ordinary speech. What distinguishes the run-out of a
-            // phrase is that the level has left the phrase's OWN level, so
-            // that is the test: half of lastVoicedEnergy, one value, not swept.
-            const bool inDecay   = energy < kRelPermitDecay * lastVoicedEnergy;
-            const bool recovered = voiced && ! inDecay;   // clearly going again
-            if (recovered)
+            const bool stop = zcr >= 0.12f          // friction, not a vowel
+                           || energy > preE          // level climbing again
+                           || voiced                 // the voice is back
+                           || energy / (double) kDetN < 1.0e-8;   // floor
+            if (stop)
             {
-                closeRelPermit (frameCenter + D);
-                relPermitArmed = true;       // and only here
-                relPermitCount = 0;
-            }
-            else if (relPermitArmed && relPermitUntil == 0 && (! voiced || inDecay))
-            {
-                relPermitFrom  = frameCenter + D;
-                relPermitUntil = relPermitFrom + (int64_t) (kRelPermitSec * fs);
-                relPermitArmed = false;      // spent until the voice returns
-                ++relPermitCount;
-                relClampLogFrom = (double) relPermitFrom / fs;
-                relClampLogTo   = (double) relPermitUntil / fs;
+                const int64_t at = frameCenter + D;
+                if (at < relRsSpanEnd) relRsSpanEnd = at;
 #ifdef PSOLA_DETECT_LOG
-                permitSpans.push_back ({ (double) relPermitFrom / fs,
-                                         (double) relPermitUntil / fs, relPermitCount });
+                if (! rsSpans.empty() && rsSpans.back().stopReason < 0)
+                {
+                    rsSpans.back().to = (double) relRsSpanEnd / fs;
+                    rsSpans.back().stopReason = zcr >= 0.12f ? 1
+                                              : (energy > preE ? 2
+                                              : (voiced ? 3 : 4));
+                }
 #endif
             }
-            else if (relPermitUntil > 0 && frameCenter + D >= relPermitUntil)
-                closeRelPermit (relPermitUntil);   // expired; NOT re-armed
         }
 
         // release-side processing, and the notch's own gate
@@ -1590,14 +1570,14 @@ private:
             const double* fromP;  const double* toP;
             ~StateKeeper()
             {
-                row.clampFrom = *fromP;  row.clampTo = *toP;
+                row.rsFrom = *fromP;  row.rsTo = *toP;
                 log.push_back (row);
             }
         } stateKeeper { stateLog,
                         { (double) anchor / fs, (int) onState, voiced, relActive,
                           relTarget, energy / (double) kDetN, zcr, relF0, relF0Age,
                           relLeft, 0.0, 0.0 },
-                        &relClampLogFrom, &relClampLogTo };
+                        &relRsLogFrom, &relRsLogTo };
 #endif
         if (energy / kDetN < 1.0e-8)
         {
@@ -1606,9 +1586,16 @@ private:
             // phrase after atrue silence -- the commonest case of all, and the
             // only one a synthetic test ever produces -- never counted as a
             // preceding unvoiced stretch and never backfilled.
-            // Below the absolute energy floor: close what is open, but do
-            // NOT re-arm -- a silent frame is not the voice coming back.
-            closeRelPermit (anchor - effMaxLagCur - kDetN / 2 + D);
+            // Below the absolute energy floor: nothing left to re-synthesise
+            if (relRsOn && relRsSpanActive)
+            {
+                const int64_t at = anchor - effMaxLagCur - kDetN / 2 + D;
+                if (at < relRsSpanEnd) relRsSpanEnd = at;
+#ifdef PSOLA_DETECT_LOG
+                if (! rsSpans.empty() && rsSpans.back().stopReason < 0)
+                { rsSpans.back().to = (double) relRsSpanEnd / fs; rsSpans.back().stopReason = 4; }
+#endif
+            }
             voiced = false; holdCount = 0; lastGci = -1; pitchConf = 0.0f;
             preLock = false; preHold = 0;
             if (unvoicedRun < 1000) ++unvoicedRun;
@@ -2186,8 +2173,14 @@ private:
     // ---------------- grain placement ----------------
     void placeGrain()
     {
-        const float P = curP;
-        const bool  v = voiced;
+        // Inside a bounded release re-synthesis the marks are cut as voiced
+        // at the period the phrase ended on, so the tail leaves at the
+        // converted pitch. Nothing scales the amplitude: the grains come from
+        // the input as it actually decays, so the envelope is the take's own.
+        const bool  inRs = relRsSpanActive && (int64_t) nextMarkF < relRsSpanEnd;
+        const float P = inRs ? relRsSpanP : curP;
+        const bool  v = voiced || inRs;
+        if (inRs) ++relRsGrains;
 
         // High Range guard: blend the shift amounts toward the high-range
         // fractions as the input pitch rises past hiFreq (full one octave up).
@@ -3098,88 +3091,6 @@ private:
         relQ[(size_t) relQN++] = { at, src, target, f0, cut, reason };
     }
 
-    // 4th-order Linkwitz-Riley at kRelClampFc: two identical Butterworth
-    // sections per branch. Built once in prepare -- the corner is fixed, so
-    // nothing here runs on the audio thread.
-    struct Biquad
-    {
-        float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
-        float z1 = 0.0f, z2 = 0.0f;                     // transposed direct II
-        inline float operator() (float x)
-        {
-            const float y = b0 * x + z1;
-            z1 = b1 * x - a1 * y + z2 + 1.0e-25f;       // denormal guard
-            z2 = b2 * x - a2 * y;
-            return y;
-        }
-        void reset() { z1 = z2 = 0.0f; }
-    };
-
-    // Shut the current permission, recording where it actually ended.
-    // Re-arming is deliberately NOT done here: only a clear return of the
-    // voice does that.
-    void closeRelPermit (int64_t at)
-    {
-        if (relPermitUntil == 0) return;
-#ifdef PSOLA_DETECT_LOG
-        if (! permitSpans.empty())
-            permitSpans.back().to = std::min (permitSpans.back().to, (double) at / fs);
-#endif
-        relPermitUntil = 0;
-    }
-
-    // One Butterworth 2nd-order section. `high` selects high-pass.
-    Biquad makeButter (double fc, bool high) const
-    {
-        const double w0 = 2.0 * M_PI * fc / fs;
-        const double cw = std::cos (w0), sw = std::sin (w0);
-        const double alpha = sw / (2.0 * 0.70710678);
-        const double a0 = 1.0 + alpha;
-        Biquad q;
-        q.a1 = (float) (-2.0 * cw / a0);
-        q.a2 = (float) ((1.0 - alpha) / a0);
-        if (high) { q.b0 = (float) (((1.0 + cw) / 2.0) / a0);
-                    q.b1 = (float) (-(1.0 + cw) / a0);  q.b2 = q.b0; }
-        else      { q.b0 = (float) (((1.0 - cw) / 2.0) / a0);
-                    q.b1 = (float) ((1.0 - cw) / a0);   q.b2 = q.b0; }
-        return q;
-    }
-
-    void buildRelClamp()
-    {
-        // the gate's two measurement band-passes, one section each end --
-        // unchanged, the gate is not part of this
-        relGateLo[0]   = makeButter (60.0,  true);
-        relGateLo[1]   = makeButter (140.0, false);
-        relGateBody[0] = makeButter (150.0, true);
-        relGateBody[1] = makeButter (600.0, false);
-
-        relClampAlpha = (float) (1.0 - std::exp (-2.0 * M_PI * (double) kRelClampFc / fs));
-        for (int i = 0; i < 4; ++i) relClampLp[i] = 0.0f;
-    }
-
-    // One sample through the clamp: four cascaded one-pole low shelves whose
-    // per-stage DC gain is relClampG^(env/4), so the cascade lands on
-    // relClampG at env = 1.
-    //
-    // The property that matters is at the other end. env = 0 gives
-    // stageGain = 1, so k = 0 and every `x -= k * lp[i]` is a subtraction of
-    // zero: the sample comes out exactly as it went in, not approximately.
-    // The states still update on every sample, so an ending does not start by
-    // mixing in whatever the last one left behind -- the same reason
-    // releaseStage keeps its one-poles running.
-    inline float relClampStage (float x, float env)
-    {
-        const float stageGain = std::pow (relClampG, 0.25f * env);
-        const float k = 1.0f - stageGain;
-        for (int i = 0; i < 4; ++i)
-        {
-            relClampLp[i] += relClampAlpha * (x - relClampLp[i]) + 1.0e-25f;
-            x -= k * relClampLp[i];
-        }
-        return x;
-    }
-
     inline float releaseStage (float x, float g)
     {
         const float k = 1.0f - std::pow (10.0f, -0.3f * relShelfSm * g);
@@ -3283,85 +3194,34 @@ private:
     bool    relRepairOn = false;
     int     relCutMode  = 0;
     float   relCutHz    = 200.0f;
-    // ---- Release Low-Band Residual Clamp -------------------------------
-    // A 4th-order Linkwitz-Riley crossover, as two cascaded Butterworth
-    // sections per branch. LP4 + HP4 is flat in magnitude, so scaling the low
-    // branch alone gives a clean 24 dB/oct shelf instead of the gentle slope
-    // a one-pole subtraction would leave across the voice body.
-    bool    relClampOn = false;
-    float   relClampEnv = 0.0f, relClampAtk = 0.0f, relClampRel = 0.0f;
-    float   relClampG = 1.0f;
-    // Four cascaded one-pole low shelves, not a Linkwitz-Riley split. The
-    // split was magnitude-flat but its two branches sum to an ALLPASS, so
-    // with the clamp merely enabled -- env sitting at 0, nothing being asked
-    // for -- the whole take still went through a phase rotation. Measured,
-    // that moved 30 ms RMS by up to 2 dB at endings the gate never opened on.
-    // A feature that is not acting has no business changing the sound.
+    // ---- Bounded Release Tail Re-synthesis ------------------------------
+    // Four attempts removed low end from the tail and none of them reached
+    // the bar. The last one showed why the family cannot: ordinary 4's own
+    // short-window low/body ratio is +2.777 dB against worst 2's +2.234, so
+    // "low band above body" does not separate old-pitch residue from an
+    // ending that simply has bass in it -- and with the two measurement bands
+    // meeting at 150 Hz there is no short, low-latency filter that takes one
+    // and leaves the other.
     //
-    // Here env scales each stage's DC gain, so env = 0 leaves k = 0 and the
-    // sample passes through untouched, bit for bit, while the states keep
-    // tracking.
-    float   relClampLp[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-    float   relClampAlpha = 0.0f;
-    static constexpr float  kRelClampFc  = 150.0f;   // corner
-    static constexpr float  kRelClampDb  = -9.0f;    // low branch
-    static constexpr double kRelClampAtk = 0.003;
-    static constexpr double kRelClampRel = 0.030;
-
-    // ---- symptom gate ---------------------------------------------------
-    // What decides whether the clamp is open is no longer a fixed window from
-    // the voicing drop. That window was right for one ending out of three and
-    // 197 ms early for another, because the detector's first `voiced` drop is
-    // not the same instant as the audible ending. So the gate watches the
-    // symptom itself: 60-140 Hz standing above 150-600 Hz in the output.
-    //
-    // The measurement taps the signal BEFORE the clamp. Reading it after
-    // would close the gate as soon as the clamp worked, and the two would
-    // chase each other.
-    Biquad  relGateLo[2], relGateBody[2];   // 60-140 and 150-600 band-passes
-    // A FINITE 10 ms window, not an exponential average. The distinction is
-    // the whole of v0.63.5's failure: a one-pole with a 10 ms time constant
-    // does not forget 10 ms ago, it decays towards it, and with the phrase
-    // body sitting 20 dB above the low band the ratio took 62-75 ms to turn
-    // over. A moving sum drops the sample that left the window outright, so
-    // history older than 10 ms has no weight at all.
-    //
-    // Buffers are sized in prepare(); nothing here allocates on the audio
-    // thread.
-    std::vector<float> relGateBufLo, relGateBufBody;
-    int     relGateN = 0, relGateIdx = 0;
-    double  relGateSumLo = 0.0, relGateSumBody = 0.0;
-    // Coarse permission: the region a real ending can be in. Wide on purpose
-    // -- 250 ms, enough to cover the worst measured offset -- because the
-    // narrow decision is the symptom test, not this.
-    int64_t relPermitFrom = 0, relPermitUntil = 0;
-    // One shot per ending. Once a permission has been spent it cannot be
-    // re-armed by another unvoiced frame -- only by the voice clearly coming
-    // back. Without this the 250 ms cap was a cap on each grant rather than
-    // on the ending, and ordinary 5 collected two back-to-back 235 ms grants.
-    bool    relPermitArmed = true;
-    int     relPermitCount = 0;      // grants since the last re-arm
-    static constexpr double kRelGateWin = 0.010;   // the moving window
-    // 20 ms of preview for the GATE ONLY. The OLA ring already holds
-    // converted output that has not been handed to the host, so looking
-    // ahead into it costs no latency -- the samples exist, they are simply
-    // not due yet. It is what the gate is measured on that moves, never what
-    // is written: the envelope and the shelf still act on the current sample.
-    //
-    // Why: worst 1 and worst 2 have the gate opening at +17.6 and +19.4 ms,
-    // so roughly six tenths of the 30 ms window they are judged on goes past
-    // untouched before the 3 ms attack even starts. worst 3, the one that
-    // passes, is the one whose gate opens at -42.8 ms.
-    static constexpr double kRelPreviewSec = 0.020;
-    int     relPreviewLead = 0;
-    // observability: how often the preview was actually available
-    long    relPreviewUsed = 0, relPreviewFallback = 0, relPreviewOOR = 0;
-    static constexpr double kRelPermitSec   = 0.250;  // upper bound
-    static constexpr double kRelPermitDecay = 0.50;   // of the phrase's own level
-    double  relClampLogFrom = 0.0, relClampLogTo = 0.0;
-#ifdef PSOLA_DETECT_LOG
-    bool    relGateWasOpen = false;
-#endif
+    // So back to converting rather than removing: on a CONFIRMED
+    // VOICE -> RELEASE, re-place the not-yet-returned overlap-add region --
+    // at most 20 ms -- at the last reliable period, so the tail leaves at the
+    // converted pitch instead of leaking through the unvoiced path at the
+    // speaker's own. Nothing is amplitude-corrected: the grains are cut from
+    // the input as it actually decays, so the envelope is the take's own.
+    bool    relRsOn = false;
+    bool    relRsPending = false;
+    int64_t relRsFrom = 0, relRsTo = 0;      // OUTPUT positions
+    float   relRsP = 0.0f;                   // last reliable period
+    bool    relRsSpanActive = false;
+    int64_t relRsSpanEnd = 0;
+    float   relRsSpanP = 0.0f;
+    double  relRsResumeIn = 0.0;
+    int     relRsGrains = 0;
+    static constexpr double kRelRsSec = 0.020;   // hard bound
+    // health counters
+    int     relRsLate = 0, relRsAlreadyEmitted = 0, relRsRingOverflow = 0;
+    double  relRsLogFrom = 0.0, relRsLogTo = 0.0;
 
     float   relShelfAmt = 0.0f;
     // Release Strength, dezippered. The depth is read on EVERY sample inside
