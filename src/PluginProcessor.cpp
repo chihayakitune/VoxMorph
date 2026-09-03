@@ -418,6 +418,9 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     engine.prepare (sampleRate);
     engineR.prepare (sampleRate);
     spatial.prepare (sampleRate, samplesPerBlock);   // allocates its delay lines
+    // Allocates the control-signal delay line (engine lookahead + a block).
+    // prepare() ends in reset(), so the gain history starts at unity.
+    protection.prepare (sampleRate, samplesPerBlock);
     monoScratch.assign ((size_t) samplesPerBlock, 0.0f);
     scratchL.assign ((size_t) samplesPerBlock, 0.0f);
     scratchR.assign ((size_t) samplesPerBlock, 0.0f);
@@ -460,6 +463,15 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     uiLatencySamples.store (engine.latencySamples() + fxLatSamples, std::memory_order_relaxed);
     setLatencySamples (engine.latencySamples() + fxLatSamples);
     pendingLat = -1;  pendingLatSec = 0.0f;
+}
+
+// The protection gain history is indexed by position in the stream. After a
+// transport jump the samples on the other side were never attenuated, so the
+// stale history would restore a gain that was never applied. Everything else
+// in this processor either has no state or is re-derived every block.
+void VoxMorphProcessor::reset()
+{
+    protection.reset();
 }
 
 void VoxMorphProcessor::releaseResources()
@@ -835,14 +847,44 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         if (c >= room) capturing.store (false);
     }
 
+    // ---- Auto Voice Protection Gain -------------------------------------
+    // Last thing before the conversion, and deliberately AFTER the visualizer
+    // tap and the ANALYZE capture above: those show the user their real input
+    // level, not the protected one. At normal speaking level this is exactly
+    // unity and skips its own multiply, so the samples reaching the engine are
+    // bit-identical to a build without the stage.
+    //
+    // At Mix 0 the engine is a pure delay of the dry signal -- no conversion to
+    // protect -- so the stage is asked for unity and glides out.
+    protection.setBypassed (p.mix <= 1.0e-4f);
+    {
+        float* preCh[2] = { stereoMode ? sL : m, sR };
+        protection.processPre (preCh, stereoMode ? 2 : 1, n);
+    }
+
     if (stereoMode)
     {
         engine.process  (sL, sL, n);
         engineR.process (sR, sR, n);
-        for (int i = 0; i < n; ++i) m[i] = 0.5f * (sL[i] + sR[i]);   // analysis taps
     }
     else
         engine.process (m, m, n);
+
+    // ---- Auto Gain Restore ----------------------------------------------
+    // Straight after the conversion (Natural Air and the rest of the voice DSP
+    // run inside the engine) and before the mute, the Output Gain, the spatial
+    // stage and the Post FX. It reads the gain from D samples ago, because
+    // that is the input the samples in front of us came from.
+    {
+        float* postCh[2] = { stereoMode ? sL : m, sR };
+        protection.processPost (postCh, stereoMode ? 2 : 1, n, engine.latencySamples());
+    }
+    uiProtectionGainDb.store (protection.currentGainReductionDb(),
+                              std::memory_order_relaxed);
+
+    // analysis taps re-derived from the restored signal
+    if (stereoMode)
+        for (int i = 0; i < n; ++i) m[i] = 0.5f * (sL[i] + sR[i]);
 
     // AEIOU vowel readout for the UI vowel meter. The engine only tracks vowels
     // while the AEIOU Character warp is on (it is what drives the tracking),

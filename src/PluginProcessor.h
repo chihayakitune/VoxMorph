@@ -3,6 +3,7 @@
 #include "PsolaEngine.h"
 #include "VoiceAnalyzer.h"
 #include "SpatialEngine.h"
+#include "ProtectionGain.h"
 
 class VoxMorphProcessor : public juce::AudioProcessor
 {
@@ -13,6 +14,10 @@ public:
     // -- AudioProcessor --
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;   // forwards to the hosted FX plugins
+    // Hosts call this on transport jumps / bypass edges. Only the protection
+    // stage keeps state that must not survive one: its gain history is tied
+    // to a sample position in the stream.
+    void reset() override;
     bool isBusesLayoutSupported (const BusesLayout&) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
@@ -187,6 +192,11 @@ public:
     // uiFxLatSamples = the hosted-FX share of that (for the breakdown text).
     // Device/host buffers are added on the editor side (standalone only).
     std::atomic<int> uiLatencySamples { 0 }, uiFxLatSamples { 0 };
+
+    // Auto Voice Protection Gain readout: how much the stage is currently
+    // taking off in front of the conversion, in dB (<= 0, 0 = not acting).
+    // Published for a future "AUTO -3.2 dB" indicator; no DSP reads it.
+    std::atomic<float> uiProtectionGainDb { 0.0f };
 
     // ---- MUTE / MONITOR (v0.30.0, driven by the standalone options bar) ----
     // muted      = the user pressed MUTE; the output is silenced so nothing
@@ -391,6 +401,10 @@ private:
     // It is downstream of everything above and of the visualizer tap, so it
     // cannot influence the conversion or what the graphs show.
     SpatialEngine spatial;
+    // Auto Voice Protection Gain / Auto Gain Restore (see ProtectionGain.h).
+    // One instance drives BOTH engines: the detector is stereo-linked and the
+    // same gain goes on L and R, so the image cannot move.
+    ProtectionGain protection;
     std::vector<float> monoScratch, scratchL, scratchR;
 
     std::atomic<float>* pPitch     = nullptr;
