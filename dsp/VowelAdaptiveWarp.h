@@ -131,6 +131,8 @@ public:
         // VISUALIZER draws with, so what the user sees and what the DSP acts
         // on cannot disagree: nothing below 0.15, full effect from 0.5.
         //
+        // Product decision 2026-08-26: keep this gate as the shipping policy;
+        // AEIOU Character acts only when its F1/F2 input is measurable.
         // Why this exists: measured on a real 251-317 Hz voice, F1 came back
         // as 495 Hz -- the band's default constant -- on every one of /a/
         // /i/ /u/ /e/, and F2 sat near 1900 Hz on all of them regardless of

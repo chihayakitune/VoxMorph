@@ -85,7 +85,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                             nat.gainDb[v][f]));
             }
     }
-    layout.add (std::make_unique<P> (juce::ParameterID { "breath2", 1 }, "Breath",
+    // Kept at the same id/range/order for session compatibility. The old
+    // generated-noise Beta is no longer routed by the processor; this value
+    // now drives source-derived Air Breathiness in PsolaEngine.
+    layout.add (std::make_unique<P> (juce::ParameterID { "breath2", 1 }, "Air Breathiness",
                 juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "air", 1 }, "Natural Air",
                 juce::NormalisableRange<float> (0.0f, 1.5f, 0.001f), 0.0f));
@@ -100,7 +103,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "air2", 1 }, "Natural Air v2 (deprecated)", false));
     layout.add (std::make_unique<P> (juce::ParameterID { "airshine", 1 }, "Air Shine (dB)",
-                juce::NormalisableRange<float> (0.0f, 6.0f, 0.1f), 0.0f));
+                juce::NormalisableRange<float> (0.0f, 9.0f, 0.1f), 0.0f));
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "air2low", 1 }, "Air Low Cleanup (deprecated)", true));
     layout.add (std::make_unique<P> (juce::ParameterID { "range", 1 }, "Intonation Amount (%)",
@@ -300,6 +303,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 1.0f));
     layout.add (std::make_unique<P> (juce::ParameterID { "gain", 1 }, "Output Gain (dB)",
                 juce::NormalisableRange<float> (-24.0f, 12.0f, 0.1f), 0.0f));
+    // Appended, never inserted among existing parameters: hosts that index
+    // parameters by position keep every pre-v0.60 automation lane intact.
+    layout.add (std::make_unique<P> (juce::ParameterID { "airend", 1 }, "Ending Breath",
+                juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
     return layout;
 }
 
@@ -351,6 +358,7 @@ VoxMorphProcessor::VoxMorphProcessor()
     pBreath2 = apvts.getRawParameterValue ("breath2");
     pAir     = apvts.getRawParameterValue ("air");
     pAirShine = apvts.getRawParameterValue ("airshine");
+    pAirEnd   = apvts.getRawParameterValue ("airend");
     // (deprecated "airband"/"air2"/"air2low" are intentionally not read)
     pGci     = apvts.getRawParameterValue ("gci");
     pHiOn    = apvts.getRawParameterValue ("hienable");
@@ -641,9 +649,11 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.consonantSemi = pConsonant->load();
     p.pitchRange    = pRange->load() * 0.01f;   // % -> ratio
     p.pitchCenterHz = pCenter->load();
-    p.breath        = pBreath2->load();      // spectral (noise-excited envelope)
+    p.breath        = 0.0f;                  // generated-noise Beta retired from the plugin path
     p.airPreserve   = pAir->load();          // Natural Air (standard path)
     p.airShineDb    = pAirShine->load();     // Air Shine
+    p.airBreath     = pBreath2->load();      // source-derived F3/high-band emphasis
+    p.airEndBreath  = pAirEnd->load();       // same material, acoustic release only
     p.gciSync       = pGci->load() > 0.5f;
     // The toggles gate the guards here rather than in the engine: it already
     // reads "start = 0" and "floor = 0" as off, so switching them off is the

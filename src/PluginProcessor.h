@@ -408,6 +408,7 @@ private:
     std::atomic<float>* pBreath2   = nullptr;
     std::atomic<float>* pAir       = nullptr;
     std::atomic<float>* pAirShine  = nullptr;
+    std::atomic<float>* pAirEnd    = nullptr;
     std::atomic<float>* pGci       = nullptr;
     std::atomic<float>* pHiOn      = nullptr;   // High Range guard on/off
     std::atomic<float>* pLowOn     = nullptr;   // Low Limit on/off

@@ -102,8 +102,9 @@ public:
         // floor-clamp for f0 >= ~130 Hz (processAirFx) and an adaptive
         // notch bank below it (odd input-f0 lines, 100-2500 Hz, gated to
         // confident sustained phonation). 0 = off (bit-identical bypass);
-        // 0..1 scales the split up to its variance-optimal maximum (energy
-        // neutral); 1..1.5 additionally boosts the bypassed air (~+4 dB max).
+        // Listening tests on sustained /a/ found input-pitch ghosts beginning
+        // around 0.7, so the public legacy range is accepted but the DSP has
+        // a conservative 0.6 ceiling. There is no longer a >1 residual boost.
         float airPreserve = 0.0f;   // 0..1.5
 
         // Air Shine (standard): extra gain on the TOP band's (>6 kHz)
@@ -112,7 +113,18 @@ public:
         // is untouched, so the mids/presence balance and the harmonic
         // content stay exactly as before; the top "air" simply comes back
         // louder. Neither cleanup stage ever touches this band. 0 = neutral.
-        float airShineDb = 0.0f;   // 0..6
+        float airShineDb = 0.0f;   // 0..9
+
+        // Source-derived breathiness. Unlike `breath` above, these controls
+        // never create random excitation: they only raise aperiodic material
+        // that updateAirBands() has already measured in the input. The main
+        // control is global. Ending Breath is multiplied by a conservative
+        // acoustic-release envelope (see updateAirPhrase), so it favours the
+        // falling tail of an established voiced phrase. This corresponds to
+        // the bv/av-like local breathiness reported at Japanese anime phrase
+        // finals; an unvoiced post-phonation aspiration is not invented.
+        float airBreath    = 0.0f;   // 0..1, source-derived global emphasis
+        float airEndBreath = 0.0f;   // 0..1, source-derived release emphasis
 
         // High Range guard (Babisei-style variable pitch): when the INPUT
         // pitch rises above hiRangeHz (laughing, squealing), the pitch and
@@ -518,6 +530,9 @@ public:
         airFxHop = kFxN;
         airActive = false;
         airTail   = 0;      // every air buffer was just zero-filled above
+        airFastEnv = airSlowEnv = airPeakEnv = airPhraseEnv = 0.0f;
+        airPrevFast = 0.0f;
+        airPhraseAge = airPhraseGap = airFallSamples = 0;
         for (int b = 0; b < 4; ++b)
         { aB[b] = 0.0f; airFloorE[b] = 0.0; gS2[b] = 0.0f; gB2[b] = 0.0f; }
         airPrevP  = curP;
@@ -661,15 +676,19 @@ public:
         mix            = q.mix;
         lowVoice       = q.lowVoice;
         floorHz        = std::clamp (q.pitchFloorHz, 0.0f, 400.0f);
-        airAmt         = std::clamp (q.airPreserve, 0.0f, 1.5f);
-        // 0..1 -> split amount up to the variance-optimal 2/3 (beyond it,
-        // subtracting more noise puts anti-correlated copies back into the
-        // grains); 1..1.5 -> boost the bypassed breath instead, which both
-        // masks what is left of the periodic noise and makes the knob move
-        // clearly audible.
-        airKSplit      = 0.6667f * std::min (1.0f, airAmt);
-        airBoost       = 1.0f + 1.2f * std::max (0.0f, airAmt - 1.0f);
-        airShineLin    = std::pow (10.0f, std::clamp (q.airShineDb, 0.0f, 6.0f) / 20.0f);
+        // Keep the APVTS's historical 0..1.5 value readable, but stop the
+        // audio law at the listening-tested safe ceiling. Values above 0.6
+        // are deliberately identical: there is no residual-wide boost path.
+        airAmt          = std::clamp (q.airPreserve, 0.0f, 0.6f);
+        airBreathAmt    = std::clamp (q.airBreath,    0.0f, 1.0f);
+        airEndBreathAmt = std::clamp (q.airEndBreath, 0.0f, 1.0f);
+
+        // Base split from Natural Air. Source Breathiness may raise this at
+        // runtime in proportion to its CURRENT (including local) envelope;
+        // keeping that part dynamic makes Ending Breath a real no-op before
+        // the release rather than silently enabling Natural Air all phrase.
+        airKSplit      = 0.6667f * airAmt;
+        airShineLin    = std::pow (10.0f, std::clamp (q.airShineDb, 0.0f, 9.0f) / 20.0f);
         gciOn          = q.gciSync;
         grainHalfPOv   = std::clamp (q.grainHalfP, 0.0f, 1.5f);
         grainBlendOn   = q.grainBlend;
@@ -862,6 +881,9 @@ public:
             voiced = false;
             holdCount = 0;
             lastGci = -1;
+            airFastEnv = airSlowEnv = airPeakEnv = airPhraseEnv = 0.0f;
+            airPrevFast = 0.0f;
+            airPhraseAge = airPhraseGap = airFallSamples = 0;
         }
         const int64_t start = writePos;
         for (int i = 0; i < n; ++i)
@@ -874,18 +896,38 @@ public:
         // follow the measured per-band aperiodicity (control rate, see
         // updateAirBands). Grains are cut from harmBuf (= input minus air)
         // and noiseBuf is added back to the output un-pitched, D samples
-        // later. While the knob is <= 1.0 the bypass gains equal the split
-        // gains, so harmBuf + noiseBuf reconstructs the input exactly.
-        // With the knob at 0 the buffers are a plain copy and everything
-        // here is skipped (bit-identical bypass, no CPU cost).
+        // later. Base bypass gains equal the split gains, so harmBuf +
+        // noiseBuf reconstructs the input. Air Breathiness can then raise
+        // only measured aperiodic material in b2/b3 (roughly F3 and above),
+        // never the lower active band where a pitched ghost is perceived.
+        // With every Air control at 0 the buffers are a plain copy and the
+        // whole path is skipped (bit-identical bypass, no CPU cost).
         {
-            const bool on = voiced && airAmt > 0.001f;
+            if (airEndBreathAmt > 0.001f)
+                updateAirPhrase (in, n);
+            else
+            {
+                airFastEnv = airSlowEnv = airPeakEnv = airPhraseEnv = 0.0f;
+                airPrevFast = 0.0f;
+                airPhraseAge = airPhraseGap = airFallSamples = 0;
+            }
+
+            const float breathNow = std::clamp (airBreathAmt
+                                               + airEndBreathAmt * airPhraseEnv,
+                                                0.0f, 1.0f);
+            const float splitNow = 0.6667f * std::max (airAmt, 0.6f * breathNow);
+            const bool  on = voiced && splitNow > 0.001f;
             {
                 float tS[4], tB[4], tMax = 0.0f, gMax = 0.0f;
+                // Max emphasis: +15 dB in the F3/presence air band and +6 dB
+                // above 6 kHz. Linear interpolation keeps the knob gentle at
+                // small values; Air Shine remains a separate top-band colour.
+                static constexpr float kBreathMax[4] { 1.0f, 1.0f, 5.6234f, 1.9953f };
                 for (int b = 0; b < 4; ++b)
                 {
-                    tS[b] = on ? airKSplit * kWBand[b] * aB[b] : 0.0f;
-                    tB[b] = tS[b] * airBoost;
+                    tS[b] = on ? splitNow * kWBand[b] * aB[b] : 0.0f;
+                    const float bg = 1.0f + breathNow * (kBreathMax[b] - 1.0f);
+                    tB[b] = tS[b] * bg;
                     if (b == 3) tB[b] *= airShineLin;   // Air Shine: bypass only
                     tMax  = std::max (tMax, tB[b]);
                     gMax  = std::max ({ gMax, gS2[b], gB2[b] });
@@ -1023,7 +1065,7 @@ public:
             {
                 dezipperStep (512);
                 detectPitch (nextDetectPos);
-                if (airAmt > 0.001f)
+                if (airAmt > 0.001f || airBreathAmt > 0.001f || airEndBreathAmt > 0.001f)
                     updateAirBands (nextDetectPos);
                 if (vaOn)
                     updateVowelAdapt();
@@ -1034,7 +1076,7 @@ public:
         else if (sinceDetect >= 512 && writePos >= kDetN + maxLag)
         {
             detectPitch (writePos);
-            if (airAmt > 0.001f)
+            if (airAmt > 0.001f || airBreathAmt > 0.001f || airEndBreathAmt > 0.001f)
                 updateAirBands (writePos);
             if (vaOn)
                 updateVowelAdapt();
@@ -1329,6 +1371,7 @@ public:
 
     bool  isVoiced()  const { return voiced; }
     float currentF0() const { return voiced ? (float) fs / curP : 0.0f; }
+    float airPhraseAmount() const { return airPhraseEnv; }  // offline observability
 
     // AEIOU Character debug taps (Phase 1 observability). NOTE: plain
     // non-atomic floats written on the audio thread — currently read by
@@ -1854,6 +1897,84 @@ private:
         // and regularising fry is exactly what the epoch tracking is for.
         if (! lowVoice && rel > 0.04f) gciHold = 4;
         else if (gciHold > 0)         --gciHold;
+    }
+
+    // -------- source-derived local breathiness: acoustic release focus ----
+    // Speech Prosody 2026 reports breathy/aspirated qualities most often on
+    // the last syllable of a phrase. A realtime audio plug-in cannot know a
+    // linguistic phrase boundary before it happens without ASR or much more
+    // lookahead, so this detector deliberately makes the narrower claim it
+    // can support: an established voiced run whose level keeps falling.
+    //
+    // Two RMS followers reject waveform ripple. A 25 ms sustained fall plus
+    // a drop below the recent peak opens the target; short consonant notches
+    // and ordinary amplitude modulation release it again. It only controls
+    // the EXTRA b2/b3 source residual gain — base Natural Air is unchanged.
+    void updateAirPhrase (const float* x, int n)
+    {
+        double e = 0.0;
+        for (int i = 0; i < n; ++i) e += (double) x[i] * (double) x[i];
+        const float rms = (float) std::sqrt (e / std::max (1, n) + 1.0e-30);
+        const float dt  = (float) (n / fs);
+        auto follow = [dt] (float& y, float v, float attack, float release)
+        {
+            const float tau = v > y ? attack : release;
+            const float a   = 1.0f - std::exp (-dt / tau);
+            y += a * (v - y);
+        };
+        follow (airFastEnv, rms, 0.008f, 0.035f);
+        follow (airSlowEnv, rms, 0.080f, 0.180f);
+
+        const int cap = std::max (n, (int) (10.0 * fs));
+        float target = 0.0f;
+        if (voiced)
+        {
+            if (airPhraseAge == 0)
+                airPeakEnv = std::max (airFastEnv, 1.0e-12f);
+            airPhraseAge = std::min (cap, airPhraseAge + n);
+            airPhraseGap = 0;
+
+            if (airFastEnv >= airPeakEnv)
+                airPeakEnv = airFastEnv;
+            else
+                airPeakEnv = std::max (airFastEnv,
+                                       airPeakEnv * std::exp (-dt / 0.8f));
+
+            const bool falling = airFastEnv < 0.94f * airSlowEnv
+                              && airFastEnv < 0.999f * airPrevFast;
+            if (falling)
+                airFallSamples = std::min (cap, airFallSamples + n);
+            else
+                airFallSamples = std::max (0, airFallSamples - 2 * n);
+
+            const float ratio = airFastEnv / std::max (airPeakEnv, 1.0e-12f);
+            const float tail  = std::clamp ((0.82f - ratio) / 0.42f, 0.0f, 1.0f);
+            const float ageG  = std::clamp ((airPhraseAge - (int) (0.12 * fs))
+                                            / (float) std::max (1, (int) (0.08 * fs)),
+                                            0.0f, 1.0f);
+            const float fallG = std::clamp ((airFallSamples - (int) (0.025 * fs))
+                                            / (float) std::max (1, (int) (0.060 * fs)),
+                                            0.0f, 1.0f);
+            const float levelG = (airPeakEnv > 1.0e-5f
+                               && airFastEnv > 0.08f * airPeakEnv) ? 1.0f : 0.0f;
+            target = ageG * tail * fallG * levelG;
+        }
+        else
+        {
+            airPhraseGap = std::min (cap, airPhraseGap + n);
+            airFallSamples = 0;
+            if (airPhraseGap > (int) (0.18 * fs))
+            {
+                airPhraseAge = 0;
+                airPeakEnv = airFastEnv;
+            }
+        }
+
+        airPrevFast = airFastEnv;
+        const float tau = target > airPhraseEnv ? 0.035f : 0.080f;
+        const float a   = 1.0f - std::exp (-dt / tau);
+        airPhraseEnv += a * (target - airPhraseEnv);
+        if (airPhraseEnv < 1.0e-6f) airPhraseEnv = 0.0f;
     }
 
     // ---------------- Natural Air v2: per-band aperiodicity ---------------
@@ -2941,9 +3062,10 @@ private:
     float hiFreq = 0.0f, hiPAmt = 0.5f, hiFAmt = 1.0f;   // High Range guard
 
     // Natural Air (harmonic/noise split) state
-    float airAmt    = 0.0f;               // knob value
-    float airKSplit = 0.0f;               // split coefficient (<= 2/3)
-    float airBoost  = 1.0f;               // bypass emphasis (knob > 0.7)
+    float airAmt          = 0.0f;         // effective knob value, capped at 0.6
+    float airBreathAmt    = 0.0f;         // global source-derived emphasis
+    float airEndBreathAmt = 0.0f;         // release-focused source emphasis
+    float airKSplit       = 0.0f;         // split coefficient (<= 0.4)
     float airP   = 320.0f;                // per-sample smoothed comb period
     float airK   = 0.004f;                // ~5 ms gain smoothing
 
@@ -2958,6 +3080,9 @@ private:
     float    gS2[4] { 0.0f, 0.0f, 0.0f, 0.0f };     // smoothed split gains
     float    gB2[4] { 0.0f, 0.0f, 0.0f, 0.0f };     // smoothed bypass gains
     float    airShineLin = 1.0f;          // Air Shine top-band bypass gain
+    float    airFastEnv = 0.0f, airSlowEnv = 0.0f, airPeakEnv = 0.0f;
+    float    airPrevFast = 0.0f, airPhraseEnv = 0.0f;
+    int      airPhraseAge = 0, airPhraseGap = 0, airFallSamples = 0;
     float    airPrevP  = 320.0f;          // control-rate f0-motion tracking
     int      airMotHold = 0;              // frames left in the motion hold
     float    pitchConf = 0.0f;            // YIN clarity 0..1

@@ -5265,7 +5265,8 @@ public:
 // ---------------------------------------------------------------------------
 // BETA window (v0.30.0): the experimental controls, kept out of the MAIN tab
 // so the main screen only shows features that are considered finished.
-// Currently GCI Grain Sync and Breath.
+// Currently GCI Grain Sync, extended Onset Hold, Release Repair, Analysis
+// Cadence and Legacy Low Latency.
 class BetaPanel : public juce::Component
 {
 public:
@@ -5314,16 +5315,6 @@ public:
                    "戻ります。オンにしてガタつき・ロボットっぽさを感じる場合はオフのままにして"
                    "ください(オフ=従来どおり)。"));
         addAndMakeVisible (*gciRow);
-
-        breathRow = std::make_unique<ParamRow> (proc, "breath2", ParamRow::Kind::slider,
-            "Breath",
-            vmTip ("EXPERIMENTAL. Replaces the upper harmonics with aspiration noise shaped by your "
-                   "vocal tract (harmonic+noise model). Small amounts (0.1-0.2) add air; the quality "
-                   "is still being tuned - leave at 0 if it sounds synthetic to you.",
-                   "実験的機能。高域の倍音を、声道の響きで整形した気息ノイズに置き換えます"
-                   "(ハーモニック+ノイズモデル)。0.1〜0.2で空気感が出ます。品質は調整中なので、"
-                   "合成的に聞こえる場合は0のままにしてください。"));
-        addAndMakeVisible (*breathRow);
 
         holdLongRow = std::make_unique<ParamRow> (proc, "onsetholdlong", ParamRow::Kind::toggle,
             "Onset Hold Long",
@@ -5426,7 +5417,7 @@ public:
         };
         addAndMakeVisible (closeBtn);
 
-        setSize (600, 414);   // + one 28 px row and its 4 px gap (Analysis Cadence)
+        setSize (600, 380);   // six experimental rows, plus the close button
         sendLookAndFeelChange();
     }
 
@@ -5439,8 +5430,6 @@ public:
         note.setBounds (r.removeFromTop (46));
         r.removeFromTop (6);
         gciRow->setBounds (r.removeFromTop (28));
-        r.removeFromTop (4);
-        breathRow->setBounds (r.removeFromTop (30));
         r.removeFromTop (4);
         holdLongRow->setBounds (r.removeFromTop (28));
         r.removeFromTop (4);
@@ -5461,7 +5450,7 @@ private:
     juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
     juce::TooltipWindow  tips { this, 400 };
     juce::Label heading, note;
-    std::unique_ptr<ParamRow> gciRow, breathRow, holdLongRow, relOnRow, relRow,
+    std::unique_ptr<ParamRow> gciRow, holdLongRow, relOnRow, relRow,
                               cadenceRow, lowLatRow;
     juce::TextButton closeBtn { "Close" };
 };
@@ -6924,17 +6913,33 @@ private:
         cardAir = &newCard ("AIR", "ui_mark_M_Air_png", ak::headBlue);
         rowAir = &knob (*cardAir, "air", "Air",
             tip ("Preserves the natural breath and aperiodic detail of the voice while suppressing "
-                 "old-pitch harmonic leakage. Up to 1.0 the preserved amount increases at natural "
-                 "loudness; from 1.0 to 1.5 the preserved air is also emphasized. 0 = off.",
+                 "old-pitch harmonic leakage. Listening tests set 0.6 as the safe maximum; values "
+                 "above 0.6 are kept readable for old sessions but produce the same sound. 0 = off.",
                  "声に含まれる自然な息や非周期成分を保ちながら、元のピッチ成分が重なって聞こえる"
-                 "ゴーストを抑えます。1.0までは自然な音量のまま保持量が増え、1.0〜1.5では"
-                 "息成分を強調します。0=オフ。"), ak::Tone::yellow);
+                 "ゴーストを抑えます。実聴結果から0.6を安全な最大値とし、旧セッション互換のため"
+                 "0.6より上の値も読み込めますが、音は0.6と同じです。0=オフ。"), ak::Tone::yellow);
         slider (*cardAir, "airshine", "Air Shine (dB)",
             tip ("Adds high-frequency openness and air above the preserved natural breath. Only "
                  "the highest air band (above ~6 kHz) comes back louder; the mids and the "
-                 "harmonic body are untouched. Try 2-4 dB.",
+                 "harmonic body are untouched. Try 3-6 dB; 9 dB is the new test maximum.",
                  "Natural Airの高域に抜け感と明るさを加えます。約6kHz以上の空気感だけが"
-                 "持ち上がり、中音域や声の芯には触れません。まずは2〜4dBがおすすめ。"), ak::Tone::yellow);
+                 "持ち上がり、中音域や声の芯には触れません。まずは3〜6dB、9dBは新しい検証上限です。"), ak::Tone::yellow);
+        slider (*cardAir, "breath2", "Air Breathiness",
+            tip ("Strengthens only aperiodic texture already present in your voice, mainly around "
+                 "2.5-6 kHz and above. It creates no random noise and does not boost the lower Air "
+                 "band. A very clean source will change less. Start around 0.2-0.4.",
+                 "入力声にもともと含まれる非周期成分だけを、主に2.5〜6kHz以上で強めます。"
+                 "乱数ノイズは生成せず、Airの低い帯域も増幅しません。元声が非常にクリーンな場合は"
+                 "変化も小さくなります。まずは0.2〜0.4がおすすめです。"), ak::Tone::yellow);
+        slider (*cardAir, "airend", "Ending Breath",
+            tip ("Adds the same source-derived breathiness only while an established voiced sound "
+                 "keeps fading. This is an acoustic phrase-ending candidate, not language/ASR: it "
+                 "may also react to a deliberately faded quiet syllable. It never invents an "
+                 "unvoiced breath after the sound stops. Start around 0.3-0.6.",
+                 "持続した有声音が減衰し続ける区間だけ、同じ実声由来の息成分を加えます。"
+                 "言語認識ではなく音響的な語尾候補なので、意図的に弱くした音節にも反応する場合が"
+                 "あります。発声停止後の無声の息を新しく生成することはありません。"
+                 "まずは0.3〜0.6がおすすめです。"), ak::Tone::yellow);
 
         // The star art ships gold; recoloured so it matches PITCH and the
         // rest of the blue heading column.

@@ -41,6 +41,14 @@ def band_ratio(x, lo, hi):
     fr = np.fft.rfftfreq(16384, 1/FS)
     return mag[(fr>=lo)&(fr<hi)].sum() / mag.sum()
 
+def band_rms_window(x, lo, hi, a, b):
+    seg = x[int(a*FS):int(b*FS)]
+    n = 1 << int(np.floor(np.log2(max(2, len(seg)))))
+    seg = seg[:n] * np.hanning(n)
+    X = np.fft.rfft(seg)
+    fr = np.fft.rfftfreq(n, 1/FS)
+    return np.sqrt((np.abs(X[(fr>=lo)&(fr<hi)])**2).sum() / n)
+
 def centroid(x):
     seg = x[len(x)//3 : len(x)//3 + 16384] * np.hanning(16384)
     mag = np.abs(np.fft.rfft(seg))**2
@@ -106,16 +114,16 @@ dry_p = hf_periodicity(load("out_air_dry.wav"), f0out)
 mx = load("out_air_max.wav")
 print(f"HF periodicity @f0out lag: dry={dry_p:.3f}  off={hf_periodicity(off, f0out):.3f}  "
       f"on(1.0)={hf_periodicity(on, f0out):.3f}  max(1.5)={hf_periodicity(mx, f0out):.3f}"
-      f"   (on/max should approach dry)")
+      f"   (1.0/1.5 are compatibility values: both use the 0.6 ceiling)")
 print(f"max setting: f0={f0_autocorr(mx):6.1f}  "
-      f"HF 3-10k={band_ratio(mx, 3000, 10000):.4f}   (breath boosted ~2.6x expected)")
+      f"HF 3-10k={band_ratio(mx, 3000, 10000):.4f}   (no >1 residual boost)")
 print(f"f0: off={f0_autocorr(off):6.1f}  on={f0_autocorr(on):6.1f}   (both ~{f0out:.0f})")
 fo = " ".join(f"{p:5.0f}" for p in formants_lpc(off))
 fn = " ".join(f"{p:5.0f}" for p in formants_lpc(on))
 print(f"formants: off={fo}   on={fn}   (should match)")
 ho, hn = band_ratio(off, 3000, 10000), band_ratio(on, 3000, 10000)
 print(f"HF 3-10k energy ratio: off={ho:.4f}  on={hn:.4f}   "
-      f"(similar = energy preserved; boost only engages above knob 1.0)")
+      f"(similar = energy preserved at the safe ceiling)")
 
 # identity transparency: air=0.8 with no conversion must stay ~equal to air=0
 i0, i1 = load("out_air_id0.wav"), load("out_air_id.wav")
@@ -225,10 +233,27 @@ print(f"  90Hz steady, v2: old-grid energy={g90:6.1f} dB (compare across version
 print("Air Shine (top-band bypass gain only, breathy vowel +7st):")
 for db, path in [(0, "out_nav2_breathy_on.wav"),
                  (3, "out_nav2_shine3.wav"),
-                 (6, "out_nav2_shine6.wav")]:
+                 (6, "out_nav2_shine6.wav"),
+                 (9, "out_nav2_shine9.wav")]:
     x = load(path)
     print(f"  +{db} dB: 6-16k={band_ratio(x,6000,16000):.5f}  1-4k={band_ratio(x,1000,4000):.4f}"
           f"  rms={np.sqrt((x*x).mean()):.4f}   (6-16k up, 1-4k & rms ~flat)")
+
+print("source-derived Air Breathiness (no generated noise):")
+b0, b1 = load("out_airbreath_off.wav"), load("out_airbreath_global.wav")
+for lo, hi in [(700,2500), (2500,6000), (6000,16000)]:
+    q0 = band_rms_window(b0, lo, hi, .8, 1.7)
+    q1 = band_rms_window(b1, lo, hi, .8, 1.7)
+    print(f"  {lo:4d}-{hi:5d} Hz: {q1/max(q0,1e-12):.2f}x")
+
+print("Ending Breath (steady middle should match; release should rise locally):")
+e0, e1 = load("out_airbreath_release_base.wav"), load("out_airbreath_release_end.wav")
+for name, a, b in [("middle", .75, 1.25), ("release", 1.75, 1.86)]:
+    m0 = band_rms_window(e0, 2500, 6000, a, b)
+    m1 = band_rms_window(e1, 2500, 6000, a, b)
+    h0 = band_rms_window(e0, 6000,16000, a, b)
+    h1 = band_rms_window(e1, 6000,16000, a, b)
+    print(f"  {name:7s}: 2.5-6k={m1/max(m0,1e-12):.2f}x  6-16k={h1/max(h0,1e-12):.2f}x")
 
 print("control-rate settling after unvoiced->voiced (HF air onset, evaluates")
 print("the 512-sample update + 5 ms gain smoothing; voiced starts at t=1.0s):")

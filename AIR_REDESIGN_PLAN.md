@@ -5,6 +5,25 @@
 標準機能として統合、旧Air Preserve経路は削除。本書はアーカイブ。**
 作成: 2026-07-16
 
+## 2026-08-27 追補（v0.60.0候補）
+
+本書の「Natural AirとBreathは統合しない」は、当時のBreathが**生成ノイズ**だった
+ことを前提にした判断。ユーザー実聴で生成Breathは電子的、Natural AirはAir 0.6まで
+自然、Air≧0.7の定常母音で低音ゴースト、Air Shineは問題なしと確認されたため、方針を
+次のように更新する。
+
+- Natural AirはDSP上0.6を上限とし、旧1〜1.5の残差全体ブーストを廃止。APVTSの
+  0〜1.5レンジは旧セッション互換のため維持し、0.6以上は同じ音にする。
+- Air Shineは>6kHz限定のまま0〜9dBへ拡張。
+- 旧`breath2`は生成ノイズをやめ、帯域別aperiodicityで実在を確認できたb2/b3残差だけを
+  強める`Air Breathiness`へ転用。実声成分の強調なのでAIRへ統合する。
+- 新規`airend`はSpeech Prosody 2026の句末Breathiness傾向を受けた局所制御。ただし
+  ASRなしのリアルタイム処理では句末を意味的に先読みできないため、「120ms以上の有声が
+  25ms以上減衰し、最近のピーク比0.82未満」という音響release候補だけを対象にする。
+  有声息声bv〜aspirated voice av相当で、停止後の無声aspiration aは生成しない。
+
+詳細と試験値は`HANDOVER.md`のv0.60.0項を正とする。以下はv0.24.0までの設計史。
+
 ## Phase 1 実装結果（v0.20.0, 2026-07-16）
 
 実装は `dsp/PsolaEngine.h`（`airV2` / `AirBands` / `updateAirBands()`）、

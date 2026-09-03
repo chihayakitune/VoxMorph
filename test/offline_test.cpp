@@ -203,6 +203,23 @@ static std::vector<float> makeBreathy (double f0, double seconds)
     return v;
 }
 
+// A voiced phrase candidate for the Ending Breath detector: established
+// breathy vowel, then a 300 ms acoustic release, then silence. This tests the
+// causal envelope only; it intentionally makes no claim about language.
+static std::vector<float> makeBreathyRelease (double f0)
+{
+    auto v = makeBreathy (f0, 1.8);
+    const int fade = (int) (0.30 * FS);
+    const int begin = (int) v.size() - fade;
+    for (int i = 0; i < fade; ++i)
+    {
+        const float g = 1.0f - (float) i / (float) (fade - 1);
+        v[(size_t) (begin + i)] *= g;
+    }
+    v.insert (v.end(), (size_t) (0.35 * FS), 0.0f);
+    return v;
+}
+
 // pure harmonic series (partials at -6 dB/oct up to Nyquist*0.9), with an
 // optional log-domain glide (f0a -> f0b over the length) and vibrato —
 // the "known ground truth" inputs for the Natural Air v2 tests
@@ -462,6 +479,21 @@ static double rmsOf (const std::vector<float>& x)   // stable middle section
     double e = 0.0;
     for (size_t i = a; i < b; ++i) e += (double) x[i] * x[i];
     return std::sqrt (e / (double) (b - a));
+}
+
+static double airBandRms (const std::vector<float>& x, int band,
+                          size_t a, size_t b)
+{
+    PsolaEngine::AirBands sp;
+    sp.setup (FS);
+    a = std::min (a, x.size()); b = std::min (b, x.size());
+    double e = 0.0; size_t m = 0;
+    for (size_t i = 0; i < b; ++i)
+    {
+        float y[4]; sp.split (x[i], y);
+        if (i >= a) { e += (double) y[band] * y[band]; ++m; }
+    }
+    return std::sqrt (e / (double) std::max ((size_t) 1, m));
 }
 
 static double peakOf (const std::vector<float>& x)
@@ -1373,6 +1405,111 @@ int main()
         if (! ok) ++naFail;
     }
 
+    // (b2) listening-tested safety law. The public parameter still accepts
+    // legacy values through 1.5, but 0.6 is now the effective ceiling and
+    // there is no separate >1 residual boost.
+    {
+        const auto breathy = makeBreathy (120.0, 2.0);
+        P p06; p06.pitchSemi = 7.0f; p06.airPreserve = 0.6f;
+        P p07 = p06; p07.airPreserve = 0.7f;
+        P p10 = p06; p10.airPreserve = 1.0f;
+        P p15 = p06; p15.airPreserve = 1.5f;
+        const auto a = run (breathy, p06), b = run (breathy, p07);
+        const auto c = run (breathy, p10), d = run (breathy, p15);
+        auto maxDiff = [] (const std::vector<float>& x, const std::vector<float>& y)
+        {
+            double m = 0.0;
+            for (size_t i = 0; i < x.size(); ++i)
+                m = std::max (m, (double) std::abs (x[i] - y[i]));
+            return m;
+        };
+        const double d07 = maxDiff (a, b), d10 = maxDiff (a, c), d15 = maxDiff (a, d);
+        const bool ok = d07 == 0.0 && d10 == 0.0 && d15 == 0.0;
+        std::printf ("Air ceiling 0.6: max diff vs 0.7/1.0/1.5 = %.1e/%.1e/%.1e  %s\n",
+                     d07, d10, d15, ok ? "PASS" : "FAIL");
+        if (! ok) ++naFail;
+    }
+
+    // (b3) source-derived Breathiness. It may raise only material the input
+    // actually contains in b2/b3; a clean harmonic source must not acquire a
+    // generated hiss, and the lower active Air band must not be emphasized.
+    {
+        const auto breathy = makeBreathy (120.0, 2.2);
+        P off; off.pitchSemi = 7.0f;
+        P br = off; br.airBreath = 1.0f;
+        const auto o0 = run (breathy, off), o1 = run (breathy, br);
+        writeWav ("out_airbreath_off.wav", o0);
+        writeWav ("out_airbreath_global.wav", o1);
+        const size_t a = (size_t) (0.8 * FS), b = (size_t) (1.7 * FS);
+        const double r1 = airBandRms (o1, 1, a, b) / std::max (airBandRms (o0, 1, a, b), 1e-12);
+        const double r2 = airBandRms (o1, 2, a, b) / std::max (airBandRms (o0, 2, a, b), 1e-12);
+        const double r3 = airBandRms (o1, 3, a, b) / std::max (airBandRms (o0, 3, a, b), 1e-12);
+
+        const auto harm = makeHarm (150.0, 150.0, 2.2);
+        const auto h0 = run (harm, off), h1 = run (harm, br);
+        double de = 0.0, se = 0.0;
+        for (size_t i = h0.size() / 3; i < h0.size(); ++i)
+        { const double q = h1[i] - h0[i]; de += q*q; se += (double) h0[i]*h0[i]; }
+        const double cleanDiff = std::sqrt (de / std::max (se, 1e-30));
+        const bool ok = r1 < 1.10 && r2 > 1.20 && r3 > 1.12 && cleanDiff < 0.02
+                     && ! hasBad (o1) && ! hasBad (h1);
+        std::printf ("source Air Breathiness band RMS ratio b1/b2/b3=%.2f/%.2f/%.2f, "
+                     "clean-harm diff=%.4f  %s\n", r1, r2, r3, cleanDiff,
+                     ok ? "PASS" : "FAIL");
+        if (! ok) ++naFail;
+    }
+
+    // (b4) Ending Breath: steady middle stays at the Natural Air baseline,
+    // while a sustained acoustic release opens the local source-air gain.
+    {
+        const auto phrase = makeBreathyRelease (120.0);
+        P base; base.pitchSemi = 7.0f; base.airPreserve = 0.6f;
+        P end = base; end.airEndBreath = 1.0f;
+        const auto o0 = run (phrase, base), o1 = run (phrase, end);
+        writeWav ("out_airbreath_release_base.wav", o0);
+        writeWav ("out_airbreath_release_end.wav", o1);
+
+        PsolaEngine eng; eng.prepare (FS); eng.setParams (end);
+        std::vector<float> tmp (phrase.size(), 0.0f);
+        float midEnv = 0.0f, tailEnv = 0.0f, afterEnv = 0.0f;
+        for (size_t i = 0; i < phrase.size(); i += 256)
+        {
+            const int m = (int) std::min ((size_t) 256, phrase.size() - i);
+            eng.process (phrase.data() + i, tmp.data() + i, m);
+            const double t = (double) i / FS;
+            if (t > 0.6 && t < 1.3) midEnv = std::max (midEnv, eng.airPhraseAmount());
+            if (t > 1.5 && t < 1.82) tailEnv = std::max (tailEnv, eng.airPhraseAmount());
+            if (t > 2.0) afterEnv = std::max (afterEnv, eng.airPhraseAmount());
+        }
+        const size_t ma = (size_t) (0.75 * FS), mb = (size_t) (1.25 * FS);
+        double dm = 0.0, sm = 0.0;
+        for (size_t i = ma; i < mb; ++i)
+        { const double q = o1[i]-o0[i]; dm += q*q; sm += (double) o0[i]*o0[i]; }
+        const double midDiff = std::sqrt (dm / std::max (sm, 1e-30));
+        // The converted signal is delayed by the engine lookahead; compare
+        // the audible release rather than the input-side detector instant.
+        const size_t ta = (size_t) (1.75 * FS), tb = (size_t) (1.86 * FS);
+        const double tailB2 = airBandRms (o1, 2, ta, tb)
+                            / std::max (airBandRms (o0, 2, ta, tb), 1e-12);
+
+        // With Natural Air itself at zero, merely enabling Ending Breath may
+        // not alter the established middle before its release envelope opens.
+        P plain; plain.pitchSemi = 7.0f;
+        P localOnly = plain; localOnly.airEndBreath = 1.0f;
+        const auto z0 = run (phrase, plain), z1 = run (phrase, localOnly);
+        double preMax = 0.0;
+        for (size_t i = 0; i < (size_t) (1.45 * FS); ++i)
+            preMax = std::max (preMax, (double) std::abs (z1[i] - z0[i]));
+        const bool ok = midEnv < 0.05f && tailEnv > 0.15f && afterEnv < 0.10f
+                     && midDiff < 0.02 && tailB2 > 1.05 && preMax == 0.0
+                     && ! hasBad (o1) && ! hasBad (z1);
+        std::printf ("Ending Breath env mid/tail/after=%.3f/%.3f/%.3f, "
+                     "mid diff=%.4f tail-b2=%.2fx pre-release max=%.1e  %s\n",
+                     midEnv, tailEnv, afterEnv, midDiff, tailB2, preMax,
+                     ok ? "PASS" : "FAIL");
+        if (! ok) ++naFail;
+    }
+
     // (c) per-band aperiodicity discrimination (spec item: vibrato / glide /
     // known noise must not fool the estimator)
     {
@@ -1512,7 +1649,7 @@ int main()
         writeWav ("out_nav2_sib_off.wav", run (sib, leg));
         writeWav ("out_nav2_sib_bac.wav", run (sib, bac));
 
-        // Air Shine: top-band bypass gain comparison (0/3/6 dB; 0 dB is
+        // Air Shine: top-band bypass gain comparison (0/3/6/9 dB; 0 dB is
         // out_nav2_breathy_bac). Only the >6k air may rise; mids untouched.
         {
             P sh = bac;
@@ -1520,6 +1657,8 @@ int main()
             writeWav ("out_nav2_shine3.wav", run (makeBreathy (120.0, 2.0), sh));
             sh.airShineDb = 6.0f;
             writeWav ("out_nav2_shine6.wav", run (makeBreathy (120.0, 2.0), sh));
+            sh.airShineDb = 9.0f;
+            writeWav ("out_nav2_shine9.wav", run (makeBreathy (120.0, 2.0), sh));
         }
 
         std::vector<float> tr = makeNoiseCons (1.0);
@@ -1832,7 +1971,51 @@ int main()
         if (! ok) ++vaFail;
     }
 
-    // (e) no allocation in process() after warm-up with the warp engaged,
+    // (e) product decision: no measured F1/F2 means no AEIOU Character
+    // effect. The common gate must release both shift and gain to zero.
+    {
+        // Product decision (2026-08-26): AEIOU Character may act only when
+        // F1/F2 are genuinely measurable. A held/default formant pair must
+        // release BOTH the per-formant shift and resonance-gain effects to
+        // zero instead of confidently applying the wrong vowel character.
+        VowelAdaptiveWarp w;
+        w.prepare (FS, 512);
+        w.setAmount (1.0f);
+
+        VowelAdaptiveWarp::Input measured { 700.0f, 1220.0f, 2600.0f,
+                                             1.0f, true };
+        measured.formantConf = 1.0f;
+        for (int i = 0; i < 200; ++i) w.process (measured);
+        const float shiftOn = std::max ({ std::abs (w.offsetSemi (0)),
+                                          std::abs (w.offsetSemi (1)),
+                                          std::abs (w.offsetSemi (2)) });
+        const float gainOn = std::max ({ std::abs (w.gainDb (0)),
+                                         std::abs (w.gainDb (1)),
+                                         std::abs (w.gainDb (2)) });
+
+        auto notMeasured = measured;
+        notMeasured.formantConf = 0.0f;
+        w.process (notMeasured);
+        const float gateOff = w.confidence();
+        for (int i = 0; i < 200; ++i) w.process (notMeasured);
+        const float shiftOff = std::max ({ std::abs (w.offsetSemi (0)),
+                                           std::abs (w.offsetSemi (1)),
+                                           std::abs (w.offsetSemi (2)) });
+        const float gainOff = std::max ({ std::abs (w.gainDb (0)),
+                                          std::abs (w.gainDb (1)),
+                                          std::abs (w.gainDb (2)) });
+
+        const bool ok = shiftOn > 0.05f && gainOn > 0.02f
+                     && gateOff == 0.0f
+                     && shiftOff < 1.0e-4f && gainOff < 1.0e-4f;
+        std::printf ("formant-confidence gate: on shift=%.3f st gain=%.3f dB; "
+                     "unmeasurable gate=%.3f shift=%.6f gain=%.6f  %s\n",
+                     shiftOn, gainOn, gateOff, shiftOff, gainOff,
+                     ok ? "PASS" : "FAIL");
+        if (! ok) ++vaFail;
+    }
+
+    // (f) no allocation in process() after warm-up with the warp engaged,
     // and mode coexistence (Low Voice + GCI + Natural Air + adaptive warp;
     // Low Latency separately) — outputs must stay finite
     {
@@ -1862,7 +2045,7 @@ int main()
         if (! ok) ++vaFail;
     }
 
-    // (f) AEIOU Character map plumbing (v0.26.0): Params.vowelMap reaches
+    // (g) AEIOU Character map plumbing (v0.26.0): Params.vowelMap reaches
     // the estimator — an all-zero map must produce zero offsets while the
     // default (Natural) map produces the nonzero offsets checked in (b)
     {
