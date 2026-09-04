@@ -23,6 +23,8 @@
 #include <limits>
 #include <vector>
 
+template <typename T> static void juce_ignore (const T&) {}
+
 static int g_fail = 0;
 static void check (bool ok, const char* what)
 {
@@ -378,6 +380,75 @@ int main()
         }
         check (std::memcmp (before.data(), loud.data(), loud.size() * sizeof (float)) == 0,
                "bypass: loud input passes through untouched");
+    }
+
+    // ---- 10. the ENGINE VALIDATION switch (MAIN tab, v0.67.0) ---------------
+    {
+        // The switch reaches the stage as setBypassed(). What it has to
+        // guarantee is that BOTH halves come back to unity together: the
+        // restore undoes the gain from D samples ago, so if the pre stage
+        // stopped attenuating while the ring still held old values, the
+        // output would be boosted by a gain that was never applied to it.
+        const int n = (int) (kFs * 4);
+        std::vector<float> in ((size_t) n);
+        for (int i = 0; i < n; ++i)
+            in[(size_t) i] = 2.0f * (float) std::sin (2.0 * M_PI * 150.0 * i / kFs);
+
+        ProtectionGain pg; pg.prepare (kFs, 256);
+        Delay dly; dly.prepare (D);
+
+        std::vector<float> prot ((size_t) n), rest ((size_t) n);
+        std::vector<float> work ((size_t) 256);
+        const int flip = (int) (kFs * 1.0);       // switch OFF one second in
+        float worstStep = 0.0f, prevOut = 0.0f;
+
+        for (int off = 0; off < n; off += 256)
+        {
+            const int c = std::min (256, n - off);
+            pg.setBypassed (off >= flip);
+            std::copy (in.begin() + off, in.begin() + off + c, work.begin());
+            float* ch[1] = { work.data() };
+            pg.processPre (ch, 1, c);
+            std::copy (work.begin(), work.begin() + c, prot.begin() + off);
+            dly.process (work.data(), c);
+            pg.processPost (ch, 1, c, D);
+            std::copy (work.begin(), work.begin() + c, rest.begin() + off);
+        }
+
+        // engaged before the flip. The window has to END at the flip: past it
+        // the stage is bypassed and the full-height input is the correct
+        // output, so a peak taken to the end of the buffer proves nothing.
+        float preFlipPeak = 0.0f;
+        for (int i = (int) (kFs * 0.5); i < flip; ++i)
+            preFlipPeak = std::max (preFlipPeak, std::abs (prot[(size_t) i]));
+        std::printf ("      before the flip: engine-side peak %.2f dBFS\n", dbOf (preFlipPeak));
+        check (preFlipPeak < 0.6f,
+               "validation switch: stage was reducing before it was turned off");
+
+        // and both halves are exactly unity well after it
+        bool preExact = true, postExact = true;
+        for (int i = (int) (kFs * 3.0); i < n; ++i)
+        {
+            if (prot[(size_t) i] != in[(size_t) i]) preExact = false;
+            if (rest[(size_t) i] != in[(size_t) (i - D)]) postExact = false;
+        }
+        check (preExact,  "validation switch OFF: processPre back to bit-exact unity");
+        check (postExact, "validation switch OFF: processPost back to bit-exact unity");
+
+        // no step in the output while it glides out (the reason OFF is a
+        // glide and not a hard cut). Compared against the input's own
+        // sample-to-sample movement, which is what a clean signal looks like.
+        float worstIn = 0.0f;
+        for (int i = flip + D + 1; i < flip + D + (int) (kFs * 0.5); ++i)
+        {
+            worstStep = std::max (worstStep, std::abs (rest[(size_t) i] - rest[(size_t) (i - 1)]));
+            worstIn   = std::max (worstIn,   std::abs (in[(size_t) (i - D)] - in[(size_t) (i - D - 1)]));
+        }
+        juce_ignore (prevOut);
+        std::printf ("      glide-out: worst output step %.5f (input's own %.5f)\n",
+                     worstStep, worstIn);
+        check (worstStep <= worstIn * 1.05f + 1.0e-4f,
+               "validation switch OFF: glides out, no step beyond the signal itself");
     }
 
     std::printf ("\n%s (%d failure%s)\n", g_fail ? "FAILURES" : "all checks passed",

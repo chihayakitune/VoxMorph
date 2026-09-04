@@ -5455,6 +5455,163 @@ private:
     juce::TextButton closeBtn { "Close" };
 };
 
+// ---------------------------------------------------------------------------
+// ENGINE CONFIG (v0.67.0).
+//
+// Deliberately NOT called "Detail": that word already belongs to the AEIOU
+// vowel editor (AEIOUCharacterWindow), and two windows called Detail would be
+// two different things with one name.
+//
+// This window is the destination, not the workbench. While a feature is being
+// validated its switch lives on the MAIN tab, where it can be flipped against
+// the take you are listening to; this window explains the arrangement and
+// holds the adopted, always-on settings once validation has finished.
+//
+// It carries NO copy of the validation switches. A second set of controls for
+// the same parameters is how a UI ends up with two truths, so the status text
+// below is READ-ONLY -- it reflects the MAIN tab, it cannot drive it.
+class EngineConfigPanel : public juce::Component,
+                          private juce::Timer
+{
+public:
+    explicit EngineConfigPanel (VoxMorphProcessor& p) : proc (p)
+    {
+        lnf.setColour (juce::Label::textColourId,         ak::ink);
+        lnf.setColour (juce::TextButton::buttonColourId,  juce::Colours::white);
+        lnf.setColour (juce::TextButton::textColourOffId, juce::Colour (0xff7999db));
+        setLookAndFeel (&lnf);
+
+        heading.setText ("ENGINE CONFIG", juce::dontSendNotification);
+        ak::styleSectionHeading (heading);
+        addAndMakeVisible (heading);
+
+        note.setText (juce::String::fromUTF8 (
+            "Engine-level settings. Features still being validated keep their switch on the "
+            "MAIN tab (ADVANCED > ENGINE VALIDATION) so the same take can be compared with "
+            "and without them; once a decision is made, an adopted feature becomes always-on "
+            "and moves here, and a rejected one becomes always-off and moves to BETA.\n"
+            "\n"
+            "エンジン全体の設定です。検証中の機能は同じ素材でA/Bできるよう、"
+            "MAINタブの ADVANCED > ENGINE VALIDATION にスイッチを置いています。"
+            "検証後、採用した項目は常時ONにしてこちらへ、"
+            "非採用の項目は常時OFFにしてBETAへ移します。"),
+            juce::dontSendNotification);
+        note.setFont (juce::Font (juce::FontOptions (11.5f)));
+        note.setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
+        note.setJustificationType (juce::Justification::topLeft);
+        addAndMakeVisible (note);
+
+        underValidation.setText ("UNDER VALIDATION", juce::dontSendNotification);
+        ak::styleSectionHeading (underValidation);
+        addAndMakeVisible (underValidation);
+
+        // Read-only mirror of the MAIN tab. It never writes a parameter.
+        status.setFont (juce::Font (juce::FontOptions (12.0f)));
+        status.setColour (juce::Label::textColourId, ak::ink);
+        status.setJustificationType (juce::Justification::topLeft);
+        addAndMakeVisible (status);
+
+        whereHint.setText (juce::String::fromUTF8 (
+            "Switched on the MAIN tab — ADVANCED > ENGINE VALIDATION."),
+            juce::dontSendNotification);
+        whereHint.setFont (juce::Font (juce::FontOptions (11.0f)));
+        whereHint.setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
+        addAndMakeVisible (whereHint);
+
+        adopted.setText (juce::String::fromUTF8 ("ADOPTED — ALWAYS ON"),
+                         juce::dontSendNotification);
+        ak::styleSectionHeading (adopted);
+        addAndMakeVisible (adopted);
+
+        adoptedNote.setText (juce::String::fromUTF8 (
+            "Nothing has been adopted yet. Settings that graduate from validation appear here "
+            "and no longer have a switch.\n"
+            "採用済みの項目はまだありません。検証を終えた設定がここに並び、"
+            "スイッチは無くなります。"),
+            juce::dontSendNotification);
+        adoptedNote.setFont (juce::Font (juce::FontOptions (11.5f)));
+        adoptedNote.setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
+        adoptedNote.setJustificationType (juce::Justification::topLeft);
+        addAndMakeVisible (adoptedNote);
+
+        closeBtn.onClick = [this]
+        {
+            if (auto* dw = findParentComponentOfClass<juce::DocumentWindow>())
+                dw->setVisible (false);
+        };
+        addAndMakeVisible (closeBtn);
+
+        refresh();
+        startTimerHz (5);          // read-only mirror; stops with the panel
+        setSize (600, 400);
+        sendLookAndFeelChange();
+    }
+
+    ~EngineConfigPanel() override { stopTimer(); setLookAndFeel (nullptr); }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (14, 10);
+        heading        .setBounds (r.removeFromTop (24));
+        note           .setBounds (r.removeFromTop (74));
+        r.removeFromTop (8);
+        underValidation.setBounds (r.removeFromTop (22));
+        status         .setBounds (r.removeFromTop (62));
+        whereHint      .setBounds (r.removeFromTop (18));
+        r.removeFromTop (10);
+        adopted        .setBounds (r.removeFromTop (22));
+        adoptedNote    .setBounds (r.removeFromTop (46));
+        closeBtn       .setBounds (r.removeFromBottom (30).removeFromRight (100).reduced (0, 2));
+    }
+
+    void paint (juce::Graphics& g) override { g.fillAll (juce::Colour (0xfffafbff)); }
+
+private:
+    void timerCallback() override { refresh(); }
+
+    void refresh()
+    {
+        auto on = [this] (const char* id)
+        {
+            auto* v = proc.apvts.getRawParameterValue (id);
+            return v != nullptr && v->load() > 0.5f;
+        };
+        auto mark = [] (bool b) { return b ? juce::String ("ON ") : juce::String ("OFF"); };
+
+        const juce::String txt =
+              mark (on ("engprot"))   + "   Auto Protection + Restore\n"
+            + mark (on ("engbreath")) + "   Air Breathiness\n"
+            + mark (on ("engendbr"))  + "   Ending Breath";
+        if (txt != shown)
+        {
+            shown = txt;
+            status.setText (txt, juce::dontSendNotification);
+        }
+    }
+
+    VoxMorphProcessor& proc;
+    juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
+    juce::TooltipWindow  tips { this, 400 };
+    juce::Label heading, note, underValidation, status, whereHint, adopted, adoptedNote;
+    juce::String shown;
+    juce::TextButton closeBtn { "Close" };
+};
+
+class EngineConfigWindow : public juce::DocumentWindow
+{
+public:
+    explicit EngineConfigWindow (VoxMorphProcessor& p)
+        : juce::DocumentWindow (juce::String::fromUTF8 ("Engine Config"),
+                                juce::Colour (0xfffafbff), juce::DocumentWindow::closeButton)
+    {
+        setUsingNativeTitleBar (true);
+        setContentOwned (new EngineConfigPanel (p), true);
+        centreWithSize (getWidth(), getHeight());
+        setVisible (true);
+    }
+    void closeButtonPressed() override { setVisible (false); }
+};
+
 class BetaWindow : public juce::DocumentWindow
 {
 public:
@@ -6640,6 +6797,21 @@ private:
 
     void card_add (ak::Card& c, juce::Component& comp, int h) { c.add (comp, h); }
 
+    // A small sub-heading inside a card, for grouping a few related rows.
+    // The Label goes into `owned` (which holds juce::Component), so it lives
+    // exactly as long as the editor and is destroyed before the cards are.
+    void groupHeading (ak::Card& c, const juce::String& text)
+    {
+        auto l = std::make_unique<juce::Label>();
+        l->setText (text, juce::dontSendNotification);
+        l->setFont (ak::font (11.0f, true));
+        l->setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
+        l->setJustificationType (juce::Justification::centredLeft);
+        c.addGap (6);
+        card_add (c, *l, 18);
+        owned.push_back (std::move (l));
+    }
+
     juce::LookAndFeel* lnfFor (ak::Tone t)
     {
         return t == ak::Tone::pink ? (juce::LookAndFeel*) &lnfPink
@@ -6807,6 +6979,60 @@ private:
                  "バイノーラル/ASMR用ステレオマイク向け。左右の入力を2つの独立した変換エンジンで"
                  "並列処理し、立体感を保ったまま変換します。遅延は変わりません(CPUは約2倍)。"
                  "オフ=従来どおりモノラル(左右を合成)。"));
+        // ---- ENGINE VALIDATION (v0.67.0) ----------------------------
+        // The three features v0.66.0 added, each with a switch, so the same
+        // take can be heard with and without it. They sit on MAIN rather than
+        // in a window on purpose: an A/B you have to open a dialog for is an
+        // A/B nobody does. Every one defaults to ON = the v0.66.0 behaviour.
+        //
+        // These switches are NOT duplicated in the Engine Config window --
+        // that window mirrors them read-only. Two sets of controls for one
+        // parameter is how a UI grows two truths.
+        groupHeading (*cardAdvanced, "ENGINE VALIDATION");
+        toggle (*cardAdvanced, "engprot", "Auto Protection",
+            tip ("VALIDATION. Turns the automatic level protection around the conversion on "
+                 "and off as a pair: the gain taken off in front of the engine, and the gain "
+                 "put back after it. It only acts above -7 dBFS, so at normal speaking level "
+                 "on and off are the same samples - use it to compare a shout or a mic bump. "
+                 "Off means loud input reaches the conversion at full level. The two halves "
+                 "share one switch because taking the level off without putting it back (or "
+                 "putting back a level that was never taken off) is not a setting anyone "
+                 "should be able to run.",
+                 "検証用。変換の前後にある自動レベル保護を、前段(下げる)と後段(戻す)の"
+                 "ペアでオン/オフします。-7 dBFSを超えたときだけ働くので、通常の発話音量では"
+                 "オンとオフで1サンプルも変わりません。大声やマイクへの接触音でA/Bして"
+                 "ください。オフ=大きな入力がそのまま変換へ入ります。"
+                 "前段だけ・後段だけという危険な状態を作れないよう、2つで1つのスイッチに"
+                 "してあります。"));
+        toggle (*cardAdvanced, "engbreath", "Air Breathiness",
+            tip ("VALIDATION. Turns the Air Breathiness stage on and off without touching its "
+                 "amount: the slider in the AIR section keeps whatever you set, and switching "
+                 "back on restores it. Off feeds the engine 0, which is the same as the "
+                 "slider at 0 - the stage is skipped entirely, not faded.",
+                 "検証用。Air Breathinessの段をオン/オフします。量つまみには触れないので、"
+                 "AIRセクションのスライダーの値はそのまま残り、オンに戻せば元通りです。"
+                 "オフはエンジンへ0を渡すだけで、スライダー0と同じ=その段は完全に"
+                 "スキップされます(フェードではありません)。"));
+        toggle (*cardAdvanced, "engendbr", "Ending Breath",
+            tip ("VALIDATION. Same arrangement as Air Breathiness, for the phrase-ending "
+                 "breath. The amount slider keeps its value; off feeds the engine 0 and the "
+                 "stage is skipped, so the phrase-envelope tracking stops running too.",
+                 "検証用。Air Breathinessと同じ仕組みで、語尾の息成分の段をオン/オフします。"
+                 "量スライダーの値は保持されます。オフはエンジンへ0を渡してその段を"
+                 "スキップし、語尾包絡の追従処理も止まります。"));
+        button (*cardAdvanced, "Engine", "ENGINE CONFIG",
+            tip ("Opens the Engine Config window: what the validation switches above are for, "
+                 "and where adopted settings will live once they stop being switchable. The "
+                 "switches themselves stay on this tab while validation is running.",
+                 "Engine Configウィンドウを開きます。上の検証スイッチの位置づけと、"
+                 "採用が決まった設定の置き場所を説明しています。検証中はスイッチ自体は"
+                 "このタブに置いたままです。"),
+            [this]
+            {
+                if (engineWin == nullptr) engineWin = std::make_unique<EngineConfigWindow> (proc);
+                else { engineWin->setVisible (true); engineWin->toFront (true); }
+            });
+
         button (*cardAdvanced, "Experimental", "BETA",
             tip ("Opens the BETA window with the experimental controls (GCI Grain Sync, "
                  "Breath, Legacy Low Latency). They are kept out of the main list because "
@@ -7375,6 +7601,10 @@ private:
     // child windows
     std::unique_ptr<AEIOUCharacterWindow> aeiouWin;
     std::unique_ptr<BetaWindow>           betaWin;
+    // Owned by the editor, so it is destroyed with it -- the window holds a
+    // reference to the processor, not to the editor, but leaving a top-level
+    // window alive after its opener is gone is how these leak.
+    std::unique_ptr<EngineConfigWindow>   engineWin;
 
     FnTimer histPoll;
     juce::String lastLockState;

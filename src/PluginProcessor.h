@@ -490,6 +490,11 @@ private:
     int    fxBlk = 512;
     bool   fxLoading = false;   // suppress saves while restoring at startup
     std::atomic<float>* pRobotHz   = nullptr;
+    // ENGINE VALIDATION switches (v0.67.0). See createLayout for why all
+    // three default to ON and why Protection/Restore share one switch.
+    std::atomic<float>* pEngProt   = nullptr;
+    std::atomic<float>* pEngBreath = nullptr;
+    std::atomic<float>* pEngEndBr  = nullptr;
     std::atomic<float>* pMix       = nullptr;
     std::atomic<float>* pGain      = nullptr;
 

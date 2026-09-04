@@ -1459,6 +1459,48 @@ int main()
         if (! ok) ++naFail;
     }
 
+    // (b3z) The ENGINE VALIDATION switches (MAIN tab, v0.67.0) turn these two
+    // stages off by feeding the engine an amount of 0 instead of the slider
+    // value -- the slider itself is left alone so it comes back on re-enable.
+    // That only works if 0 is a REAL bypass and not a very small amount, so
+    // that is what is checked here: amount 0 must be sample-identical to a
+    // run that never mentions the control, on material that would actually
+    // engage the stage. Checked with Natural Air both off and on, because
+    // with Air on the air path is running anyway and only the breathiness
+    // emphasis has to disappear.
+    {
+        const auto breathy = makeBreathy (120.0, 2.2);
+        const auto phrase  = makeBreathyRelease (120.0);
+
+        auto identical = [] (const std::vector<float>& x, const std::vector<float>& y)
+        {
+            if (x.size() != y.size()) return false;
+            return std::memcmp (x.data(), y.data(), x.size() * sizeof (float)) == 0;
+        };
+
+        int bad = 0;
+        for (float airAmt : { 0.0f, 0.6f })
+        {
+            P ref; ref.pitchSemi = 7.0f; ref.airPreserve = airAmt;
+
+            P zeroBr = ref; zeroBr.airBreath    = 0.0f;
+            P zeroEn = ref; zeroEn.airEndBreath = 0.0f;
+            P zeroBo = ref; zeroBo.airBreath    = 0.0f; zeroBo.airEndBreath = 0.0f;
+
+            const auto r1 = run (breathy, ref);
+            if (! identical (r1, run (breathy, zeroBr))) ++bad;
+            if (! identical (r1, run (breathy, zeroBo))) ++bad;
+
+            const auto r2 = run (phrase, ref);
+            if (! identical (r2, run (phrase, zeroEn))) ++bad;
+            if (! identical (r2, run (phrase, zeroBo))) ++bad;
+        }
+        std::printf ("Breathiness / Ending Breath amount 0 == bypass "
+                     "(Air off and on): %d mismatch(es)  %s\n",
+                     bad, bad == 0 ? "PASS" : "FAIL");
+        if (bad != 0) ++naFail;
+    }
+
     // (b4) Ending Breath: steady middle stays at the Natural Air baseline,
     // while a sustained acoustic release opens the local source-air gain.
     {

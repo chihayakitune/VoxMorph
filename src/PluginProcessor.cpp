@@ -307,6 +307,34 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     // parameters by position keep every pre-v0.60 automation lane intact.
     layout.add (std::make_unique<P> (juce::ParameterID { "airend", 1 }, "Ending Breath",
                 juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
+
+    // ---- ENGINE VALIDATION switches (v0.67.0) ---------------------------
+    // A/B switches for the three features v0.66.0 added, so the same take can
+    // be heard with and without each one. They are NOT quality controls: the
+    // amount knobs stay where they are, these only decide whether the stage
+    // runs at all.
+    //
+    // Appended at the very end, never inserted, so every existing automation
+    // lane keeps its index.
+    //
+    // ALL THREE DEFAULT TO ON, and that is what makes them backward safe:
+    //   * a DAW session saved before they existed has no child for them, so
+    //     APVTS leaves the freshly-constructed parameter at its default;
+    //   * voxMorphApplyPreset starts every parameter at getDefaultValue() and
+    //     only overrides it when the file actually carries an entry.
+    // Either way an older session or preset comes up with the features on,
+    // which is the v0.66.0 behaviour it was saved under.
+    //
+    // Protection and Restore share ONE switch on purpose. Lowering the level
+    // into the engine without putting it back, or putting back a level that
+    // was never taken off, are both wrong on their own; only the pair is a
+    // meaningful thing to compare against.
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "engprot", 1 }, "Auto Protection + Restore", true));
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "engbreath", 1 }, "Air Breathiness Enable", true));
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "engendbr", 1 }, "Ending Breath Enable", true));
     return layout;
 }
 
@@ -359,6 +387,9 @@ VoxMorphProcessor::VoxMorphProcessor()
     pAir     = apvts.getRawParameterValue ("air");
     pAirShine = apvts.getRawParameterValue ("airshine");
     pAirEnd   = apvts.getRawParameterValue ("airend");
+    pEngProt   = apvts.getRawParameterValue ("engprot");
+    pEngBreath = apvts.getRawParameterValue ("engbreath");
+    pEngEndBr  = apvts.getRawParameterValue ("engendbr");
     // (deprecated "airband"/"air2"/"air2low" are intentionally not read)
     pGci     = apvts.getRawParameterValue ("gci");
     pHiOn    = apvts.getRawParameterValue ("hienable");
@@ -664,8 +695,14 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.breath        = 0.0f;                  // generated-noise Beta retired from the plugin path
     p.airPreserve   = pAir->load();          // Natural Air (standard path)
     p.airShineDb    = pAirShine->load();     // Air Shine
-    p.airBreath     = pBreath2->load();      // source-derived F3/high-band emphasis
-    p.airEndBreath  = pAirEnd->load();       // same material, acoustic release only
+    // ENGINE VALIDATION: the switches gate the AMOUNT handed to the engine,
+    // they never touch the APVTS value. Turning one off feeds the engine 0,
+    // which it already treats as a complete bypass of that stage (see the
+    // "every Air control at 0" comment in PsolaEngine.h) -- so OFF is the
+    // same samples as having the knob at 0, and turning it back on restores
+    // whatever the slider was left at.
+    p.airBreath     = pEngBreath->load() > 0.5f ? pBreath2->load() : 0.0f;
+    p.airEndBreath  = pEngEndBr ->load() > 0.5f ? pAirEnd ->load() : 0.0f;
     p.gciSync       = pGci->load() > 0.5f;
     // The toggles gate the guards here rather than in the engine: it already
     // reads "start = 0" and "floor = 0" as off, so switching them off is the
@@ -856,7 +893,16 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     //
     // At Mix 0 the engine is a pure delay of the dry signal -- no conversion to
     // protect -- so the stage is asked for unity and glides out.
-    protection.setBypassed (p.mix <= 1.0e-4f);
+    // One switch stops BOTH halves. setBypassed asks the stage for unity and
+    // lets it glide out on its normal release rather than cutting it dead, so
+    // flipping the switch while it is actually reducing does not step the
+    // level; once the smoother snaps to exactly 1.0 the multiply is skipped
+    // on both sides and the path is sample-identical again. The restore needs
+    // no separate handling: it undoes the gain from D samples ago, and those
+    // ring entries glide to 1.0 with the pre stage.
+    //
+    // The Mix 0 term is the pre-existing bypass and is kept as it was.
+    protection.setBypassed (pEngProt->load() <= 0.5f || p.mix <= 1.0e-4f);
     {
         float* preCh[2] = { stereoMode ? sL : m, sR };
         protection.processPre (preCh, stereoMode ? 2 : 1, n);

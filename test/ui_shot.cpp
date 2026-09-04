@@ -2210,7 +2210,116 @@ int main (int argc, char** argv)
         proc.characterImagePath.clear();
     }
 
+    // ---- v0.67.0: ENGINE VALIDATION switches + Engine Config window ----
+    // Three things can go wrong here and none of them is visible in a
+    // screenshot: a parameter with no control bound to it (it would still
+    // save, automate and reset perfectly while being unreachable), a window
+    // that cannot be reopened after closing, and a window still alive when
+    // the editor that opened it is destroyed.
+    {
+        std::printf ("\n== ENGINE VALIDATION ==\n");
+
+        for (auto* id : { "engprot", "engbreath", "engendbr" })
+        {
+            auto* rp = proc.apvts.getParameter (id);
+            check (rp != nullptr, juce::String (id) + " parameter exists");
+            if (rp == nullptr) continue;
+            // All three must default to ON: that is what makes a session or
+            // preset saved before they existed come up with the v0.66.0
+            // behaviour rather than silently switching features off.
+            check (rp->getDefaultValue() > 0.5f,
+                   juce::String (id) + " defaults to ON");
+            std::printf ("  %-10s default=%.0f  name=%s\n", id,
+                         rp->getDefaultValue(),
+                         rp->getName (40).toRawUTF8());
+        }
+
+        // A control is actually bound to each of them, and the binding really
+        // drives the parameter. An APVTS entry with no control would still
+        // save, automate and reset perfectly while being unreachable, and a
+        // control with a broken attachment looks identical on a screenshot.
+        // ParamRow puts the display name on the toggle's button text.
+        const std::pair<const char*, const char*> pairs[] {
+            { "Auto Protection", "engprot"   },
+            { "Air Breathiness", "engbreath" },
+            { "Ending Breath",   "engendbr"  },
+        };
+        for (auto& pr : pairs)
+        {
+            auto* b = findButton (ed.get(), pr.first);
+            auto* t = dynamic_cast<juce::ToggleButton*> (b);
+            check (t != nullptr, juce::String (pr.first) + " toggle exists on the MAIN tab");
+            auto* v = proc.apvts.getRawParameterValue (pr.second);
+            check (v != nullptr, juce::String (pr.second) + " raw value reachable");
+            if (t == nullptr || v == nullptr) continue;
+
+            const float before = v->load();
+            t->triggerClick();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
+            const float after = v->load();
+            check (std::abs (after - before) > 0.5f,
+                   juce::String (pr.first) + " toggle actually drives " + pr.second);
+
+            t->triggerClick();      // put it back the way we found it
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
+            check (std::abs (v->load() - before) < 0.5f,
+                   juce::String (pr.first) + " toggle returns to its previous state");
+            std::printf ("  %-16s -> %-9s  %.0f -> %.0f -> %.0f\n",
+                         pr.first, pr.second, before, after, v->load());
+        }
+
+        auto* cfgBtn = findButton (ed.get(), "ENGINE CONFIG");
+        check (cfgBtn != nullptr, "ENGINE CONFIG button exists on the MAIN tab");
+
+        if (cfgBtn != nullptr)
+        {
+            auto countEngineWindows = []
+            {
+                int n = 0;
+                for (int i = 0; i < juce::TopLevelWindow::getNumTopLevelWindows(); ++i)
+                    if (auto* w = juce::TopLevelWindow::getTopLevelWindow (i))
+                        if (w->getName() == "Engine Config") ++n;
+                return n;
+            };
+
+            check (countEngineWindows() == 0, "no Engine Config window before the click");
+
+            cfgBtn->triggerClick();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (200);
+            check (countEngineWindows() == 1, "Engine Config window opens");
+
+            // close, then reopen: the second click must show the SAME window
+            // rather than building a second one
+            if (auto* w = juce::TopLevelWindow::getTopLevelWindow (0))
+                juce::ignoreUnused (w);
+            for (int i = 0; i < juce::TopLevelWindow::getNumTopLevelWindows(); ++i)
+                if (auto* w = juce::TopLevelWindow::getTopLevelWindow (i))
+                    if (w->getName() == "Engine Config")
+                        if (auto* dw = dynamic_cast<juce::DocumentWindow*> (w))
+                            dw->closeButtonPressed();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (200);
+
+            cfgBtn->triggerClick();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (200);
+            check (countEngineWindows() == 1, "reopening reuses the window, does not stack a second");
+
+            // and it is left OPEN on purpose: the editor is destroyed below,
+            // and JUCE's leak detector is what checks that it goes with it.
+            std::printf ("  left open across editor destruction (leak detector is the check)\n");
+        }
+    }
+
     ed->removeFromDesktop();
+    ed.reset();          // must take the Engine Config window with it
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+    {
+        int left = 0;
+        for (int i = 0; i < juce::TopLevelWindow::getNumTopLevelWindows(); ++i)
+            if (auto* w = juce::TopLevelWindow::getTopLevelWindow (i))
+                if (w->getName() == "Engine Config") ++left;
+        check (left == 0, "Engine Config window is destroyed with the editor");
+    }
+
     std::printf ("\n%s (%d failure%s)\n", g_fail == 0 ? "ALL PASS" : "FAILURES",
                  g_fail, g_fail == 1 ? "" : "s");
     return g_fail == 0 ? 0 : 1;
