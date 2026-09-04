@@ -1,6 +1,33 @@
 # VoxMorph 開発引き継ぎ書 (AIセッション用)
 
-最終更新: v0.66.0 統合時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+最終更新: v0.67.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+
+## 2026-09-04 現行状態 (v0.67.0 / 実装コミット `0440a72`)
+
+v0.66.0 で入った3機能を、同じ素材でA/Bできるようにするための検証スイッチと、
+採用後の置き場所になるウィンドウを追加した。**DSPの既定挙動は v0.66.0 と同じ**
+(3スイッチとも既定ON)。
+
+- **MAIN > ADVANCED > ENGINE VALIDATION**(新設の小グループ)に3トグル。いずれも**既定ON**
+  | ID | 表示名 | OFFの効果 |
+  |---|---|---|
+  | `engprot` | Auto Protection | 変換前Protectionと変換後Restoreを**ペアで**停止。前段だけ/後段だけという危険な状態は作れない |
+  | `engbreath` | Air Breathiness | `p.airBreath` に 0 を渡す。**`breath2` の量値は保持**、再ONで復帰 |
+  | `engendbr` | Ending Breath | `p.airEndBreath` に 0 を渡す。**`airend` の量値は保持**、再ONで復帰 |
+  - 量スイッチはエンジンへ渡す**量だけ**を止める。エンジンは 0 を「その段を完全スキップ」として扱うため、OFFはフェードではなく真のバイパス
+  - Protection の OFF は即断せず通常のリリースでunityへ滑らせる(動作中に切っても段差が出ない)。Restore は D サンプル前のゲインを戻す構造なので、前段と対で自動的に戻る。**Mix=0 の既存バイパスは不変**
+  - 3IDは APVTS レイアウトの**末尾に追加**。既存の自動化レーンのindexは動かない
+  - **既定ON = 後方互換の根拠**。旧セッションは子が無いので新規構築時の既定のまま、旧プリセットは `voxMorphApplyPreset` が `getDefaultValue()` から始めるためON。移行コードは不要だった
+- **ENGINE CONFIG ウィンドウ**(同じ ADVANCED カードのボタンから、BETA と同一の DocumentWindow パターン)
+  - **DETAIL の語は使わない**。AEIOU母音編集の既存名称と衝突するため
+  - **検証スイッチをここに二重配置しない**。状態が分裂するので、`UNDER VALIDATION` の一覧は**読み取り専用**
+  - 中身は見出し・方針説明・読み取り専用の状態一覧・`ADOPTED — ALWAYS ON` の空プレースホルダ
+- **段階運用の方針(まだ実行していない)**: 検証後、**採用=常時ONにして Engine Config へ移す / 非採用=常時OFFにして BETA へ移す**。現時点では**どれも採用/非採用が決まっていない**
+- **⚠ ユーザーの実声検証待ち**。3トグル・Engine Config・上記の移行はいずれも**まだ聴感評価に回っていない**。こちらから移行を実行しない
+- 実行済み: `test/protection_test.cpp` 22項目 全PASS(OFF後に前段・後段とも bit-exact unity 復帰を含む) / `test/offline_test.cpp` FAIL 0(「量0 == バイパス」検査を追加、Air off/on 両方で0件不一致) / `VoxMorphUiShot` ALL PASS(3トグルの結線をクリックで実測、ウィンドウの開閉・再オープン・editor破棄時の消滅) / JUCE Standalone build 成功
+- 未確認: 実声試聴・A/B音源、AU/VST3ビルド、DAW上のオートメーション記録とundo単位の実挙動
+- **`origin/main` は v0.66.0 `29d4fa3` のまま。v0.67.0 は未push**(ローカル `main` のみ)。push は別途ユーザー承認が必要
+- `claude_handover/` と `VoxMorph-Claude-Exchange/` はローカル記録のみで、追跡していない
 
 ## 2026-09-04 統合済み状態 (v0.66.0)
 
