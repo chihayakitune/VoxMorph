@@ -1,6 +1,21 @@
 # VoxMorph 開発引き継ぎ書 (AIセッション用)
 
-最終更新: v0.64.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+最終更新: v0.66.0 統合時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+
+## 2026-09-04 統合済み状態 (v0.66.0)
+
+`origin/main` の最新 `fea2ce5` を起点に、途中作業を隔離ブランチへ保存したうえで
+統合ブランチへ取り込んだ。Natural Airのソース由来Air Breathiness / Ending Breathと、
+変換前Auto Protection Gain + 変換後Gain Restoreを同時に保持している。
+
+- Natural Air途中作業: `wip/natural-air-breathiness-20260827` / `3589a16`
+- Auto Protection実装: `claude/auto-protection-gain-restore-20260903` / `8d60399`
+- 統合ブランチ: `integration/voxmorph-complete-20260903`
+- 保護段の位置: Noise Gate・入力メーター/解析tapの後、Voice Conversion直前。RestoreはVoice Conversion直後、Output Gain / Spatial / Post FXの前
+- Detector: Peak + 短時間EnvelopeのStereo Link（共通ゲイン）。Threshold -7 dBFS、Attack 2 ms、Release 150 ms、最大Reduction 24 dB
+- Restore: `D`サンプル遅延した制御ゲインの逆数を使い、出力側 -1 dBFS headroom trim。L/R共通ゲイン
+- 確認済み: `test/protection_test.cpp` 全PASS、`test/offline_test.cpp` 全PASS、JUCE Standalone build 成功（既存/依存ライブラリ警告のみ）
+- GitHubへのpush、PR、外部アップロードは未実施。`claude_handover/` と `VoxMorph-Claude-Exchange/` はローカル記録のみ
 
 ## ⚠ いま保留中のこと(2026-08-25 時点)
 
@@ -12,7 +27,7 @@
 - **v0.60.2 で実施**: Pitch/話者F0の一般化、カットオフ方式の比較、T0〜T3。試聴用は `~/Downloads/VoxMorph_RELEASE_T/`
 - **②(Release専用キュー)は完了。**追加監査もv0.61.1で通過(late/dropped/overflow すべて0、キュー済みcutoffをイベント位置で適用、残差はOFF側のエンジン差と検出グリッド差に分解済み)
 - **①(Deterministic Analysis Cadence)は不採用が確定**(ChatGPT解析)。語頭60-140Hzが診断22件で中央値+2.92dB悪化するため。**BETA・既定OFFのまま維持し、語頭A/Bのユーザー試聴も行わない**。素材は `~/Downloads/VoxMorph_ONSET_AB/` に残っているが再生成しない
-- **【現在地】語尾の低音バーストは未解決。v0.63.1〜v0.64.0 の7案すべてChatGPT検証ゲート不合格**(ユーザー試聴には一度も回っていない):
+- **【v0.64.0時点の記録】語尾の低音バーストは未解決。v0.63.1〜v0.64.0 の7案すべてChatGPT検証ゲート不合格**(ユーザー試聴には一度も回っていない):
   | 版 | 方式 | 結果 |
   |---|---|---|
   | v0.63.0/0.63.1 | Release Pitch Continuation(ライブ継続) | 状態遷移だけでは本当の語尾を識別できない |
@@ -26,7 +41,7 @@
   - **状態機械の語尾と、エネルギー包絡の語尾は同じ瞬間ではない**。ずれは -197ms 〜 +97ms でイベントごとに違う。固定窓・短い境界の方式はこれで外れる(v0.63.4 / v0.63.9 / v0.64.0)
   - **`sumLow > sumBody` では症状と正常語尾を分離できない**。ordinary4 のB0低域比 +2.777dB は worst2 の +2.234dB と重なる。評価帯域の境界が10Hzしか離れておらず、短時間・低遅延フィルタで前者だけ削るのは原理的に厳しい
   - **判定書の但し書き**: 「この1候補が基準を満たさない場合は、スペクトル低域抑制を続けず、**語尾素材と知覚ラベルを追加して問題定義を見直す**」— v0.64.0 が未達なので**この段階に来ている**
-- **次にやること = ChatGPTの v0.64.0 判定待ち**。こちらからは動かさない
+- **【当時の記録】次にやること = ChatGPTの v0.64.0 判定待ち**。その後、別機能の実装と今回の統合を完了済み
 - **当面の設定**: 通常利用=Cadence OFF / Release Repair 開発・測定=Cadence ON / 両方ともBETA・既定OFFのまま
 - **指示書の置き場所**: `~/.codex/.chatgpt-projects/g-p-6a4a563cd64881919a94d96d565dfdd1/VoxMorph-review/claude_handover/`(ローカルのみ、GitHub非収載)。日付+対象バージョン名のMarkdownが追加される。**BETA機能の既定値は、指示書に明示された採用判断なしに変更しない**
 - **⚠ 検証範囲は `2026-08-23_validation-budget-and-role-split.md` が支配する(v0.62.3以降)**。過去の指示書の検証範囲を上書きする文書。**作業開始前に必ず読むこと**。要点:
@@ -37,7 +52,7 @@
   - **失敗時**: 直接原因の確認と修正を**1回だけ**。改善しなければ推測で方式を増やさず、現象・ログ・該当コード・候補原因を報告して止める
   - **A/B成果物の上限**: 2構成・バッファ256のみ・同一ゲイン・代表5〜10箇所の短いreel・短いREADME。**フルレンダー/ブラインド版/複数バッファ版は明示指示があるときだけ**
   - **報告は5項目**: 何を実装したか / 変更ファイル / 実行した最小試験と結果 / 既知の制限・未確認事項 / コミットSHAとA/B保存場所
-  - **【現在の停止位置】v0.64.0 (`fe0c8c7`) を納品し、ChatGPTの判定待ちで停止中**。Analysis Cadence・Release Repair・Release Pitch Continuation はすべて BETA・既定OFF。Safe Strength 0.35 は候補記録のみで既定は 0.50 のまま。**判定が返るまで追加実装・追加検証を開始しない**
+  - **【v0.64.0時点の停止記録】v0.64.0 (`fe0c8c7`) を納品し、ChatGPTの判定待ちで停止中**。Analysis Cadence・Release Repair・Release Pitch Continuation はすべて BETA・既定OFF。Safe Strength 0.35 は候補記録のみで既定は 0.50 のまま。**この記録の後、v0.66.0統合を実施済み**
   - **成果物の受け渡し先**: `~/.codex/.chatgpt-projects/g-p-.../VoxMorph-Claude-Exchange/`。`LATEST.md` が最新deliveryを指す。**コードはGit、音声/CSV/ログ/報告はExchange**。新セッションはこの2つ(`LATEST.md` と本ファイル冒頭)を読めば現在地が分かる
 - **まだ未実施**: 状態機械の誤分類テスト(ビブラート・トレモロ・振幅回復・低周波ノイズ・1フレーム vs 2フレーム確認)、ライブ切替(OFF↔ON、0.40↔0.50、有声中・語尾処理中)
 
