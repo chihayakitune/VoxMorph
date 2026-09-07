@@ -452,6 +452,8 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     // Allocates the control-signal delay line (engine lookahead + a block).
     // prepare() ends in reset(), so the gain history starts at unity.
     protection.prepare (sampleRate, samplesPerBlock);
+    diagnostics.prepare (sampleRate, samplesPerBlock);
+    warmupSamples = 0;
     monoScratch.assign ((size_t) samplesPerBlock, 0.0f);
     scratchL.assign ((size_t) samplesPerBlock, 0.0f);
     scratchR.assign ((size_t) samplesPerBlock, 0.0f);
@@ -503,6 +505,8 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 void VoxMorphProcessor::reset()
 {
     protection.reset();
+    diagnostics.reset();
+    warmupSamples = 0;
 }
 
 void VoxMorphProcessor::releaseResources()
@@ -663,6 +667,30 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         monoScratch.assign ((size_t) n, 0.0f);
 
     const float meterDt = (float) n / (float) std::max (1.0, getSampleRate());
+
+    // ---- Engine Diagnostics: block context ------------------------------
+    // Every field here is a reason the engine being silent is CORRECT, so the
+    // stall check is told rather than left to guess. warmedUp compares what
+    // has been fed since the last prepare/reset against the engine lookahead:
+    // before that the engine has legitimately produced nothing yet.
+    const double diagT0 = juce::Time::getMillisecondCounterHiRes();
+    {
+        EngineDiagnostics::Context dc;
+        dc.muted      = muted.load (std::memory_order_relaxed)
+                     || muteSec > 0.0f || muteGain < 0.5f;
+        dc.gateOpen   = pGate->load() <= -79.5f || gateGain > 0.05f;
+        dc.converting = pMix->load() > 1.0e-4f;
+        dc.warmedUp   = warmupSamples > (int64_t) engine.latencySamples();
+        diagnostics.beginBlock (n, dc);
+        warmupSamples += n;
+    }
+    if (ch > 0)                                   // INPUT: as the host gave it
+    {
+        const float* inCh[2] = { buffer.getReadPointer (0),
+                                 buffer.getReadPointer (ch > 1 ? 1 : 0) };
+        diagnostics.observe (EngineDiagnostics::Stage::input, inCh,
+                             ch > 1 ? 2 : 1, n);
+    }
 
     // Display-only taps are skipped whenever nothing is on screen to read
     // them (editor closed, or the meters / visualizer scrolled out of view).
@@ -908,6 +936,12 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         protection.processPre (preCh, stereoMode ? 2 : 1, n);
     }
 
+    {   // PRE-ENGINE: what is actually about to be converted
+        float* preCh[2] = { stereoMode ? sL : m, sR };
+        diagnostics.observe (EngineDiagnostics::Stage::preEngine, preCh,
+                             stereoMode ? 2 : 1, n);
+    }
+
     if (stereoMode)
     {
         engine.process  (sL, sL, n);
@@ -915,6 +949,38 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
     else
         engine.process (m, m, n);
+
+    // ---- POST-ENGINE: the observation that can gate the audio -----------
+    // A non-finite sample here means the conversion's own state has gone bad.
+    // Both engines are scanned in Stereo Input mode: a fault on one side only
+    // is exactly what a mono-only check would miss.
+    {
+        float* postCh[2] = { stereoMode ? sL : m, sR };
+        const int nch = stereoMode ? 2 : 1;
+        if (diagnostics.observe (EngineDiagnostics::Stage::postEngine, postCh, nch, n))
+        {
+            // Zero it here, before the restore. Multiplying NaN by the restore
+            // gain just produces more NaN, and everything downstream (the
+            // meters, the visualizer rings, the ANALYZE capture) would take a
+            // copy of it.
+            for (int c = 0; c < nch; ++c)
+                std::fill (postCh[c], postCh[c] + n, 0.0f);
+        }
+
+        // Engine and ProtectionGain are reset TOGETHER. The restore undoes the
+        // gain from D samples ago; after an engine reset those samples are
+        // gone, so leaving the gain history in place would multiply fresh
+        // output by the inverse of a gain that was never applied to it.
+        if (diagnostics.wantsEngineReset())
+        {
+            const double sr = getSampleRate() > 0.0 ? getSampleRate() : 44100.0;
+            engine.prepare (sr);              // same rate: fills, does not allocate
+            if (stereoMode) engineR.prepare (sr);
+            protection.reset();
+            warmupSamples = 0;                // the lookahead has to refill
+            diagnostics.beginRecovery();
+        }
+    }
 
     // ---- Auto Gain Restore ----------------------------------------------
     // Straight after the conversion (Natural Air and the rest of the voice DSP
@@ -1187,6 +1253,40 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         myPos.store (mp + n >= ml ? -1 : mp + n);
     }
 
+    // ---- Engine Diagnostics: final output, stall check, recovery gate ---
+    // Observed LAST so it covers every stage after the conversion too -- a
+    // non-finite sample that only appears here came from the spatial stage,
+    // the Post FX or the preview mix, not from the engine.
+    if (ch > 0)
+    {
+        float* outCh[2] = { buffer.getWritePointer (0),
+                            buffer.getWritePointer (ch > 1 ? 1 : 0) };
+        const int nch = ch > 1 ? 2 : 1;
+        if (diagnostics.observe (EngineDiagnostics::Stage::output, outCh, nch, n))
+            for (int c = 0; c < ch; ++c)
+                std::fill (buffer.getWritePointer (c), buffer.getWritePointer (c) + n, 0.0f);
+
+        diagnostics.checkStall();
+
+        // Exactly 1.0 at both ends in normal use, so the multiply is skipped
+        // and the audio path is sample-identical while nothing is wrong.
+        // Otherwise it is the protective silence or the fade back in, applied
+        // PER SAMPLE across the block -- a single value per block puts a 0.27
+        // step at the buffer boundary, which is the click the fade exists to
+        // prevent (measured in test/diagnostics_test.cpp).
+        const auto ramp = diagnostics.advanceGain();
+        if (! ramp.isUnity())
+        {
+            const float step = n > 0 ? (ramp.to - ramp.from) / (float) n : 0.0f;
+            for (int c = 0; c < ch; ++c)
+            {
+                float* d = buffer.getWritePointer (c);
+                float g = ramp.from;
+                for (int i = 0; i < n; ++i) { d[i] *= g; g += step; }
+            }
+        }
+    }
+
     // OUTPUT meters: measured on the finished buffer, so they show exactly
     // what leaves the plugin (mute, gain, ASMR pan, Post FX and the Matching
     // target preview all included).
@@ -1195,6 +1295,11 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         uiOutL.push (buffer.getReadPointer (0), n, meterDt);
         uiOutR.push (buffer.getReadPointer (ch > 1 ? 1 : 0), n, meterDt);
     }
+
+    // Observed processing time, recorded as a ratio of the block's own
+    // duration. This is NOT a dropout -- only the host knows whether it
+    // actually missed a deadline -- so it is logged and never acted on.
+    diagnostics.endBlock ((juce::Time::getMillisecondCounterHiRes() - diagT0) * 0.001);
 }
 
 void VoxMorphProcessor::getStateInformation (juce::MemoryBlock& dest)

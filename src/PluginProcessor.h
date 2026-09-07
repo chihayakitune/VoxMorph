@@ -4,6 +4,7 @@
 #include "VoiceAnalyzer.h"
 #include "SpatialEngine.h"
 #include "ProtectionGain.h"
+#include "EngineDiagnostics.h"
 
 class VoxMorphProcessor : public juce::AudioProcessor
 {
@@ -405,6 +406,12 @@ private:
     // One instance drives BOTH engines: the detector is stereo-linked and the
     // same gain goes on L and R, so the image cannot move.
     ProtectionGain protection;
+    // Engine Diagnostics stage 1 (see EngineDiagnostics.h). Public so the
+    // diagnostics UI planned for stage 2 can read its counters and clear a
+    // halt; nothing in the DSP path reads it except processBlock.
+public:
+    EngineDiagnostics diagnostics;
+private:
     std::vector<float> monoScratch, scratchL, scratchR;
 
     std::atomic<float>* pPitch     = nullptr;
@@ -465,6 +472,11 @@ private:
     // noise gate + output gain smoothing state. The ASMR pan smoothers used
     // to live here too; they moved into SpatialEngine with the rest of the
     // positioning stage in v0.45.0.
+    // Samples fed since the last prepare/reset. The diagnostics stall check
+    // needs it: below the engine lookahead the engine has legitimately
+    // produced nothing yet, and calling that a fault would fire on every
+    // start and every recovery.
+    int64_t warmupSamples = 0;
     float gateEnv = 0.0f, gateGain = 1.0f;
     float gainSm = 1.0f;
     std::atomic<float>* pGate  = nullptr;
