@@ -1,4 +1,5 @@
 #include "PluginProcessor.h"
+#include <limits>
 #include "PluginEditor.h"
 
 juce::AudioProcessorEditor* VoxMorphProcessor::createEditor()
@@ -657,6 +658,48 @@ void VoxMorphProcessor::applyFxMono (juce::AudioPluginInstance& fx, float* m, in
     }
 }
 
+#if VOXMORPH_DIAG_TEST_HOOKS
+// TEST ONLY. Writes a non-finite sample into the named stage so the probe can
+// exercise the engine-origin and downstream-origin paths through the real
+// processBlock. Never compiled into a shipping build.
+void VoxMorphProcessor::injectForTest (EngineDiagnostics::Stage s, float* const* chans,
+                                       int nch, int n)
+{
+    if (diagInjectStage.load() != (int) s) return;
+    const int left = diagInjectBlocks.load();
+    if (left <= 0 || n <= 0 || nch <= 0) return;
+    diagInjectBlocks.store (left - 1);
+    if (chans[0] != nullptr)
+        chans[0][n / 2] = std::numeric_limits<float>::quiet_NaN();
+}
+#endif
+
+// Carries out whatever EngineDiagnostics has decided is needed, and nothing
+// more. Kept in one place so the "engine and ProtectionGain go together" rule
+// cannot be half-applied at one of the two call sites.
+void VoxMorphProcessor::applyRecoveryPlan (bool stereoMode)
+{
+    const auto p = diagnostics.pendingRecovery();
+    if (p == EngineDiagnostics::RecoveryPlan::none) return;
+
+    const double sr = getSampleRate() > 0.0 ? getSampleRate() : 44100.0;
+    if (p == EngineDiagnostics::RecoveryPlan::resetEngine)
+    {
+        engine.prepare (sr);              // same rate: fills, does not allocate
+        if (stereoMode) engineR.prepare (sr);
+        protection.reset();               // the gain history must go with it
+        warmupSamples = 0;                // the lookahead has to refill
+    }
+    else                                   // resetDownstream
+    {
+        // Only the stages after the conversion. The engine was producing
+        // finite samples, so restarting it would throw away good state and
+        // leave the actual fault in place.
+        spatial.reset();
+    }
+    diagnostics.beginRecovery();
+}
+
 void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
@@ -686,10 +729,18 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
     if (ch > 0)                                   // INPUT: as the host gave it
     {
-        const float* inCh[2] = { buffer.getReadPointer (0),
-                                 buffer.getReadPointer (ch > 1 ? 1 : 0) };
-        diagnostics.observe (EngineDiagnostics::Stage::input, inCh,
-                             ch > 1 ? 2 : 1, n);
+        // Scanned on the WRITE pointers, because a non-finite sample here has
+        // to be replaced rather than merely counted. Letting it through would
+        // put it into the gate envelope, ProtectionGain's detector and the
+        // engine's own filter state -- at which point an upstream fault has
+        // become an engine fault, and a reset is treating the wrong thing.
+        float* inCh[2] = { buffer.getWritePointer (0),
+                           buffer.getWritePointer (ch > 1 ? 1 : 0) };
+        const int nch = ch > 1 ? 2 : 1;
+        if (diagnostics.observe (EngineDiagnostics::Stage::input, inCh, nch, n)
+              == EngineDiagnostics::Action::sanitize)
+            for (int c = 0; c < ch; ++c)
+                sanitizeFx (buffer.getWritePointer (c), n);
     }
 
     // Display-only taps are skipped whenever nothing is on screen to read
@@ -936,10 +987,13 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         protection.processPre (preCh, stereoMode ? 2 : 1, n);
     }
 
-    {   // PRE-ENGINE: what is actually about to be converted
+    {   // PRE-ENGINE: the last chance to keep rubbish out of the conversion
         float* preCh[2] = { stereoMode ? sL : m, sR };
-        diagnostics.observe (EngineDiagnostics::Stage::preEngine, preCh,
-                             stereoMode ? 2 : 1, n);
+        const int nch = stereoMode ? 2 : 1;
+        if (diagnostics.observe (EngineDiagnostics::Stage::preEngine, preCh, nch, n)
+              == EngineDiagnostics::Action::sanitize)
+            for (int c = 0; c < nch; ++c)
+                sanitizeFx (preCh[c], n);
     }
 
     if (stereoMode)
@@ -957,7 +1011,11 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     {
         float* postCh[2] = { stereoMode ? sL : m, sR };
         const int nch = stereoMode ? 2 : 1;
-        if (diagnostics.observe (EngineDiagnostics::Stage::postEngine, postCh, nch, n))
+       #if VOXMORPH_DIAG_TEST_HOOKS
+        injectForTest (EngineDiagnostics::Stage::postEngine, postCh, nch, n);
+       #endif
+        if (diagnostics.observe (EngineDiagnostics::Stage::postEngine, postCh, nch, n)
+              == EngineDiagnostics::Action::silenceBlock)
         {
             // Zero it here, before the restore. Multiplying NaN by the restore
             // gain just produces more NaN, and everything downstream (the
@@ -967,19 +1025,13 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                 std::fill (postCh[c], postCh[c] + n, 0.0f);
         }
 
-        // Engine and ProtectionGain are reset TOGETHER. The restore undoes the
-        // gain from D samples ago; after an engine reset those samples are
-        // gone, so leaving the gain history in place would multiply fresh
-        // output by the inverse of a gain that was never applied to it.
-        if (diagnostics.wantsEngineReset())
-        {
-            const double sr = getSampleRate() > 0.0 ? getSampleRate() : 44100.0;
-            engine.prepare (sr);              // same rate: fills, does not allocate
-            if (stereoMode) engineR.prepare (sr);
-            protection.reset();
-            warmupSamples = 0;                // the lookahead has to refill
-            diagnostics.beginRecovery();
-        }
+        // Cause-specific recovery. resetEngine is the only plan that touches
+        // the conversion, and it resets the engine AND ProtectionGain
+        // TOGETHER: the restore undoes the gain from D samples ago, and after
+        // an engine reset those samples are gone, so leaving the history in
+        // place would multiply fresh output by the inverse of a gain that was
+        // never applied to it.
+        applyRecoveryPlan (stereoMode);
     }
 
     // ---- Auto Gain Restore ----------------------------------------------
@@ -1262,9 +1314,19 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         float* outCh[2] = { buffer.getWritePointer (0),
                             buffer.getWritePointer (ch > 1 ? 1 : 0) };
         const int nch = ch > 1 ? 2 : 1;
-        if (diagnostics.observe (EngineDiagnostics::Stage::output, outCh, nch, n))
+       #if VOXMORPH_DIAG_TEST_HOOKS
+        injectForTest (EngineDiagnostics::Stage::output, outCh, nch, n);
+       #endif
+        if (diagnostics.observe (EngineDiagnostics::Stage::output, outCh, nch, n)
+              == EngineDiagnostics::Action::silenceBlock)
             for (int c = 0; c < ch; ++c)
                 std::fill (buffer.getWritePointer (c), buffer.getWritePointer (c) + n, 0.0f);
+
+        // A fault that reaches here with a clean engine came from the spatial
+        // stage, the hosted Post FX or the preview mix. Re-preparing the
+        // ENGINE cannot repair a stage that runs after it, so the plan for
+        // this origin resets those instead.
+        applyRecoveryPlan (stereoMode);
 
         diagnostics.checkStall();
 

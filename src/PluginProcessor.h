@@ -411,7 +411,21 @@ private:
     // halt; nothing in the DSP path reads it except processBlock.
 public:
     EngineDiagnostics diagnostics;
+
+   #if VOXMORPH_DIAG_TEST_HOOKS
+    // TEST ONLY, compiled out of every shipping build (the macro is set by the
+    // VoxMorphDiagProbe target alone). An engine-origin or downstream-origin
+    // fault cannot be produced from the outside -- feeding NaN in gets
+    // sanitized at the input, which is the whole point -- so the probe needs a
+    // way to make a specific stage go non-finite in the REAL processBlock,
+    // rather than re-testing the class against a mock of its own wiring.
+    std::atomic<int> diagInjectStage { -1 };   // EngineDiagnostics::Stage, -1 = off
+    std::atomic<int> diagInjectBlocks { 0 };   // how many more blocks to corrupt
+    void injectForTest (EngineDiagnostics::Stage s, float* const* chans, int nch, int n);
+   #endif
+
 private:
+    void applyRecoveryPlan (bool stereoMode);
     std::vector<float> monoScratch, scratchL, scratchR;
 
     std::atomic<float>* pPitch     = nullptr;

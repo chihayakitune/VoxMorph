@@ -62,6 +62,28 @@ target_link_libraries(VoxMorph
             juce::juce_recommended_warning_flags
 )
 
+# ---- Diagnostics fault-injection probe (developer tool, OFF by default) --
+# Runs EngineDiagnostics through the REAL VoxMorphProcessor::processBlock and
+# injects faults at a chosen observation point. VOXMORPH_DIAG_TEST_HOOKS is set
+# ONLY here, so the injection hook does not exist in any shipping build.
+#   cmake -B build -DVOXMORPH_DIAG_PROBE=ON
+#   cmake --build build --target VoxMorphDiagProbe
+option(VOXMORPH_DIAG_PROBE "Build the diagnostics fault-injection probe" OFF)
+if (VOXMORPH_DIAG_PROBE)
+    juce_add_console_app(VoxMorphDiagProbe PRODUCT_NAME "VoxMorphDiagProbe")
+    target_sources(VoxMorphDiagProbe PRIVATE test/diag_probe.cpp src/PluginProcessor.cpp)
+    target_include_directories(VoxMorphDiagProbe PRIVATE dsp src)
+    target_compile_definitions(VoxMorphDiagProbe PUBLIC
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0
+        JUCE_PLUGINHOST_VST3=1
+        JUCE_STANDALONE_APPLICATION=1
+        JUCE_MODAL_LOOPS_PERMITTED=1
+        VOXMORPH_DIAG_TEST_HOOKS=1)
+    target_link_libraries(VoxMorphDiagProbe
+        PRIVATE juce::juce_audio_utils AnokoeAssets
+        PUBLIC  juce::juce_recommended_config_flags)
+endif()
+
 # ---- UI verification harness (developer tool, OFF by default) ------------
 # Renders the editor offscreen WITH a desktop peer and audits the layout
 # numerically. See test/ui_shot.cpp for why the peer matters.

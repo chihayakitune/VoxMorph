@@ -73,14 +73,16 @@ static float runBlock (D& d, std::vector<float>& pre, std::vector<float>& post,
     d.beginBlock (kN, ctx);
 
     float* inCh[1]   = { pre.data() };
-    d.observe (Sg::input, inCh, 1, kN);
-    d.observe (Sg::preEngine, inCh, 1, kN);
+    if (d.observe (Sg::input, inCh, 1, kN) == D::Action::sanitize)
+        for (auto& v : pre) if (! std::isfinite (v)) v = 0.0f;
+    if (d.observe (Sg::preEngine, inCh, 1, kN) == D::Action::sanitize)
+        for (auto& v : pre) if (! std::isfinite (v)) v = 0.0f;
 
     float* postCh[1] = { post.data() };
-    if (d.observe (Sg::postEngine, postCh, 1, kN))
+    if (d.observe (Sg::postEngine, postCh, 1, kN) == D::Action::silenceBlock)
         std::fill (post.begin(), post.end(), 0.0f);
 
-    if (d.wantsEngineReset())
+    if (d.pendingRecovery() != D::RecoveryPlan::none)
     {
         d.beginRecovery();
         if (resetHappened != nullptr) *resetHappened = true;
@@ -88,6 +90,7 @@ static float runBlock (D& d, std::vector<float>& pre, std::vector<float>& post,
 
     float* outCh[1] = { post.data() };
     d.observe (Sg::output, outCh, 1, kN);
+    if (d.pendingRecovery() != D::RecoveryPlan::none) d.beginRecovery();
     d.checkStall();
     const auto ramp = d.advanceGain();
     if (gainTrace != nullptr)
@@ -148,6 +151,8 @@ int main()
         check (d.nonFinite (Sg::postEngine) == 2, "fault: both bad samples counted");
         check (d.currentState() == St::awaitingRecovery, "fault: state is awaitingRecovery");
         check (d.engineResets() == 1, "fault: exactly one reset, not a storm");
+        check (d.retryCount() == 1, "fault: one fault costs exactly one retry");
+        check (d.lastOrigin() == D::Origin::engine, "fault: classified as engine");
 
         // the pre-engine side was clean, which is what says it was the engine
         check (d.nonFinite (Sg::preEngine) == 0,
@@ -210,8 +215,8 @@ int main()
         }
         check (d.currentState() == St::halted,
                "halt: repeated faults latch at halted instead of resetting forever");
-        check (d.engineResets() <= (uint32_t) D::kMaxRetries,
-               "halt: the engine was not reset more than kMaxRetries times");
+        check (d.engineResets() <= (uint32_t) D::kMaxRetries + 1,
+               "halt: recoveries were rationed, not unbounded");
 
         // and it STAYS muted with clean audio, until a person clears it
         bool stayedMuted = true;
@@ -225,6 +230,8 @@ int main()
 
         // manual clear brings it back
         d.requestManualRecovery();
+        check (d.manualRecoveryPending(),
+               "manual: the request is pending until a block runs");
         bool back = false;
         for (int b = 0; b < 200 && ! back; ++b)
         {
@@ -304,12 +311,14 @@ int main()
         }
         D::Event ev[D::kEventCap];
         const int got = d.readEvents (ev, D::kEventCap);
-        check (got == D::kEventCap, "log: the ring stays exactly at capacity");
+        check (got == D::kEventCap, "log: the ring holds exactly its capacity");
         check (d.droppedEvents() > 0, "log: what scrolled off is counted, not hidden");
         std::printf ("      log: %d held, %u dropped\n", got, d.droppedEvents());
         bool ordered = true;
         for (int i = 1; i < got; ++i) if (ev[i].block < ev[i-1].block) ordered = false;
-        check (ordered, "log: snapshot is in order, newest last");
+        check (ordered, "log: snapshot is in order, oldest first");
+        check (d.readEvents (ev, D::kEventCap) == 0,
+               "log: a consuming read empties the queue");
     }
 
     // ---- 8. stereo: a fault on ONE side only is still caught ---------------
@@ -321,7 +330,7 @@ int main()
         D::Context ctx;
         d.beginBlock (kN, ctx);
         float* ch[2] = { L.data(), R.data() };
-        const bool caught = d.observe (Sg::postEngine, ch, 2, kN);
+        const bool caught = d.observe (Sg::postEngine, ch, 2, kN) == D::Action::silenceBlock;
         check (caught, "stereo: a fault on the right side alone is caught");
         check (d.nonFinite (Sg::postEngine) == 1, "stereo: counted once, from the bad side");
     }

@@ -12,40 +12,61 @@
 //
 //   input      what the host handed us, before anything
 //   preEngine  what is about to enter the conversion (past gate + protection)
-//   postEngine what the conversion produced -- THE point that matters
+//   postEngine what the conversion produced
 //   output     what actually leaves the plugin, past every later stage
 //
-// A NaN at postEngine but not at preEngine is the engine's own state going
-// bad. A NaN at both is something upstream. A NaN only at output is one of
-// the stages after the conversion. Collapsing these into one "something is
-// wrong" flag would throw away the only information that says where to look.
+// WHERE THE FAULT IS DECIDES WHAT CAN FIX IT
+// This is the whole reason the four points are separate, and getting it wrong
+// was the main defect in the first version of this file:
 //
-// WHAT IT DOES ABOUT IT
-// Only non-finite samples gate the audio. Clipping, an output stall and a
-// processing-time overrun are RECORDED and raise the state to `caution`, but
-// they never silence anything: a false positive that mutes a working plugin
-// is worse than the symptom it was guarding against, and whisper, fry and
-// deliberate effects all look like a stall from the outside.
+//   upstream   non-finite already at input or preEngine. The engine has not
+//              been contaminated -- provided we SANITIZE before it gets in,
+//              which observe() now asks the caller to do. Resetting the
+//              engine here would be treating it for a fault it never saw.
+//   engine     clean going in, non-finite coming out: the conversion's own
+//              state has gone bad. A re-prepare is the fix.
+//   downstream clean out of the engine, non-finite at the output: the spatial
+//              stage, the hosted Post FX or the preview mix. Re-preparing the
+//              ENGINE cannot fix this, so it does not ask for it; the
+//              downstream stages are reset instead, and repeated failure halts.
 //
-// On a non-finite sample the block is zeroed, the engine is asked for a full
-// reset, and the output is ramped back in. It never falls back to passing the
-// dry input through: silence is an obvious failure, while unconverted voice
-// going out to a stream sounds like it is working and is not.
+// ONE FAULT IS ONE FAULT
+// A single bad sample shows up at every observation point after the one that
+// produced it. Counting each sighting as a separate failure spends the whole
+// retry budget on one event -- the first version of this file halted the
+// plugin outright on a single bad block (retries=4 from one NaN). So only the
+// FIRST bad stage in a block sets the origin and may ask for a recovery; later
+// stages in the same block are recorded as evidence and nothing more.
+// `retries` is incremented in beginRecovery(), i.e. once per recovery actually
+// performed, never per observation.
 //
-// WHY THE RECOVERY IS RATIONED
-// If the engine comes back bad, resetting it forever produces a stutter of
-// silence-then-noise that is worse than staying quiet. After kMaxRetries the
-// state latches at `halted`: the output is held muted until a person clears
-// it. That is the honest end state -- something is broken that this class
-// cannot fix by restarting it.
+// WHAT GETS GATED
+// Only non-finite samples. Clipping, an output stall and a processing-time
+// overrun are recorded and raise `caution`, but never silence anything:
+// whisper, fry and deliberate effects all look like a stall from outside, and
+// muting a working plugin is worse than the symptom. The overrun is a ratio of
+// the block's own duration and is deliberately NOT called a dropout -- only
+// the host knows whether it actually missed a deadline.
+//
+// It never falls back to passing the dry input through: silence is an obvious
+// failure, while unconverted voice going out to a stream sounds like it is
+// working and is not.
+//
+// THREADING
+// Everything that mutates state runs on the AUDIO thread. The UI only ever
+// stores one atomic request flag (requestManualRecovery) and reads published
+// atomics; the audio thread accepts the request at a block boundary. The event
+// log is a true single-producer / single-consumer ring: the writer only
+// touches slots the reader cannot reach and drops (counting) when full, so no
+// slot is ever accessed by both threads at once.
 //
 // THE ONE THING THAT IS EASY TO GET WRONG
 // The engine delays its output by D samples, and ProtectionGain holds a
 // D-sample history of the gain it applied. Resetting the engine without
 // resetting that history leaves the restore multiplying converted samples by
-// the inverse of a gain that was applied to material the engine has just
-// thrown away -- so the caller MUST reset both together. beginRecovery()
-// exists to say so at the call site rather than in a comment.
+// the inverse of a gain applied to material the engine has just thrown away --
+// so the caller MUST reset both together. RecoveryPlan::resetEngine says so at
+// the call site rather than in a comment.
 
 #include <algorithm>
 #include <atomic>
@@ -61,35 +82,56 @@ public:
     enum class State : uint8_t
     {
         normal = 0,          // nothing observed
-        caution,             // clip / stall / overrun seen; audio NOT gated
-        protectiveStop,      // non-finite found: output silenced, reset wanted
-        awaitingRecovery,    // engine reset done, pipeline refilling, ramping in
+        caution,             // clip / stall / overrun / sanitized input; audio NOT gated
+        protectiveStop,      // non-finite downstream of the input: block silenced
+        awaitingRecovery,    // reset done, pipeline refilling, ramping in
         halted               // retries spent; muted until a person clears it
     };
 
-    enum class Kind : uint8_t { nonFinite = 0, clip, stall, overrun, recovery, halt, manualClear };
+    // What the fault can possibly be fixed by. See the header note.
+    enum class Origin : uint8_t { none = 0, upstream, engine, downstream };
+
+    // What observe() is telling the caller to DO about this stage.
+    enum class Action : uint8_t
+    {
+        none = 0,
+        sanitize,        // replace the non-finite samples here, before they travel
+        silenceBlock     // zero the whole block: something past the input broke
+    };
+
+    // What the caller must reset, if anything, before the next block.
+    enum class RecoveryPlan : uint8_t
+    {
+        none = 0,
+        resetEngine,     // engine(s) AND ProtectionGain's gain history, together
+        resetDownstream  // the stages after the conversion (spatial, FX state)
+    };
+
+    enum class Kind : uint8_t
+    {
+        nonFinite = 0, clip, stall, overrun,
+        sanitized,          // upstream non-finite replaced; the engine was protected
+        recovery, halt, manualClear
+    };
 
     struct Event
     {
-        uint32_t block = 0;      // block index since prepare()
-        Stage    stage = Stage::input;
-        Kind     kind  = Kind::nonFinite;
-        float    value = 0.0f;   // kind-dependent: count, peak, ratio
+        uint32_t block  = 0;
+        Stage    stage  = Stage::input;
+        Kind     kind   = Kind::nonFinite;
+        Origin   origin = Origin::none;
+        float    value  = 0.0f;   // kind-dependent: count, seconds, ratio
     };
 
-    // Fixed capacity. The audio thread never waits for a reader: once full it
-    // drops the newest event and counts the drop, so a storm of faults cannot
-    // turn into unbounded work or a stall on the callback.
     static constexpr int kEventCap = 64;
 
-    // Tuning.
-    static constexpr float kClipCeil      = 1.0f;    // |x| above this counts as clipped
-    static constexpr float kLiveInputRms  = 1.0e-4f; // input counts as "live" above this
-    static constexpr float kSilentOutRms  = 1.0e-6f; // engine counts as silent below this
-    static constexpr float kStallSec      = 0.5f;    // live in, silent out, this long
-    static constexpr float kSettleSec     = 0.10f;   // hold silence while the pipeline refills
-    static constexpr float kRampSec       = 0.03f;   // fade the output back in over this
-    static constexpr float kCleanSec      = 2.0f;    // clean for this long -> retries forgiven
+    static constexpr float kClipCeil      = 1.0f;
+    static constexpr float kLiveInputRms  = 1.0e-4f;
+    static constexpr float kSilentOutRms  = 1.0e-6f;
+    static constexpr float kStallSec      = 0.5f;
+    static constexpr float kSettleSec     = 0.10f;
+    static constexpr float kRampSec       = 0.03f;
+    static constexpr float kCleanSec      = 2.0f;
     static constexpr int   kMaxRetries    = 3;
 
     //==============================================================================
@@ -99,55 +141,86 @@ public:
         reset();
     }
 
+    // Full clear. Bumps the log generation so a concurrent reader discards
+    // whatever it was copying rather than returning a mix of two lifetimes.
     void reset()
     {
+        generation.fetch_add (1, std::memory_order_acq_rel);
+
         state.store (State::normal, std::memory_order_relaxed);
         gain = 1.0f;  settleLeft = 0.0f;  rampLeft = 0.0f;
         retries = 0;  cleanSec = 0.0f;  stallSec = 0.0f;
-        blockIdx = 0; resetWanted = false;
+        blockIdx = 0;
+        plan = RecoveryPlan::none;
+        blockOrigin = Origin::none;
+        blockFaulted = false;
         for (int i = 0; i < (int) Stage::count; ++i)
         {
             nonFiniteCount[i].store (0, std::memory_order_relaxed);
             clipCount[i].store (0, std::memory_order_relaxed);
             peak[i].store (0.0f, std::memory_order_relaxed);
+            lastRms[i] = 0.0f;
         }
-        evWrite.store (0, std::memory_order_relaxed);
+        evHead.store (0, std::memory_order_relaxed);
+        evTail.store (0, std::memory_order_relaxed);
         evDropped.store (0, std::memory_order_relaxed);
         resetCount.store (0, std::memory_order_relaxed);
         lastOverrun.store (0.0f, std::memory_order_relaxed);
+        pubRetries.store (0, std::memory_order_relaxed);
+        pubOrigin.store (Origin::none, std::memory_order_relaxed);
+        manualReq.store (false, std::memory_order_relaxed);
+
+        generation.fetch_add (1, std::memory_order_acq_rel);
     }
 
     //==============================================================================
-    // Per-block context. Every one of these is a reason a silent engine is
-    // CORRECT rather than broken, so the stall detector is told about them
-    // instead of guessing: nothing to convert, the user asked for silence,
-    // the gate is shut, Mix is at 0, or the lookahead has not filled yet.
+    // Per-block context. Every field is a reason a silent engine is CORRECT
+    // rather than broken, so the stall check is told instead of guessing.
     struct Context
     {
-        bool muted       = false;   // user mute, auto-mute, or monitor mute
-        bool gateOpen    = true;    // noise gate is passing
-        bool converting  = true;    // Mix > 0, i.e. the engine output is in use
-        bool warmedUp    = true;    // more than the engine lookahead has been fed
+        bool muted       = false;
+        bool gateOpen    = true;
+        bool converting  = true;
+        bool warmedUp    = true;
     };
 
+    // AUDIO THREAD. Opens the block and accepts any pending UI request.
     void beginBlock (int n, const Context& c)
     {
         ctx = c;
         blockSec = (float) n / (float) fs;
         ++blockIdx;
-        blockHadNonFinite = false;
+        blockOrigin  = Origin::none;
+        blockFaulted = false;
+
+        // The UI's only write is the atomic flag; everything it used to touch
+        // directly is mutated here, on the audio thread, at a block boundary.
+        if (manualReq.exchange (false, std::memory_order_acquire))
+        {
+            retries  = 0;
+            cleanSec = 0.0f;
+            pubRetries.store (0, std::memory_order_relaxed);
+            if (state.load (std::memory_order_relaxed) == State::halted)
+            {
+                // Back through the normal recovery path, so the output still
+                // fades in rather than snapping to full level.
+                state.store (State::awaitingRecovery, std::memory_order_relaxed);
+                settleLeft = kSettleSec;
+                rampLeft   = kRampSec;
+                plan = RecoveryPlan::resetEngine;
+            }
+            push ({ blockIdx, Stage::postEngine, Kind::manualClear, Origin::none, 0.0f });
+        }
     }
 
     //==============================================================================
-    // Scan one observation point. Returns true if a non-finite sample was
-    // found, which is the only condition that gates audio.
+    // AUDIO THREAD. Scan one observation point and say what to do about it.
     //
-    // chans may be 1 (mono) or 2 (Stereo Input): both sides are always
-    // scanned, because a fault on one engine only is exactly the case a
-    // mono-only check would miss.
-    bool observe (Stage s, const float* const* chans, int numChans, int n)
+    // Both channels are always scanned in Stereo Input mode: a fault on one
+    // engine only is exactly what a mono-only check would miss.
+    Action observe (Stage s, const float* const* chans, int numChans, int n)
     {
-        if (chans == nullptr || numChans <= 0 || n <= 0) return false;
+        if (chans == nullptr || numChans <= 0 || n <= 0) return Action::none;
 
         const int si = (int) s;
         int bad = 0, clipped = 0;
@@ -175,30 +248,46 @@ public:
         if (clipped > 0)
         {
             clipCount[si].fetch_add ((uint32_t) clipped, std::memory_order_relaxed);
-            push ({ blockIdx, s, Kind::clip, (float) clipped });
+            push ({ blockIdx, s, Kind::clip, Origin::none, (float) clipped });
             raiseCaution();
         }
 
-        if (bad > 0)
+        if (bad == 0) return Action::none;
+
+        // Evidence is recorded at every stage it is seen; only the FIRST bad
+        // stage in this block decides what happened and may cost a retry.
+        nonFiniteCount[si].fetch_add ((uint32_t) bad, std::memory_order_relaxed);
+
+        const bool firstThisBlock = ! blockFaulted;
+        if (firstThisBlock)
         {
-            nonFiniteCount[si].fetch_add ((uint32_t) bad, std::memory_order_relaxed);
-            push ({ blockIdx, s, Kind::nonFinite, (float) bad });
-            blockHadNonFinite = true;
-            enterProtectiveStop();
-            return true;
+            blockFaulted = true;
+            blockOrigin  = originOf (s);
+            pubOrigin.store (blockOrigin, std::memory_order_relaxed);
         }
-        return false;
+
+        // Upstream: the host or the Pre FX handed us rubbish. Replaced here, so
+        // the engine never sees it -- that is a repair, not an engine failure,
+        // and it costs no retry and triggers no reset.
+        if (s == Stage::input || s == Stage::preEngine)
+        {
+            push ({ blockIdx, s, Kind::sanitized, Origin::upstream, (float) bad });
+            raiseCaution();
+            return Action::sanitize;
+        }
+
+        push ({ blockIdx, s, Kind::nonFinite, blockOrigin, (float) bad });
+        if (firstThisBlock)
+            enterProtectiveStop (blockOrigin);
+        return Action::silenceBlock;
     }
 
-    // Output stall: live input, converting, warmed up, not muted, gate open --
-    // and still nothing coming out of the engine. Observation only; it raises
-    // `caution` and logs, and never touches a sample. Call after observing
-    // preEngine and postEngine.
+    // AUDIO THREAD. Observation only; never touches a sample.
     void checkStall()
     {
         const bool couldSound = ctx.converting && ctx.warmedUp && ! ctx.muted && ctx.gateOpen
                              && lastRms[(int) Stage::preEngine] > kLiveInputRms;
-        if (! couldSound || gate() < 1.0f)
+        if (! couldSound || gain < 1.0f)
         {
             stallSec = 0.0f;
             return;
@@ -208,58 +297,76 @@ public:
             stallSec += blockSec;
             if (stallSec >= kStallSec)
             {
-                push ({ blockIdx, Stage::postEngine, Kind::stall, stallSec });
+                push ({ blockIdx, Stage::postEngine, Kind::stall, Origin::none, stallSec });
                 raiseCaution();
-                stallSec = 0.0f;            // re-arm rather than log every block
+                stallSec = 0.0f;
             }
         }
         else
             stallSec = 0.0f;
     }
 
-    // Observed processing time as a fraction of the block's own duration.
-    // This is NOT a dropout: the host may have plenty of slack, and a real
-    // dropout is something only the host can report. Recorded so a person can
-    // see the trend, never acted on.
+    // AUDIO THREAD. Observed processing time as a fraction of the block's own
+    // duration. NOT a dropout; recorded, never acted on.
     void endBlock (double elapsedSec)
     {
         const float ratio = blockSec > 0.0f ? (float) (elapsedSec / (double) blockSec) : 0.0f;
         lastOverrun.store (ratio, std::memory_order_relaxed);
         if (ratio > 1.0f)
         {
-            push ({ blockIdx, Stage::output, Kind::overrun, ratio });
+            push ({ blockIdx, Stage::output, Kind::overrun, Origin::none, ratio });
             raiseCaution();
         }
 
-        // Retries are forgiven only after a genuinely quiet stretch, so a
-        // fault every few seconds still walks up to `halted` instead of
-        // resetting the counter each time it recovers.
-        if (! blockHadNonFinite && state.load (std::memory_order_relaxed) == State::normal)
+        // Retries are forgiven only after a genuinely quiet stretch, so a fault
+        // every few seconds still walks up to `halted`.
+        if (! blockFaulted && state.load (std::memory_order_relaxed) == State::normal)
         {
             cleanSec += blockSec;
-            if (cleanSec >= kCleanSec) { retries = 0; cleanSec = 0.0f; }
+            if (cleanSec >= kCleanSec)
+            {
+                retries = 0;  cleanSec = 0.0f;
+                pubRetries.store (0, std::memory_order_relaxed);
+            }
         }
-        else
+        else if (blockFaulted)
             cleanSec = 0.0f;
     }
 
     //==============================================================================
-    // Recovery handshake with the owner of the engine.
+    // Recovery handshake. AUDIO THREAD.
     //
-    // The caller must reset the engine AND ProtectionGain's delayed-gain
-    // history in the same breath: the restore undoes the gain from D samples
-    // ago, and after an engine reset those samples no longer exist.
-    bool wantsEngineReset() const noexcept { return resetWanted; }
+    // resetEngine means engine(s) AND ProtectionGain together: the restore
+    // undoes the gain from D samples ago, and after an engine reset those
+    // samples are gone.
+    // resetDownstream means the stages AFTER the conversion. Re-preparing the
+    // engine cannot fix a fault introduced past it, so it is not asked for.
+    RecoveryPlan pendingRecovery() const noexcept { return plan; }
 
     void beginRecovery() noexcept
     {
-        resetWanted = false;
+        const RecoveryPlan p = plan;
+        plan = RecoveryPlan::none;
+        if (p == RecoveryPlan::none) return;
+
         resetCount.fetch_add (1, std::memory_order_relaxed);
-        if (state.load (std::memory_order_relaxed) == State::halted) return;
+
+        // ONE retry per recovery actually performed -- not per observation.
+        ++retries;
+        pubRetries.store ((uint32_t) retries, std::memory_order_relaxed);
+        push ({ blockIdx, Stage::postEngine, Kind::recovery,
+                pubOrigin.load (std::memory_order_relaxed), (float) retries });
+
+        if (retries > kMaxRetries)
+        {
+            state.store (State::halted, std::memory_order_relaxed);
+            push ({ blockIdx, Stage::postEngine, Kind::halt, Origin::none, (float) retries });
+            return;
+        }
+
         state.store (State::awaitingRecovery, std::memory_order_relaxed);
         settleLeft = kSettleSec;
         rampLeft   = kRampSec;
-        push ({ blockIdx, Stage::postEngine, Kind::recovery, (float) retries });
     }
 
     // The output gain for this block, as a ramp rather than one value.
@@ -267,12 +374,9 @@ public:
     // A single value per block is NOT enough, and the test measures why: at
     // 256 samples the 30 ms fade spans about six blocks, so a per-block step
     // reaches 0.27 -- a discontinuity at the buffer boundary, which is exactly
-    // the click this fade exists to avoid. The caller interpolates from `from`
-    // to `to` across the block, so the fade is per sample and the block size
-    // cannot be heard in it.
-    //
-    // In normal use both ends are exactly 1.0 and `isUnity()` lets the caller
-    // skip the multiply entirely, leaving the audio path sample-identical.
+    // the click this fade exists to avoid. The caller interpolates across the
+    // block. In normal use both ends are exactly 1.0 and isUnity() lets the
+    // caller skip the multiply, leaving the audio path sample-identical.
     struct GainRamp
     {
         float from = 1.0f, to = 1.0f;
@@ -292,11 +396,8 @@ public:
             else
             {
                 rampLeft = std::max (0.0f, rampLeft - blockSec);
-                const float t = 1.0f - rampLeft / kRampSec;         // 0 -> 1
+                const float t = 1.0f - rampLeft / kRampSec;
                 gain = 0.5f - 0.5f * std::cos (3.14159265f * std::clamp (t, 0.0f, 1.0f));
-                // Finish the state on the SAME block the gain reaches unity,
-                // not one block later: otherwise the plugin reports itself as
-                // still recovering while it is already at full level.
                 if (rampLeft <= 0.0f)
                 {
                     gain = 1.0f;
@@ -310,96 +411,128 @@ public:
         return { prev, gain };
     }
 
-    float gate() const noexcept { return gain; }
-
-    // From the UI (message thread) to leave `halted`. Deliberately manual:
-    // reaching halted means restarting the engine did not help.
+    //==============================================================================
+    // UI THREAD. The ONLY thing the UI writes. The audio thread picks it up at
+    // the next block boundary; nothing here touches the state machine, the
+    // retry counter or the log.
     void requestManualRecovery() noexcept
     {
-        if (state.load (std::memory_order_relaxed) != State::halted) return;
-        retries = 0;  cleanSec = 0.0f;
-        state.store (State::protectiveStop, std::memory_order_relaxed);
-        resetWanted = true;
-        push ({ blockIdx, Stage::postEngine, Kind::manualClear, 0.0f });
+        manualReq.store (true, std::memory_order_release);
     }
 
     //==============================================================================
-    // Readouts (message thread).
+    // Readouts. All published atomics -- safe from any thread.
     State    currentState()   const noexcept { return state.load (std::memory_order_relaxed); }
+    Origin   lastOrigin()     const noexcept { return pubOrigin.load (std::memory_order_relaxed); }
+    int      retryCount()     const noexcept { return (int) pubRetries.load (std::memory_order_relaxed); }
     uint32_t nonFinite (Stage s) const noexcept { return nonFiniteCount[(int) s].load (std::memory_order_relaxed); }
     uint32_t clips     (Stage s) const noexcept { return clipCount[(int) s].load (std::memory_order_relaxed); }
     float    stagePeak (Stage s) const noexcept { return peak[(int) s].load (std::memory_order_relaxed); }
     float    lastOverrunRatio()  const noexcept { return lastOverrun.load (std::memory_order_relaxed); }
     uint32_t engineResets()      const noexcept { return resetCount.load (std::memory_order_relaxed); }
     uint32_t droppedEvents()     const noexcept { return evDropped.load (std::memory_order_relaxed); }
-    int      retryCount()        const noexcept { return retries; }
+    bool     manualRecoveryPending() const noexcept { return manualReq.load (std::memory_order_relaxed); }
 
-    // Snapshot of the event ring, newest last. Returns how many were written.
-    int readEvents (Event* dst, int cap) const
+    // CONSUMING read, single consumer. Slots handed back here can be reused by
+    // the writer, which is what keeps the two threads off the same memory: the
+    // writer only ever touches [head, tail + kEventCap), the reader only
+    // [tail, head). When the ring is full the writer drops the NEWEST event and
+    // counts it, rather than overwriting something the reader may be copying.
+    int readEvents (Event* dst, int cap)
     {
         if (dst == nullptr || cap <= 0) return 0;
-        const uint32_t w = evWrite.load (std::memory_order_acquire);
-        const int have = (int) std::min<uint32_t> (w, (uint32_t) kEventCap);
-        const int take = std::min (have, cap);
-        for (int i = 0; i < take; ++i)
-            dst[i] = events[(size_t) ((w - (uint32_t) (take - i)) % (uint32_t) kEventCap)];
-        return take;
+        const uint32_t g0 = generation.load (std::memory_order_acquire);
+
+        const uint32_t h = evHead.load (std::memory_order_acquire);
+        uint32_t t = evTail.load (std::memory_order_relaxed);
+        int out = 0;
+        while (t != h && out < cap)
+        {
+            dst[out++] = events[(size_t) (t % (uint32_t) kEventCap)];
+            ++t;
+        }
+        evTail.store (t, std::memory_order_release);
+
+        // A reset between the two loads means these entries belong to a
+        // lifetime that no longer exists; report nothing rather than a mix.
+        if (generation.load (std::memory_order_acquire) != g0) return 0;
+        return out;
     }
 
 private:
+    static Origin originOf (Stage s) noexcept
+    {
+        switch (s)
+        {
+            case Stage::input:
+            case Stage::preEngine:  return Origin::upstream;
+            case Stage::postEngine: return Origin::engine;
+            case Stage::output:     return Origin::downstream;
+            default:                return Origin::none;
+        }
+    }
+
     void raiseCaution()
     {
         State expected = State::normal;
         state.compare_exchange_strong (expected, State::caution, std::memory_order_relaxed);
     }
 
-    void enterProtectiveStop()
+    void enterProtectiveStop (Origin o)
     {
-        const State s = state.load (std::memory_order_relaxed);
-        if (s == State::halted) return;
-
-        if (++retries > kMaxRetries)
-        {
-            state.store (State::halted, std::memory_order_relaxed);
-            resetWanted = false;
-            push ({ blockIdx, Stage::postEngine, Kind::halt, (float) retries });
-            return;
-        }
+        if (state.load (std::memory_order_relaxed) == State::halted) return;
         state.store (State::protectiveStop, std::memory_order_relaxed);
-        resetWanted = true;
+        // Cause-specific: an engine re-prepare cannot repair a stage that runs
+        // after it, so a downstream fault does not ask for one.
+        plan = (o == Origin::downstream) ? RecoveryPlan::resetDownstream
+                                         : RecoveryPlan::resetEngine;
     }
 
+    // AUDIO THREAD ONLY. Single producer.
     void push (const Event& e)
     {
-        const uint32_t w = evWrite.load (std::memory_order_relaxed);
-        // Past kEventCap the oldest entry is overwritten. Keeping the newest
-        // is the right trade for a watchdog -- what is happening now matters
-        // more than what happened first -- but the number that scrolled off
-        // has to survive, or the log quietly understates how bad it got.
-        if (w >= (uint32_t) kEventCap)
+        const uint32_t h = evHead.load (std::memory_order_relaxed);
+        const uint32_t t = evTail.load (std::memory_order_acquire);
+        if (h - t >= (uint32_t) kEventCap)
+        {
+            // Full. Dropping the newest keeps the writer off memory the reader
+            // owns; the count is what stops the log quietly understating how
+            // bad it got.
             evDropped.fetch_add (1, std::memory_order_relaxed);
-        events[(size_t) (w % (uint32_t) kEventCap)] = e;
-        evWrite.store (w + 1, std::memory_order_release);
+            return;
+        }
+        events[(size_t) (h % (uint32_t) kEventCap)] = e;
+        evHead.store (h + 1, std::memory_order_release);
     }
 
     double fs = 44100.0;
     Context ctx {};
     float blockSec = 0.0f;
-    bool  blockHadNonFinite = false;
 
-    std::atomic<State> state { State::normal };
+    // audio-thread-only state
     float gain = 1.0f, settleLeft = 0.0f, rampLeft = 0.0f;
     int   retries = 0;
     float cleanSec = 0.0f, stallSec = 0.0f;
-    bool  resetWanted = false;
     uint32_t blockIdx = 0;
+    RecoveryPlan plan = RecoveryPlan::none;
+    Origin blockOrigin = Origin::none;
+    bool   blockFaulted = false;
+    float  lastRms[(int) Stage::count] {};
 
-    float lastRms[(int) Stage::count] {};
+    // published
+    std::atomic<State>    state { State::normal };
+    std::atomic<Origin>   pubOrigin { Origin::none };
+    std::atomic<uint32_t> pubRetries { 0 };
     std::atomic<uint32_t> nonFiniteCount[(int) Stage::count] {};
     std::atomic<uint32_t> clipCount[(int) Stage::count] {};
     std::atomic<float>    peak[(int) Stage::count] {};
-
-    Event events[kEventCap] {};
-    std::atomic<uint32_t> evWrite { 0 }, evDropped { 0 }, resetCount { 0 };
     std::atomic<float>    lastOverrun { 0.0f };
+    std::atomic<uint32_t> resetCount { 0 };
+
+    // UI -> audio request
+    std::atomic<bool> manualReq { false };
+
+    // SPSC event log
+    Event events[kEventCap] {};
+    std::atomic<uint32_t> evHead { 0 }, evTail { 0 }, evDropped { 0 }, generation { 0 };
 };
