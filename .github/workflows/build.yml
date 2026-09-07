@@ -48,11 +48,20 @@ jobs:
           cp scripts/preinstall pkgscripts/preinstall
           chmod +x pkgscripts/preinstall
 
+          # Taken from CMakeLists rather than written out again: this line
+          # had been bumped by hand with every release since v0.63.x and was
+          # missed for v0.67.0, so the installer claimed 0.66.0 for a 0.67.0
+          # build. macOS compares this version when deciding whether a
+          # package is an upgrade, so a stale one is not cosmetic.
+          VM_VERSION=$(sed -n 's/^project(VoxMorph VERSION \([0-9.]*\)).*/\1/p' CMakeLists.txt)
+          test -n "$VM_VERSION"          # fail loudly rather than ship "--version"
+          echo "installer version: $VM_VERSION"
+
           pkgbuild --root "$STAGE" \
                    --component-plist components.plist \
                    --scripts pkgscripts \
                    --identifier com.hakamaaudio.voxmorph \
-                   --version 0.66.0 \
+                   --version "$VM_VERSION" \
                    "VoxMorph-Installer.pkg"
 
       - uses: actions/upload-artifact@v6

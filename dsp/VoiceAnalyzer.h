@@ -171,7 +171,17 @@ public:
     {
         VoiceProfile out;
         constexpr int W = 2048, hop = 1024, N = 4096, NB = N / 2;
-        n = std::min (n, (int) (fs * maxSec));
+        // The comparison has to happen in double, not after the cast.
+        // maxSec is caller-supplied and the "no cap" callers pass 1e9
+        // (test/profile_dump.cpp, and one case in offline_test), so
+        // fs * maxSec is ~4.8e13 -- far outside int. Converting that to int
+        // is undefined behaviour, and the two architectures this ships on
+        // disagree about it: arm64 saturates to INT_MAX (which happens to be
+        // the intended "no cap"), while x86-64 yields INT_MIN, so n went
+        // NEGATIVE and analyze() returned an empty profile on exactly the
+        // platforms the CI builds for. Doing the min first means the value
+        // being cast is always <= n and therefore always in range.
+        n = (int) std::min ((double) n, fs * maxSec);
         const int maxLag = (int) (fs / 60.0), minLag = std::max (2, (int) (fs / 500.0));
         if (n < W + maxLag + 8) return out;
 
