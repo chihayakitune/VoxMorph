@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include <limits>
+
 #include "PluginEditor.h"
 
 juce::AudioProcessorEditor* VoxMorphProcessor::createEditor()
@@ -506,7 +507,13 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 void VoxMorphProcessor::reset()
 {
     protection.reset();
-    diagnostics.reset();
+    // Requested, not performed: hosts may call reset() from the audio thread or
+    // from the message thread while audio is running, and the diagnostics state
+    // (and its event queue's producer side) belongs to the audio thread. The
+    // clear happens at the next block boundary. prepareToPlay is the other
+    // path, and there JUCE guarantees no callback is in flight, so it clears
+    // synchronously.
+    diagnostics.requestReset();
     warmupSamples = 0;
 }
 
@@ -711,6 +718,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 
     const float meterDt = (float) n / (float) std::max (1.0, getSampleRate());
 
+   #if VOXMORPH_DIAG_ENABLED
     // ---- Engine Diagnostics: block context ------------------------------
     // Every field here is a reason the engine being silent is CORRECT, so the
     // stall check is told rather than left to guess. warmedUp compares what
@@ -742,6 +750,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             for (int c = 0; c < ch; ++c)
                 sanitizeFx (buffer.getWritePointer (c), n);
     }
+   #endif
 
     // Display-only taps are skipped whenever nothing is on screen to read
     // them (editor closed, or the meters / visualizer scrolled out of view).
@@ -987,6 +996,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         protection.processPre (preCh, stereoMode ? 2 : 1, n);
     }
 
+   #if VOXMORPH_DIAG_ENABLED
     {   // PRE-ENGINE: the last chance to keep rubbish out of the conversion
         float* preCh[2] = { stereoMode ? sL : m, sR };
         const int nch = stereoMode ? 2 : 1;
@@ -995,6 +1005,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             for (int c = 0; c < nch; ++c)
                 sanitizeFx (preCh[c], n);
     }
+   #endif
 
     if (stereoMode)
     {
@@ -1008,6 +1019,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     // A non-finite sample here means the conversion's own state has gone bad.
     // Both engines are scanned in Stereo Input mode: a fault on one side only
     // is exactly what a mono-only check would miss.
+   #if VOXMORPH_DIAG_ENABLED
     {
         float* postCh[2] = { stereoMode ? sL : m, sR };
         const int nch = stereoMode ? 2 : 1;
@@ -1033,6 +1045,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         // never applied to it.
         applyRecoveryPlan (stereoMode);
     }
+   #endif
 
     // ---- Auto Gain Restore ----------------------------------------------
     // Straight after the conversion (Natural Air and the rest of the voice DSP
@@ -1305,6 +1318,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         myPos.store (mp + n >= ml ? -1 : mp + n);
     }
 
+   #if VOXMORPH_DIAG_ENABLED
     // ---- Engine Diagnostics: final output, stall check, recovery gate ---
     // Observed LAST so it covers every stage after the conversion too -- a
     // non-finite sample that only appears here came from the spatial stage,
@@ -1348,6 +1362,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             }
         }
     }
+   #endif
 
     // OUTPUT meters: measured on the finished buffer, so they show exactly
     // what leaves the plugin (mute, gain, ASMR pan, Post FX and the Matching
@@ -1361,7 +1376,9 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     // Observed processing time, recorded as a ratio of the block's own
     // duration. This is NOT a dropout -- only the host knows whether it
     // actually missed a deadline -- so it is logged and never acted on.
+   #if VOXMORPH_DIAG_ENABLED
     diagnostics.endBlock ((juce::Time::getMillisecondCounterHiRes() - diagT0) * 0.001);
+   #endif
 }
 
 void VoxMorphProcessor::getStateInformation (juce::MemoryBlock& dest)

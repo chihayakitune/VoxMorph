@@ -141,12 +141,26 @@ public:
         reset();
     }
 
-    // Full clear. Bumps the log generation so a concurrent reader discards
-    // whatever it was copying rather than returning a mix of two lifetimes.
+    // Clear the running state.
+    //
+    // THE LOG INDICES ARE NOT TOUCHED, and that is deliberate. Rewinding head
+    // and tail to 0 was a real race: a reader that had already loaded the old
+    // tail would go on copying slots the writer was free to reuse, and a
+    // generation number compared AFTER the copy cannot un-read memory that was
+    // being rewritten while it was read. The indices are monotonic for the
+    // life of the object, so the writer's range [head, tail + cap) and the
+    // reader's [tail, head) can never overlap, whatever else is reset.
+    //
+    // A reset is therefore an EVENT in the log rather than an erasure of it,
+    // which is also the more useful record: "everything before here belongs to
+    // a previous run" is information, and throwing the entries away is not.
+    //
+    // Concurrency: this touches audio-thread-only scalars, so it may be called
+    // only when the audio thread is not running (JUCE guarantees that for
+    // prepareToPlay). The runtime path -- AudioProcessor::reset() -- goes
+    // through requestReset() instead, which is serviced on the audio thread.
     void reset()
     {
-        generation.fetch_add (1, std::memory_order_acq_rel);
-
         state.store (State::normal, std::memory_order_relaxed);
         gain = 1.0f;  settleLeft = 0.0f;  rampLeft = 0.0f;
         retries = 0;  cleanSec = 0.0f;  stallSec = 0.0f;
@@ -154,6 +168,7 @@ public:
         plan = RecoveryPlan::none;
         blockOrigin = Origin::none;
         blockFaulted = false;
+        blockRecoveryAsked = false;
         for (int i = 0; i < (int) Stage::count; ++i)
         {
             nonFiniteCount[i].store (0, std::memory_order_relaxed);
@@ -161,17 +176,21 @@ public:
             peak[i].store (0.0f, std::memory_order_relaxed);
             lastRms[i] = 0.0f;
         }
-        evHead.store (0, std::memory_order_relaxed);
-        evTail.store (0, std::memory_order_relaxed);
+        // evHead / evTail are deliberately left alone -- see the note above.
         evDropped.store (0, std::memory_order_relaxed);
         resetCount.store (0, std::memory_order_relaxed);
         lastOverrun.store (0.0f, std::memory_order_relaxed);
         pubRetries.store (0, std::memory_order_relaxed);
         pubOrigin.store (Origin::none, std::memory_order_relaxed);
+        haltOrigin = Origin::none;
         manualReq.store (false, std::memory_order_relaxed);
-
-        generation.fetch_add (1, std::memory_order_acq_rel);
+        resetReq.store (false, std::memory_order_relaxed);
     }
+
+    // Safe from ANY thread. The clear itself happens on the audio thread at
+    // the next block boundary, for the same reason the manual-recovery request
+    // does: everything it touches is audio-thread state.
+    void requestReset() noexcept { resetReq.store (true, std::memory_order_release); }
 
     //==============================================================================
     // Per-block context. Every field is a reason a silent engine is CORRECT
@@ -192,9 +211,13 @@ public:
         ++blockIdx;
         blockOrigin  = Origin::none;
         blockFaulted = false;
+        blockRecoveryAsked = false;
 
         // The UI's only write is the atomic flag; everything it used to touch
         // directly is mutated here, on the audio thread, at a block boundary.
+        if (resetReq.exchange (false, std::memory_order_acquire))
+            reset();
+
         if (manualReq.exchange (false, std::memory_order_acquire))
         {
             retries  = 0;
@@ -203,13 +226,17 @@ public:
             if (state.load (std::memory_order_relaxed) == State::halted)
             {
                 // Back through the normal recovery path, so the output still
-                // fades in rather than snapping to full level.
+                // fades in rather than snapping to full level -- and with the
+                // plan the HALTING CAUSE calls for. Always asking for
+                // resetEngine here would re-prepare the conversion to clear a
+                // fault that came from a stage after it, which is exactly the
+                // misdirection the cause-specific recovery exists to avoid.
                 state.store (State::awaitingRecovery, std::memory_order_relaxed);
                 settleLeft = kSettleSec;
                 rampLeft   = kRampSec;
-                plan = RecoveryPlan::resetEngine;
+                plan = planFor (haltOrigin);
             }
-            push ({ blockIdx, Stage::postEngine, Kind::manualClear, Origin::none, 0.0f });
+            push ({ blockIdx, Stage::postEngine, Kind::manualClear, haltOrigin, 0.0f });
         }
     }
 
@@ -258,26 +285,42 @@ public:
         // stage in this block decides what happened and may cost a retry.
         nonFiniteCount[si].fetch_add ((uint32_t) bad, std::memory_order_relaxed);
 
-        const bool firstThisBlock = ! blockFaulted;
-        if (firstThisBlock)
-        {
-            blockFaulted = true;
-            blockOrigin  = originOf (s);
-            pubOrigin.store (blockOrigin, std::memory_order_relaxed);
-        }
+        blockFaulted = true;
 
         // Upstream: the host or the Pre FX handed us rubbish. Replaced here, so
         // the engine never sees it -- that is a repair, not an engine failure,
         // and it costs no retry and triggers no reset.
+        //
+        // Crucially it also does NOT count as "this block already faulted" for
+        // what follows. A fault that was CONTAINED cannot be the thing a later
+        // stage is reporting, so if the engine goes non-finite after we handed
+        // it clean samples, that is an independent failure and must still be
+        // able to ask for its recovery. Treating the two as one event let a
+        // noisy host mask a genuinely broken engine.
         if (s == Stage::input || s == Stage::preEngine)
         {
             push ({ blockIdx, s, Kind::sanitized, Origin::upstream, (float) bad });
+            if (! blockRecoveryAsked)
+                pubOrigin.store (Origin::upstream, std::memory_order_relaxed);
             raiseCaution();
             return Action::sanitize;
         }
 
-        push ({ blockIdx, s, Kind::nonFinite, blockOrigin, (float) bad });
-        if (firstThisBlock)
+        // Past the input the fault was not contained. The FIRST uncontained
+        // one in the block decides the origin and may ask for a recovery; a
+        // later stage seeing the same samples travel is evidence only, so the
+        // budget is still spent once per block.
+        const bool independent = ! blockRecoveryAsked;
+        if (independent)
+        {
+            blockRecoveryAsked = true;
+            blockOrigin = originOf (s);
+            pubOrigin.store (blockOrigin, std::memory_order_relaxed);
+        }
+
+        push ({ blockIdx, s, Kind::nonFinite, independent ? blockOrigin : Origin::none,
+                (float) bad });
+        if (independent)
             enterProtectiveStop (blockOrigin);
         return Action::silenceBlock;
     }
@@ -359,6 +402,9 @@ public:
 
         if (retries > kMaxRetries)
         {
+            // Remember WHY we stopped, so a manual clear later asks for the
+            // recovery this cause actually needs.
+            haltOrigin = pubOrigin.load (std::memory_order_relaxed);
             state.store (State::halted, std::memory_order_relaxed);
             push ({ blockIdx, Stage::postEngine, Kind::halt, Origin::none, (float) retries });
             return;
@@ -441,8 +487,11 @@ public:
     int readEvents (Event* dst, int cap)
     {
         if (dst == nullptr || cap <= 0) return 0;
-        const uint32_t g0 = generation.load (std::memory_order_acquire);
 
+        // head only ever grows and tail is ours, so [tail, head) is a range no
+        // writer can be inside. A reset cannot move either index, so there is
+        // nothing here that a concurrent reset can invalidate -- which is why
+        // this no longer needs a generation check to paper over one.
         const uint32_t h = evHead.load (std::memory_order_acquire);
         uint32_t t = evTail.load (std::memory_order_relaxed);
         int out = 0;
@@ -452,10 +501,6 @@ public:
             ++t;
         }
         evTail.store (t, std::memory_order_release);
-
-        // A reset between the two loads means these entries belong to a
-        // lifetime that no longer exists; report nothing rather than a mix.
-        if (generation.load (std::memory_order_acquire) != g0) return 0;
         return out;
     }
 
@@ -478,14 +523,19 @@ private:
         state.compare_exchange_strong (expected, State::caution, std::memory_order_relaxed);
     }
 
+    // Cause-specific: an engine re-prepare cannot repair a stage that runs
+    // after it, so a downstream fault does not ask for one.
+    static RecoveryPlan planFor (Origin o) noexcept
+    {
+        return o == Origin::downstream ? RecoveryPlan::resetDownstream
+                                       : RecoveryPlan::resetEngine;
+    }
+
     void enterProtectiveStop (Origin o)
     {
         if (state.load (std::memory_order_relaxed) == State::halted) return;
         state.store (State::protectiveStop, std::memory_order_relaxed);
-        // Cause-specific: an engine re-prepare cannot repair a stage that runs
-        // after it, so a downstream fault does not ask for one.
-        plan = (o == Origin::downstream) ? RecoveryPlan::resetDownstream
-                                         : RecoveryPlan::resetEngine;
+        plan = planFor (o);
     }
 
     // AUDIO THREAD ONLY. Single producer.
@@ -516,7 +566,8 @@ private:
     uint32_t blockIdx = 0;
     RecoveryPlan plan = RecoveryPlan::none;
     Origin blockOrigin = Origin::none;
-    bool   blockFaulted = false;
+    bool   blockFaulted = false;        // anything non-finite seen this block
+    bool   blockRecoveryAsked = false;  // an UNCONTAINED fault already claimed the budget
     float  lastRms[(int) Stage::count] {};
 
     // published
@@ -529,10 +580,13 @@ private:
     std::atomic<float>    lastOverrun { 0.0f };
     std::atomic<uint32_t> resetCount { 0 };
 
-    // UI -> audio request
+    // UI/host -> audio requests, serviced at a block boundary
     std::atomic<bool> manualReq { false };
+    std::atomic<bool> resetReq  { false };
+    Origin haltOrigin = Origin::none;
 
     // SPSC event log
     Event events[kEventCap] {};
-    std::atomic<uint32_t> evHead { 0 }, evTail { 0 }, evDropped { 0 }, generation { 0 };
+    // Monotonic for the life of the object. reset() never rewinds them.
+    std::atomic<uint32_t> evHead { 0 }, evTail { 0 }, evDropped { 0 };
 };

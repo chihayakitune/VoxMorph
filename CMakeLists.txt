@@ -82,6 +82,25 @@ if (VOXMORPH_DIAG_PROBE)
     target_link_libraries(VoxMorphDiagProbe
         PRIVATE juce::juce_audio_utils AnokoeAssets
         PUBLIC  juce::juce_recommended_config_flags)
+
+    # The SAME sources with the diagnostics compiled out. Renders the
+    # pre-v0.68.0 signal path so the probe's dump can be diffed against a real
+    # baseline rather than against another copy of itself.
+    juce_add_console_app(VoxMorphDiagBaseline PRODUCT_NAME "VoxMorphDiagBaseline")
+    target_sources(VoxMorphDiagBaseline PRIVATE test/diag_probe.cpp src/PluginProcessor.cpp)
+    target_include_directories(VoxMorphDiagBaseline PRIVATE dsp src)
+    target_compile_definitions(VoxMorphDiagBaseline PUBLIC
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0
+        JUCE_PLUGINHOST_VST3=1
+        JUCE_STANDALONE_APPLICATION=1
+        JUCE_MODAL_LOOPS_PERMITTED=1
+        # the hook is unreachable with the diagnostics compiled out, but the
+        # shared probe source still has to compile
+        VOXMORPH_DIAG_TEST_HOOKS=1
+        VOXMORPH_DIAG_ENABLED=0)
+    target_link_libraries(VoxMorphDiagBaseline
+        PRIVATE juce::juce_audio_utils AnokoeAssets
+        PUBLIC  juce::juce_recommended_config_flags)
 endif()
 
 # ---- UI verification harness (developer tool, OFF by default) ------------

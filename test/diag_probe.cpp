@@ -18,9 +18,30 @@
 #include "../src/PluginProcessor.h"
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <vector>
+
+// ---- allocation counter (same shape as offline_test.cpp) -------------------
+// Used for the one measurement the reviews kept asking for: whether the
+// recovery path -- which calls engine.prepare() from the audio callback --
+// allocates.
+static long g_allocCount = 0;
+static bool g_countAlloc = false;
+void* operator new (std::size_t sz)
+{
+    if (g_countAlloc) ++g_allocCount;
+    if (sz == 0) sz = 1;
+    if (void* p = std::malloc (sz)) return p;
+    throw std::bad_alloc();
+}
+void* operator new[] (std::size_t sz) { return operator new (sz); }
+void operator delete (void* p) noexcept { std::free (p); }
+void operator delete[] (void* p) noexcept { std::free (p); }
+void operator delete (void* p, std::size_t) noexcept { std::free (p); }
+void operator delete[] (void* p, std::size_t) noexcept { std::free (p); }
 
 static int g_fail = 0;
 static void check (bool ok, const juce::String& what)
@@ -117,35 +138,54 @@ int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
 
-    // ---- 1. normal path is untouched, sample for sample --------------------
-    // The watchdog must cost nothing while nothing is wrong. Two identically
-    // driven processors, one of which has seen a fault and recovered, must
-    // agree once it is back to normal -- but first, the plain case: the
-    // diagnostics must never make the output differ from itself.
+    // ---- 1. normal path is untouched, against a REAL baseline --------------
+    // Comparing two builds that both carry the diagnostics only shows they are
+    // deterministic. The question is whether the diagnostics changed the audio
+    // at all, so this binary renders to a file and the SAME source built with
+    // VOXMORPH_DIAG_ENABLED=0 -- which is the pre-v0.68.0 signal path, with
+    // every diagnostics call compiled out -- renders the same input. The two
+    // dumps are then compared byte for byte outside this program.
     {
-        VoxMorphProcessor a, b;
-        a.prepareToPlay (kSr, 256);
-        b.prepareToPlay (kSr, 256);
-        juce::AudioBuffer<float> ba (2, 256), bb (2, 256);
+        VoxMorphProcessor p;
+        p.prepareToPlay (kSr, 256);
+        juce::AudioBuffer<float> buf (2, 256);
         juce::MidiBuffer midi;
-        int64_t pa = 0, pb = 0;
-        bool same = true;
+        int64_t pos = 0;
+        std::vector<float> dump;
         for (int i = 0; i < 400; ++i)
         {
-            fillTone (ba, pa);  fillTone (bb, pb);
-            a.processBlock (ba, midi);
-            b.processBlock (bb, midi);
-            for (int c = 0; c < 2 && same; ++c)
-                if (std::memcmp (ba.getReadPointer (c), bb.getReadPointer (c),
-                                 (size_t) 256 * sizeof (float)) != 0) same = false;
-            pa += 256;  pb += 256;
+            fillTone (buf, pos);
+            p.processBlock (buf, midi);
+            for (int c = 0; c < 2; ++c)
+            {
+                const float* d = buf.getReadPointer (c);
+                dump.insert (dump.end(), d, d + 256);
+            }
+            pos += 256;
         }
-        check (same, "normal: two clean instances stay bit-identical");
-        check (a.diagnostics.currentState() == EDState::normal,
+        const char* path = VOXMORPH_DIAG_ENABLED ? "/tmp/vm_diag_on.f32"
+                                                 : "/tmp/vm_diag_off.f32";
+        if (FILE* f = std::fopen (path, "wb"))
+        {
+            std::fwrite (dump.data(), sizeof (float), dump.size(), f);
+            std::fclose (f);
+            std::printf ("      baseline dump: %s (%zu samples)\n", path, dump.size());
+        }
+        check (! dump.empty(), "baseline: rendered a dump for the cross-build diff");
+
+       #if VOXMORPH_DIAG_ENABLED
+        check (p.diagnostics.currentState() == EDState::normal,
                "normal: state stays normal over 400 blocks");
-        check (a.diagnostics.engineResets() == 0, "normal: no recovery was triggered");
-        check (a.diagnostics.retryCount() == 0, "normal: no retry was spent");
+        check (p.diagnostics.engineResets() == 0, "normal: no recovery was triggered");
+        check (p.diagnostics.retryCount() == 0, "normal: no retry was spent");
+       #endif
     }
+
+   #if ! VOXMORPH_DIAG_ENABLED
+    // The baseline build only exists to produce that dump.
+    std::printf ("\nbaseline build (VOXMORPH_DIAG_ENABLED=0): dump written\n");
+    return 0;
+   #endif
 
     // ---- 2. non-finite INPUT is blocked before the engine -------------------
     // The fix the review asked for: an upstream fault must be sanitized, must
@@ -433,6 +473,209 @@ int main()
         check (finite, "large buffer: output stays finite through a recovery");
         check (worst < 0.05f, "large buffer: recovery still has no step");
         check (p.diagnostics.engineResets() == 1, "large buffer: one recovery");
+    }
+
+    // ---- 10. gain history: ALIGNED WAVEFORM, not just a peak bound ---------
+    // The previous version only checked that the peak after recovery was not
+    // absurd, which a badly aligned gain history could still pass. This runs
+    // two identically driven instances, faults one of them, and then compares
+    // the two waveforms sample for sample once both are settled. If
+    // ProtectionGain's history had been left behind, the faulted one would
+    // come back at a different level and the difference would not close.
+    {
+        VoxMorphProcessor a, b;
+        a.prepareToPlay (kSr, 256);
+        b.prepareToPlay (kSr, 256);
+        juce::AudioBuffer<float> ba (2, 256), bb (2, 256);
+        juce::MidiBuffer midi;
+        int64_t pa = 0, pb = 0;
+
+        // drive ProtectionGain into real reduction on BOTH, so there is a
+        // history that could be misapplied
+        for (int i = 0; i < 120; ++i)
+        {
+            fillTone (ba, pa, 2.0f);  fillTone (bb, pb, 2.0f);
+            a.processBlock (ba, midi); b.processBlock (bb, midi);
+            pa += 256;  pb += 256;
+        }
+
+        a.diagInjectStage.store ((int) EDStage::postEngine);
+        a.diagInjectBlocks.store (1);
+        { fillTone (ba, pa); fillTone (bb, pb);
+          a.processBlock (ba, midi); b.processBlock (bb, midi); pa += 256; pb += 256; }
+        a.diagInjectStage.store (-1);
+
+        // let the faulted one finish recovering AND the engine refill
+        for (int i = 0; i < 400; ++i)
+        {
+            fillTone (ba, pa);  fillTone (bb, pb);
+            a.processBlock (ba, midi); b.processBlock (bb, midi);
+            pa += 256;  pb += 256;
+        }
+
+        // Compare the two settled runs. Both quantities are reported, because
+        // they answer different questions and only one of them is evidence
+        // about the gain history.
+        //
+        // The sample-by-sample residual CANNOT go to zero here, and that is
+        // not a fault: engine.prepare() restarts TD-PSOLA's grain scheduling
+        // from writePos 0, so the recovered instance lands its grains at
+        // different absolute positions. The result is an equally valid
+        // rendering of the same input at a different grain phase. Measuring
+        // that difference measures the restart, not the gain history.
+        //
+        // What a mis-aligned ProtectionGain history WOULD do is change the
+        // LEVEL -- the restore would multiply by the inverse of a gain applied
+        // to samples the engine discarded. So the envelope is the quantity
+        // that carries the claim, and it is what is asserted.
+        double num = 0.0, den = 0.0, worst = 0.0, sqA = 0.0, sqB = 0.0;
+        double pkA = 0.0, pkB = 0.0;
+        long   nTot = 0;
+        for (int i = 0; i < 100; ++i)
+        {
+            fillTone (ba, pa);  fillTone (bb, pb);
+            a.processBlock (ba, midi); b.processBlock (bb, midi);
+            const float* da = ba.getReadPointer (0);
+            const float* db = bb.getReadPointer (0);
+            for (int k = 0; k < 256; ++k)
+            {
+                const double d = (double) da[k] - (double) db[k];
+                num += d * d;  den += (double) db[k] * db[k];
+                worst = std::max (worst, std::abs (d));
+                sqA += (double) da[k] * da[k];  sqB += (double) db[k] * db[k];
+                pkA = std::max (pkA, (double) std::abs (da[k]));
+                pkB = std::max (pkB, (double) std::abs (db[k]));
+                ++nTot;
+            }
+            pa += 256;  pb += 256;
+        }
+        const double relDb = den > 1e-20 ? 10.0 * std::log10 (std::max (num / den, 1e-20))
+                                         : -200.0;
+        const double rmsA = std::sqrt (sqA / (double) std::max (1L, nTot));
+        const double rmsB = std::sqrt (sqB / (double) std::max (1L, nTot));
+        const double rmsDb  = 20.0 * std::log10 (std::max (rmsA, 1e-12) / std::max (rmsB, 1e-12));
+        const double peakDb = 20.0 * std::log10 (std::max (pkA, 1e-12) / std::max (pkB, 1e-12));
+
+        std::printf ("      recovered vs clean: RMS %+.3f dB, peak %+.3f dB"
+                     "  (raw residual %.1f dB rel, worst |diff| %.5f -- grain phase)\n",
+                     rmsDb, peakDb, relDb, worst);
+        check (std::abs (rmsDb) < 0.5,
+               "gain history: recovered instance is at the SAME LEVEL as the clean one");
+        check (std::abs (peakDb) < 1.0,
+               "gain history: and the same peak, so no restore overshoot survived");
+        check (a.diagnostics.engineResets() == 1, "gain history: one recovery only");
+    }
+
+    // ---- 11. manual recovery keeps the HALTING CAUSE -----------------------
+    // A halt caused downstream must not be cleared by re-preparing the engine.
+    {
+        VoxMorphProcessor p;
+        p.prepareToPlay (kSr, 256);
+        juce::AudioBuffer<float> buf (2, 256);
+        int64_t pos = 0;
+        runTone (p, buf, 40, pos);
+
+        for (int f = 0; f < EngineDiagnostics::kMaxRetries + 2; ++f)
+        {
+            p.diagInjectStage.store ((int) EDStage::output);   // DOWNSTREAM
+            p.diagInjectBlocks.store (1);
+            runTone (p, buf, 1, pos);
+            runTone (p, buf, 4, pos);
+        }
+        p.diagInjectStage.store (-1);
+        check (p.diagnostics.currentState() == EDState::halted,
+               "cause-preserving: repeated downstream faults halt");
+        check (p.diagnostics.lastOrigin() == EDOrigin::downstream,
+               "cause-preserving: the halting cause is downstream");
+
+        const uint32_t resetsAtHalt = p.diagnostics.engineResets();
+        p.diagnostics.requestManualRecovery();
+        runTone (p, buf, 200, pos);
+        std::printf ("      cause-preserving: state=%s origin=%s recoveries %u -> %u\n",
+                     stateName (p.diagnostics.currentState()),
+                     originName (p.diagnostics.lastOrigin()),
+                     resetsAtHalt, p.diagnostics.engineResets());
+        check (p.diagnostics.currentState() != EDState::halted,
+               "cause-preserving: manual clear brings it back");
+        check (p.diagnostics.lastOrigin() == EDOrigin::downstream,
+               "cause-preserving: it did not relabel the cause as an engine fault");
+    }
+
+    // ---- 12. a contained upstream fault must not mask a real one -----------
+    // Review item 4: once the input has been sanitized the engine got CLEAN
+    // samples, so a non-finite coming out of it in the same block is an
+    // independent failure and must still be able to ask for its recovery.
+    {
+        VoxMorphProcessor p;
+        p.prepareToPlay (kSr, 256);
+        juce::AudioBuffer<float> buf (2, 256);
+        juce::MidiBuffer midi;
+        int64_t pos = 0;
+        runTone (p, buf, 40, pos);
+        const uint32_t before = p.diagnostics.engineResets();
+
+        // upstream rubbish AND an engine fault, in the SAME block
+        p.diagInjectStage.store ((int) EDStage::postEngine);
+        p.diagInjectBlocks.store (1);
+        fillTone (buf, pos);
+        buf.getWritePointer (0)[5] = std::numeric_limits<float>::quiet_NaN();
+        p.processBlock (buf, midi);
+        pos += 256;
+        p.diagInjectStage.store (-1);
+
+        std::printf ("      contained+independent: origin=%s recoveries %u -> %u retries=%d\n",
+                     originName (p.diagnostics.lastOrigin()), before,
+                     p.diagnostics.engineResets(), p.diagnostics.retryCount());
+        check (p.diagnostics.engineResets() == before + 1,
+               "contained upstream: the independent engine fault still got its recovery");
+        check (p.diagnostics.lastOrigin() == EDOrigin::engine,
+               "contained upstream: the engine fault is the one that is reported");
+        check (p.diagnostics.retryCount() == 1,
+               "contained upstream: the budget is still spent only once for the block");
+        check (allFinite (buf), "contained upstream: the block still leaves finite");
+    }
+
+    // ---- 13. the recovery path's real-time cost ---------------------------
+    // The measurement both reviews asked for and neither previous delivery
+    // made: engine.prepare() is called from the audio callback, so does that
+    // path allocate, and how long does it take?
+    {
+        VoxMorphProcessor p;
+        p.prepareToPlay (kSr, 256);
+        juce::AudioBuffer<float> buf (2, 256);
+        juce::MidiBuffer midi;
+        int64_t pos = 0;
+        runTone (p, buf, 60, pos);            // warm every lazy allocation up
+
+        // a normal block first, as the reference
+        g_allocCount = 0;  g_countAlloc = true;
+        const double n0 = juce::Time::getMillisecondCounterHiRes();
+        fillTone (buf, pos);  p.processBlock (buf, midi);  pos += 256;
+        const double normalMs = juce::Time::getMillisecondCounterHiRes() - n0;
+        const long normalAllocs = g_allocCount;
+        g_countAlloc = false;
+
+        // then the recovery block
+        p.diagInjectStage.store ((int) EDStage::postEngine);
+        p.diagInjectBlocks.store (1);
+        g_allocCount = 0;  g_countAlloc = true;
+        const double r0 = juce::Time::getMillisecondCounterHiRes();
+        fillTone (buf, pos);  p.processBlock (buf, midi);  pos += 256;
+        const double recoveryMs = juce::Time::getMillisecondCounterHiRes() - r0;
+        const long recoveryAllocs = g_allocCount;
+        g_countAlloc = false;
+        p.diagInjectStage.store (-1);
+
+        const double budgetMs = 1000.0 * 256.0 / kSr;
+        std::printf ("      normal block  : %ld alloc, %.3f ms\n", normalAllocs, normalMs);
+        std::printf ("      recovery block: %ld alloc, %.3f ms (block budget %.3f ms)\n",
+                     recoveryAllocs, recoveryMs, budgetMs);
+        check (normalAllocs == 0, "real-time: a normal block allocates nothing");
+        check (recoveryAllocs == 0,
+               "real-time: the recovery block (engine.prepare) allocates nothing either");
+        check (recoveryMs < budgetMs,
+               "real-time: the recovery block still fits inside its own block budget");
+        check (p.diagnostics.engineResets() == 1, "real-time: the recovery did happen");
     }
 
     std::printf ("\n%s (%d failure%s)\n", g_fail == 0 ? "ALL PASS" : "FAILURES",

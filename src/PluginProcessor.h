@@ -6,6 +6,16 @@
 #include "ProtectionGain.h"
 #include "EngineDiagnostics.h"
 
+// VOXMORPH_DIAG_ENABLED=0 compiles the Engine Diagnostics out of processBlock
+// entirely, leaving the pre-v0.68.0 signal path. It exists so the probe can
+// render a REAL baseline and diff against it: comparing two builds that BOTH
+// carry the diagnostics only proves they are deterministic, not that they left
+// the audio alone. Always 1 in every shipping build; only the
+// VoxMorphDiagBaseline target sets it to 0.
+#ifndef VOXMORPH_DIAG_ENABLED
+ #define VOXMORPH_DIAG_ENABLED 1
+#endif
+
 class VoxMorphProcessor : public juce::AudioProcessor
 {
 public:

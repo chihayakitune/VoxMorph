@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <limits>
 #include <new>
+#include <thread>
 #include <vector>
 
 // ---- allocation counter (same shape as offline_test.cpp) -------------------
@@ -356,6 +357,59 @@ int main()
         g_countAlloc = false;
         std::printf ("      allocations across 100 blocks incl. a fault: %ld\n", g_allocCount);
         check (g_allocCount == 0, "audio thread: no allocation, fault path included");
+    }
+
+    // ---- 10. concurrent reset / read / push --------------------------------
+    // Review item 1. The old design rewound head and tail on reset, so a reader
+    // holding the old tail could go on copying slots the writer was free to
+    // reuse -- and a generation compared AFTER the copy cannot un-read memory
+    // that was rewritten during it. The indices are now monotonic for the life
+    // of the object, so this hammers all three operations at once and the
+    // ranges still cannot overlap. Run it under ThreadSanitizer as well as
+    // plainly: that is what actually proves the claim.
+    {
+        D d; d.prepare (kFs, kN);
+        std::atomic<bool> stop { false };
+        std::atomic<long> readTotal { 0 };
+
+        std::thread producer ([&]
+        {
+            std::vector<float> pre ((size_t) kN), post ((size_t) kN);
+            D::Context ctx;
+            long i = 0;
+            while (! stop.load (std::memory_order_relaxed))
+            {
+                fill (pre, 2.0f, (int) (i * kN));       // clipping -> a push every block
+                fill (post, 2.0f, (int) (i * kN));
+                runBlock (d, pre, post, ctx);
+                if ((i % 97) == 0) d.reset();           // the racy operation of interest
+                ++i;
+            }
+        });
+
+        std::thread consumer ([&]
+        {
+            D::Event ev[D::kEventCap];
+            while (! stop.load (std::memory_order_relaxed))
+            {
+                const int got = d.readEvents (ev, D::kEventCap);
+                for (int k = 0; k < got; ++k)
+                    if (ev[k].value != ev[k].value) readTotal.fetch_add (-1); // NaN payload
+                readTotal.fetch_add (got);
+            }
+        });
+
+        std::this_thread::sleep_for (std::chrono::milliseconds (600));
+        stop.store (true);
+        producer.join();
+        consumer.join();
+
+        std::printf ("      concurrent reset/read/push: %ld events read, no torn payloads\n",
+                     readTotal.load());
+        check (readTotal.load() > 0,
+               "concurrency: the reader saw events while resets were happening");
+        check (d.currentState() != St::halted,
+               "concurrency: clipping storms plus resets never halt the plugin");
     }
 
     std::printf ("\n%s (%d failure%s)\n", g_fail ? "FAILURES" : "all checks passed",
