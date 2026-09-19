@@ -2,7 +2,7 @@
 
 最終更新: v0.67.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
 
-## 2026-09-19 Adaptive Voice Dynamics Phase 0–2(ブランチ `claude/adaptive-voice-dynamics-20260919`、main未統合・未push)
+## 2026-09-19 v0.68.0 Adaptive Voice Dynamics Phase 0–2(GitHub main へ push 済み)
 
 基準 main `3514662`。エンジン診断ブランチは混ぜていない。**ユーザー聴感前。既定OFF。**
 
