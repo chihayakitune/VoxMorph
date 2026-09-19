@@ -4,6 +4,8 @@
 #include "VoiceAnalyzer.h"
 #include "SpatialEngine.h"
 #include "ProtectionGain.h"
+#include "VocalEffortEstimator.h"
+#include "AdaptiveVoiceDynamics.h"
 
 class VoxMorphProcessor : public juce::AudioProcessor
 {
@@ -197,6 +199,11 @@ public:
     // taking off in front of the conversion, in dB (<= 0, 0 = not acting).
     // Published for a future "AUTO -3.2 dB" indicator; no DSP reads it.
     std::atomic<float> uiProtectionGainDb { 0.0f };
+
+    // Adaptive Voice Dynamics readout (MAIN > ADVANCED). Effort 0..100 at the
+    // INPUT time (not delayed), warmup 0..1, and whether the estimator runs.
+    std::atomic<float> uiVecEffort { 0.0f }, uiVecWarm { 0.0f };
+    std::atomic<bool>  uiVecRunning { false };
 
     // ---- MUTE / MONITOR (v0.30.0, driven by the standalone options bar) ----
     // muted      = the user pressed MUTE; the output is silenced so nothing
@@ -407,6 +414,18 @@ private:
     ProtectionGain protection;
     std::vector<float> monoScratch, scratchL, scratchR;
 
+    // Adaptive Voice Dynamics (vecenabled / vecamount). The estimator reads
+    // the gated input before Protection; the control ring is read by both
+    // engines at their own n - D. See AdaptiveVoiceDynamics.h.
+    VocalEffortEstimator vecEst;
+    AvdControl           vecCtl;
+    int  vecSegCap     = 512;       // largest segment the ring is sized for
+    bool vecRunning    = false;     // estimator ran last block
+    bool vecLastStereo = false;
+    // host reset() -> audio thread, taken at the next block boundary
+    std::atomic<bool> vecResetReq { false };
+    void vecResetTimeline();        // audio thread only
+
     std::atomic<float>* pPitch     = nullptr;
     std::atomic<float>* pFormant   = nullptr;
     std::atomic<float>* pConsonant = nullptr;
@@ -495,6 +514,8 @@ private:
     std::atomic<float>* pEngProt   = nullptr;
     std::atomic<float>* pEngBreath = nullptr;
     std::atomic<float>* pEngEndBr  = nullptr;
+    std::atomic<float>* pVecOn     = nullptr;   // Adaptive Voice Dynamics
+    std::atomic<float>* pVecAmt    = nullptr;
     std::atomic<float>* pMix       = nullptr;
     std::atomic<float>* pGain      = nullptr;
 

@@ -2,6 +2,20 @@
 
 最終更新: v0.67.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
 
+## 2026-09-19 Adaptive Voice Dynamics Phase 0–2(ブランチ `claude/adaptive-voice-dynamics-20260919`、main未統合・未push)
+
+基準 main `3514662`。エンジン診断ブランチは混ぜていない。**ユーザー聴感前。既定OFF。**
+
+- **新規** `dsp/VocalEffortEstimator.h`(FFTなし。150–1000 / 2–6k / Body 180–700 / Presence 2.5–6k のIIR帯域エネルギー25ms平滑、ch別に計算して平均リンク、peakはmax。32サンプル固定cadenceで baseline・effort・band excess。有声らしさは軽量proxy=レベル・低域比・ZCR・crest)、`dsp/AdaptiveVoiceDynamics.h`(`AvdControl`=入力時刻で索引する補正量ring、`AvdFilter`=エンジン内のch別フィルター)
+- **信号位置**: 推定はgate後・Protection前を読むだけ(入力不変)。補正はエンジン内、wet再構成直後・Natural Air再加算前・Manual Tilt前。Air/dry/Restoreは不変
+- **同期**: 出力サンプルiは入力時刻 `vecBase + i − D`(Dはエンジンの実際のD、pendingD適用後)のcontrolを読む。`process()` の512分割でvecBaseも進める。L/Rは同じview・同じbaseを受ける。追加audio遅延0
+- **補正**: Tilt 1.5kHz high-shelf cut 最大2dB、Body 400Hz/Q0.7 最大−2.5dB、Presence 3.5kHz/Q0.7 最大−1.5dB。gain=Amount×effort×(正のband excess)。20ms平滑、係数は32サンプルごと(ストリーム時刻基準)
+- **OFF/Amount0**: 何もしない経路は旧コードと同じ呼出し・同じ順序(viewなし)。ON→OFFは30msで0へランプ、ringの最後の非0値をエンジンが読み終えたら旧経路へ戻る(遷移区間のみ旧音と不一致)
+- **パラメータ**: 末尾に `vecenabled`(既定OFF)/ `vecamount`(0–100、既定50)。**`APVTS::replaceState` はキーが無いと現在値を保持する**(JUCE 8.0.4ソースで確認)ので、`setStateInformation` で欠落キーに既定値を明示的に書き込む。presetは `voxMorphApplyPreset` が既定値から始めるので元々OFF。ロック中の `vecenabled` はロック方針どおり現在値を保持
+- **reset**: prepare=baselineも含め全リセット。host reset=atomic要求→次ブロック先頭でcontrol時刻・フィルター・推定器envelopeをリセット(baselineは保持)。Stereo Input切替も同じ。Low Latency切替=エンジン内でフィルターのみリセット(ringは入力時刻索引なので有効)
+- **UI**: MAIN > ADVANCED > ADAPTIVE VOICE DYNAMICS(Enable / Amount / 読み取り専用 Effort と学習進捗)。ENGINE VALIDATIONの上
+- **smoke**: `test/vec_smoke.cpp`(DSPのみ)と `test/vec_proc_smoke.cpp`(`-DVOXMORPH_VEC_SMOKE=ON`)。詳細は Exchange の `deliveries/2026-09-19_adaptive-voice-dynamics/REPORT.md`
+
 ## 2026-09-04 現行状態 (v0.67.0 / 実装コミット `0440a72`)
 
 v0.66.0 で入った3機能を、同じ素材でA/Bできるようにするための検証スイッチと、

@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <array>
 #include "VowelAdaptiveWarp.h"
+#include "AdaptiveVoiceDynamics.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846   // MSVC (Windows) では未定義のため
@@ -428,6 +429,7 @@ public:
     void prepare (double sampleRate)
     {
         fs        = sampleRate;
+        vecF.prepare (sampleRate);   // Adaptive Voice Dynamics: clean filter state
         maxLag    = (int) (fs / 60.0);   // lowest tracked f0 = 60 Hz (normal)
         maxLagLow = (int) (fs / 40.0);   // lowest tracked f0 = 40 Hz (Low Voice Mode)
         minLag    = (int) (fs / 500.0);  // highest tracked f0 = 500 Hz
@@ -779,19 +781,30 @@ public:
     }
 
     // Mono in → mono out, n samples. out may alias in.
-    void process (const float* in, float* out, int n)
+    //
+    // Adaptive Voice Dynamics (optional): `vec` is a view of the processor's
+    // control ring and `vecBase` the processor stream time of in[0]. The
+    // default (nullptr) is the unchanged engine -- not a single extra
+    // operation on the sample. The view is copied, never kept past the call.
+    void process (const float* in, float* out, int n,
+                  const AvdView* vec = nullptr, int64_t vecBase = 0)
     {
         // Internally chop large host buffers into <=512-sample chunks so the
         // engine behaves identically at ANY buffer size: pitch-detection
         // cadence, grain scheduling and dezippering all stay uniform.
         while (n > 512)
         {
-            processChunk (in, out, 512);
+            processChunk (in, out, 512, vec, vecBase);
             in += 512; out += 512; n -= 512;
+            vecBase += 512;            // the control time moves with the chunk
         }
         if (n > 0)
-            processChunk (in, out, n);
+            processChunk (in, out, n, vec, vecBase);
     }
+
+    // Adaptive Voice Dynamics: drop the wet-filter state (audio thread only;
+    // the processor calls it at a block boundary on reset / stereo change).
+    void vecReset() { vecF.reset(); }
 
     // Put `nextDetectPos` on the first grid point at or past the write head.
     // Only needed when the mode is switched on mid-stream: the grid is
@@ -863,13 +876,18 @@ public:
         return true;
     }
 
-    void processChunk (const float* in, float* out, int n)
+    void processChunk (const float* in, float* out, int n,
+                       const AvdView* vec = nullptr, int64_t vecBase = 0)
     {
         takeCadenceSwitch();
 
         if (pendingD != D)     // latency mode changed: soft reset
         {
             D = pendingD;
+            // The control ring is indexed by input time, so it stays valid
+            // under the new D; only the filter memory belongs to the old
+            // output stream.
+            vecF.reset();
             std::fill (accBuf.begin(),  accBuf.end(),  0.0f);
             std::fill (normBuf.begin(), normBuf.end(), 0.0f);
             std::fill (candBuf.begin(), candBuf.end(), 0.0f);
@@ -885,6 +903,7 @@ public:
             airPrevFast = 0.0f;
             airPhraseAge = airPhraseGap = airFallSamples = 0;
         }
+        if (vec == nullptr) vecF.idle();   // resume later from a clean state
         const int64_t start = writePos;
         for (int i = 0; i < n; ++i)
             inBuf[(size_t) ((start + i) & kMask)] = in[i];
@@ -1275,6 +1294,13 @@ public:
             const size_t  idx = (size_t) (oi & kMask);
             const float   nrm = normBuf[idx];
             float wet = nrm > 1.0e-3f ? accBuf[idx] / std::max (nrm, 0.25f) : 0.0f;
+
+            // Adaptive Voice Dynamics: on the reconstructed voice only, before
+            // Natural Air is added back and before the Manual Tilt. Output
+            // sample i came from input time (vecBase + i) - D, and that is
+            // the control it reads.
+            if (vec != nullptr)
+                wet = vecF.apply (wet, *vec, vecBase + i - (int64_t) D);
 
             const int64_t di = oi - D;
             if (airOut && di >= 0)                        // un-pitched breath
@@ -3060,6 +3086,9 @@ private:
     float mix = 1.0f, robotHz = 120.0f, floorHz = 0.0f;
     bool  robotize = false, lowVoice = false;
     float hiFreq = 0.0f, hiPAmt = 0.5f, hiFAmt = 1.0f;   // High Range guard
+
+    // Adaptive Voice Dynamics wet filter (per engine = per channel)
+    AvdFilter vecF;
 
     // Natural Air (harmonic/noise split) state
     float airAmt          = 0.0f;         // effective knob value, capped at 0.6

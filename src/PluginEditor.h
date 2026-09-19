@@ -6370,6 +6370,7 @@ public:
             // this poller to notice a page switch.
             proc.uiWantsMeters.store (levels.isShowing() || outLamps.isShowing(),
                                       std::memory_order_relaxed);
+            updateVecReadout();
         };
         histPoll.startTimerHz (3);
         syncLockUI();
@@ -6979,6 +6980,42 @@ private:
                  "バイノーラル/ASMR用ステレオマイク向け。左右の入力を2つの独立した変換エンジンで"
                  "並列処理し、立体感を保ったまま変換します。遅延は変わりません(CPUは約2倍)。"
                  "オフ=従来どおりモノラル(左右を合成)。"));
+        // ---- ADAPTIVE VOICE DYNAMICS (Phase 0-2) ---------------------
+        // Enable + Amount + a read-only Effort/warmup line. Nothing else is
+        // exposed until it has been judged by ear.
+        groupHeading (*cardAdvanced, "ADAPTIVE VOICE DYNAMICS");
+        toggle (*cardAdvanced, "vecenabled", "Adaptive Voice Dynamics",
+            tip ("Keeps the voice character steadier when you get louder. It learns your normal "
+                 "speaking voice first (speak normally for a few seconds after turning it on - "
+                 "if you start by shouting, the shout becomes 'normal'), then, when you push "
+                 "harder than that, gently softens the harsh top edge and trims the boomy / "
+                 "piercing bands that grow with effort. It does NOT level the volume: a shout "
+                 "stays a shout. It is an estimate relative to your own baseline, not a "
+                 "measurement of vocal effort. Off = exactly the previous sound.",
+                 "声を張ったときに声質が変わりすぎないように穏やかに補正します。オンにした後、"
+                 "まず数秒ふつうの声で話してください(最初に叫ぶとそれが「ふつう」として学習"
+                 "されます)。それより強く発声したとき、高域の硬さを少し和らげ、発声努力で"
+                 "膨らむ低中域/刺さる帯域を控えめに削ります。音量は揃えません(大声は大声の"
+                 "まま)。自分の基準からの相対的な推定であり、発声努力そのものの測定では"
+                 "ありません。オフ=従来と完全に同じ音。"));
+        slider (*cardAdvanced, "vecamount", "Adaptive Amount (%)",
+            tip ("How much of the correction is applied. At 100 % a full-effort shout gets about "
+                 "2 dB of high-frequency softening and at most 2.5 dB (body) / 1.5 dB (presence) "
+                 "of band trim, and only in bands that actually grew. 0 % = no processing.",
+                 "補正をどれだけ掛けるか。100%で最大の張り声に対し高域を約2dB和らげ、"
+                 "実際に膨らんだ帯域だけを最大2.5dB(低中域)/1.5dB(プレゼンス)削ります。"
+                 "0%=処理なし。"));
+        {
+            auto l = std::make_unique<juce::Label>();
+            l->setFont (ak::font (11.0f));
+            l->setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
+            l->setJustificationType (juce::Justification::centredLeft);
+            vecReadout = l.get();
+            card_add (*cardAdvanced, *l, 18);
+            owned.push_back (std::move (l));
+            updateVecReadout();
+        }
+
         // ---- ENGINE VALIDATION (v0.67.0) ----------------------------
         // The three features v0.66.0 added, each with a switch, so the same
         // take can be heard with and without it. They sit on MAIN rather than
@@ -7467,6 +7504,25 @@ private:
     }
 
     // ---- misc ------------------------------------------------------------
+    // Adaptive Voice Dynamics readout, from the 3 Hz poll. Effort is the
+    // estimator's value at the input (not the delayed one being applied).
+    void updateVecReadout()
+    {
+        if (vecReadout == nullptr) return;
+        juce::String t;
+        if (! proc.uiVecRunning.load (std::memory_order_relaxed))
+            t = "Effort --  (off)";
+        else
+        {
+            const float w = proc.uiVecWarm.load (std::memory_order_relaxed);
+            t = "Effort " + juce::String (juce::roundToInt (proc.uiVecEffort.load (std::memory_order_relaxed)));
+            t << (w < 1.0f ? "   learning normal voice " + juce::String (juce::roundToInt (w * 100.0f)) + " %"
+                           : "   baseline ready");
+        }
+        if (vecReadout->getText() != t)
+            vecReadout->setText (t, juce::dontSendNotification);
+    }
+
     void syncLockUI()
     {
         for (auto* r : rows) r->refreshLock();
@@ -7605,6 +7661,8 @@ private:
     // reference to the processor, not to the editor, but leaving a top-level
     // window alive after its opener is gone is how these leak.
     std::unique_ptr<EngineConfigWindow>   engineWin;
+    // Adaptive Voice Dynamics read-only readout (owned via `owned`)
+    juce::Label* vecReadout = nullptr;
 
     FnTimer histPoll;
     juce::String lastLockState;

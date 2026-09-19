@@ -335,6 +335,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
                 juce::ParameterID { "engbreath", 1 }, "Air Breathiness Enable", true));
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "engendbr", 1 }, "Ending Breath Enable", true));
+    // Adaptive Voice Dynamics / Vocal Effort Compensation (Phase 0-2).
+    // Appended at the END so no existing automation index moves. Default OFF:
+    // a session or preset without these keys is migrated to OFF explicitly
+    // (setStateInformation / voxMorphApplyPreset), never left at whatever the
+    // running instance had.
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+                juce::ParameterID { "vecenabled", 1 }, "Adaptive Voice Dynamics", false));
+    layout.add (std::make_unique<P> (juce::ParameterID { "vecamount", 1 }, "Adaptive Dynamics Amount (%)",
+                juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 50.0f));
     return layout;
 }
 
@@ -390,6 +399,8 @@ VoxMorphProcessor::VoxMorphProcessor()
     pEngProt   = apvts.getRawParameterValue ("engprot");
     pEngBreath = apvts.getRawParameterValue ("engbreath");
     pEngEndBr  = apvts.getRawParameterValue ("engendbr");
+    pVecOn     = apvts.getRawParameterValue ("vecenabled");
+    pVecAmt    = apvts.getRawParameterValue ("vecamount");
     // (deprecated "airband"/"air2"/"air2low" are intentionally not read)
     pGci     = apvts.getRawParameterValue ("gci");
     pHiOn    = apvts.getRawParameterValue ("hienable");
@@ -453,6 +464,20 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     // prepare() ends in reset(), so the gain history starts at unity.
     protection.prepare (sampleRate, samplesPerBlock);
     monoScratch.assign ((size_t) samplesPerBlock, 0.0f);
+
+    // Adaptive Voice Dynamics. The ring spans the longest engine lookahead
+    // at this rate plus one segment; blocks longer than a segment are cut
+    // into segments in processBlock instead of silently wrapping the ring.
+    // A (re)prepare forgets the baseline too: the rate may have changed.
+    {
+        const int maxD = std::max (2048, (int) (sampleRate * 0.0427)) + 2;
+        vecSegCap = std::max (512, ((samplesPerBlock + 511) / 512) * 512);
+        vecCtl.prepare (sampleRate, maxD, vecSegCap);
+        vecEst.prepare (sampleRate);
+        vecRunning = false;
+        vecResetReq.store (false);
+        uiVecEffort.store (0.0f);  uiVecWarm.store (0.0f);  uiVecRunning.store (false);
+    }
     scratchL.assign ((size_t) samplesPerBlock, 0.0f);
     scratchR.assign ((size_t) samplesPerBlock, 0.0f);
 
@@ -503,6 +528,23 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 void VoxMorphProcessor::reset()
 {
     protection.reset();
+    // Adaptive Voice Dynamics state is owned by the audio thread; ask for it
+    // to be reset at the next block boundary instead of touching it here.
+    vecResetReq.store (true);
+}
+
+// Audio thread. The control time line breaks (host reset, Stereo Input
+// switched): nothing written before now is read again, the correction and
+// both engines' filter memories start from neutral, and the estimator's
+// envelopes restart. The learned baseline is KEPT -- same speaker, same mic;
+// only the time line broke, and re-learning would silence the feature for
+// another ~2 s of speech.
+void VoxMorphProcessor::vecResetTimeline()
+{
+    vecEst.resetSignalState();
+    vecCtl.resetTimeline();
+    engine.vecReset();
+    engineR.vecReset();
 }
 
 void VoxMorphProcessor::releaseResources()
@@ -903,27 +945,97 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     //
     // The Mix 0 term is the pre-existing bypass and is kept as it was.
     protection.setBypassed (pEngProt->load() <= 0.5f || p.mix <= 1.0e-4f);
-    {
-        float* preCh[2] = { stereoMode ? sL : m, sR };
-        protection.processPre (preCh, stereoMode ? 2 : 1, n);
-    }
 
-    if (stereoMode)
+    // ---- Adaptive Voice Dynamics: control side ----------------------------
+    // Everything here is audio-thread state. A pending host reset and a
+    // Stereo Input switch both break the control time line.
+    if (vecResetReq.exchange (false, std::memory_order_acq_rel) || stereoMode != vecLastStereo)
     {
-        engine.process  (sL, sL, n);
-        engineR.process (sR, sR, n);
+        vecResetTimeline();
+        vecLastStereo = stereoMode;
+    }
+    const bool  vecTarget = pVecOn->load() > 0.5f && pVecAmt->load() > 1.0e-4f;
+    const float vecAmt    = pVecAmt->load() * 0.01f;
+    const bool  vecRun    = vecCtl.wantsRun (vecTarget);   // on, or ramping out
+    if (vecRun && ! vecRunning)
+        vecEst.resetSignalState();      // fresh envelopes; baseline kept
+    vecRunning = vecRun;
+    uiVecRunning.store (vecRun, std::memory_order_relaxed);
+
+    if (! vecRun && ! vecCtl.engineNeedsView (vecCtl.now()))
+    {
+        // OFF (or fully ramped out and the engines past the last non-zero
+        // control): exactly the pre-existing path -- same calls, same order,
+        // no view, so the engines do not touch a sample.
+        {
+            float* preCh[2] = { stereoMode ? sL : m, sR };
+            protection.processPre (preCh, stereoMode ? 2 : 1, n);
+        }
+
+        if (stereoMode)
+        {
+            engine.process  (sL, sL, n);
+            engineR.process (sR, sR, n);
+        }
+        else
+            engine.process (m, m, n);
+
+        // ---- Auto Gain Restore ------------------------------------------
+        // Straight after the conversion (Natural Air and the rest of the voice
+        // DSP run inside the engine) and before the mute, the Output Gain, the
+        // spatial stage and the Post FX. It reads the gain from D samples ago,
+        // because that is the input the samples in front of us came from.
+        {
+            float* postCh[2] = { stereoMode ? sL : m, sR };
+            protection.processPost (postCh, stereoMode ? 2 : 1, n, engine.latencySamples());
+        }
+        vecCtl.advance (n);
     }
     else
-        engine.process (m, m, n);
-
-    // ---- Auto Gain Restore ----------------------------------------------
-    // Straight after the conversion (Natural Air and the rest of the voice DSP
-    // run inside the engine) and before the mute, the Output Gain, the spatial
-    // stage and the Post FX. It reads the gain from D samples ago, because
-    // that is the input the samples in front of us came from.
     {
-        float* postCh[2] = { stereoMode ? sL : m, sR };
-        protection.processPost (postCh, stereoMode ? 2 : 1, n, engine.latencySamples());
+        // ON: estimator -> Protection -> engines -> Restore, per segment. A
+        // segment never exceeds the ring's sizing, so an oversized host block
+        // cannot overwrite control the engines have not read yet. Segments
+        // are multiples of 512, which is the engine's own internal chunk, and
+        // Protection is per-sample, so the split does not change either.
+        for (int off = 0; off < n; off += vecSegCap)
+        {
+            const int c = std::min (vecSegCap, n - off);
+            const int64_t base = vecCtl.now();
+            float* segCh[2] = { (stereoMode ? sL : m) + off, sR + off };
+            const int nc = stereoMode ? 2 : 1;
+
+            if (vecRun)
+            {
+                int64_t t = base;
+                vecEst.process (segCh, nc, c, [&] (const VocalEffortEstimator::Output& o)
+                {
+                    vecCtl.push (t++, vecTarget, vecAmt, o.effort, o.bodyEx, o.presEx);
+                });
+            }
+
+            protection.processPre (segCh, nc, c);
+
+            // Both engines get the same view and the same base, so L and R
+            // read identical control at identical input times.
+            const AvdView view = vecCtl.view();
+            const AvdView* vp  = vecCtl.engineNeedsView (base) ? &view : nullptr;
+            if (stereoMode)
+            {
+                engine.process  (segCh[0], segCh[0], c, vp, base);
+                engineR.process (segCh[1], segCh[1], c, vp, base);
+            }
+            else
+                engine.process (segCh[0], segCh[0], c, vp, base);
+
+            protection.processPost (segCh, nc, c, engine.latencySamples());
+            vecCtl.advance (c);
+        }
+    }
+    {
+        const auto& o = vecEst.current();
+        uiVecEffort.store (vecRun ? o.effort * 100.0f : 0.0f, std::memory_order_relaxed);
+        uiVecWarm  .store (o.warm, std::memory_order_relaxed);
     }
     uiProtectionGainDb.store (protection.currentGainReductionDb(),
                               std::memory_order_relaxed);
@@ -1222,6 +1334,19 @@ void VoxMorphProcessor::setStateInformation (const void* data, int size)
         // will not resolve, and HeroCircle falls back to the built-in art.
         if (xml->hasAttribute ("characterImage"))
             characterImagePath = xml->getStringAttribute ("characterImage");
+        // Adaptive Voice Dynamics: a state saved before it existed has no
+        // entry, and APVTS::replaceState would then KEEP the running value
+        // (it only creates the missing child from the current parameter). So
+        // write the defaults in explicitly: an old session always comes up
+        // OFF / 50 %, never with a switch left on by whatever ran before.
+        for (auto* id : { "vecenabled", "vecamount" })
+            if (xml->getChildByAttribute ("id", id) == nullptr)
+                if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (id)))
+                {
+                    auto* e = xml->createNewChildElement ("PARAM");
+                    e->setAttribute ("id", id);
+                    e->setAttribute ("value", rp->convertFrom0to1 (rp->getDefaultValue()));
+                }
         apvts.replaceState (juce::ValueTree::fromXml (*xml));
     }
 }
