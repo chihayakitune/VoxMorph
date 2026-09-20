@@ -135,7 +135,7 @@ v0.66.0 で入った3機能を、同じ素材でA/Bできるようにするた�
 - リポジトリ: `github.com/chihayakitune/VoxMorph`(Public)
 - 形態: AU / VST3 プラグイン + スタンドアロンアプリ(macOS/Windows)、JUCE 8 + CMake
 - ビルド: GitHub Actions が push 毎に自動ビルド。Artifacts の `VoxMorph-macOS-Installer`(pkg、ダブルクリックで上書きインストール可)と `VoxMorph-Windows`
-- ユーザー(袴さん)は非プログラマー。**開発ワークフロー(v0.6.0から): AIがgitコマンドで直接コミット&プッシュ**。`~/bin/gh` に GitHub CLI 導入済み・chihayakitune で認証済み(repo+workflowスコープ、キーチェーン保存)。手順: リポジトリを浅くクローン→変更ファイルをコピー→commit→push。**push完了で作業完了と報告してよい(CIビルドの完了監視は不要、トークン節約のためユーザー指示。ビルドエラー時はユーザーが報告してくれる)**。ブラウザ操作はしない約束(トークン浪費のため)。認証が切れていたら `gh auth login` のデバイスコード方式でユーザーに再認証を依頼
+- ユーザー(袴さん)は非プログラマー。**開発ワークフロー: Claude AIがgitコマンドで実装・commit・pushを担当し、GitHub Actionsの結果まで確認する**。通常の手順は、隔離worktree→実装→最小確認→ローカルcommit→Codexの差分レビュー→対象SHA・変更ファイル・remote/branch・公開範囲を示した直後のユーザー確認→push→当該SHAのGitHub ActionsでmacOS/Windows両方の完了確認。pushだけでは作業完了としない。CI失敗時は今回の変更が直接原因の最小修正をローカルcommitまで進め、新しいSHAの反映範囲を確定してから再pushする。`~/bin/gh` に GitHub CLI 導入済み・chihayakitune で認証済み(repo+workflowスコープ、キーチェーン保存)。ブラウザ操作はしない約束。認証が切れていたら `gh auth login` のデバイスコード方式でユーザーに再認証を依頼
 
 ## アーキテクチャ
 
