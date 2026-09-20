@@ -112,7 +112,17 @@ public:
     // Told once per block by the processor. With Protection bypassed (its
     // switch off, or Mix at 0) it cannot be reducing anything, so it is not a
     // reason to hold the baseline back.
-    void setProtectionBypassed (bool b) noexcept { protBypassed = b; }
+    //
+    // Switching bypass ON drops the verdict AND the hold: otherwise the 50 ms
+    // tail from the moment before would go on blocking goodFrame for a stage
+    // that is no longer running. The envelope and peak followers are KEPT --
+    // they are just a picture of the input, and keeping them means re-enabling
+    // Protection resumes from the real level instead of from zero.
+    void setProtectionBypassed (bool b) noexcept
+    {
+        if (b && ! protBypassed) { protActiveNow = false;  protHold = 0; }
+        protBypassed = b;
+    }
 
     // True while the mirrored detector says ProtectionGain is reducing. For
     // tests and diagnostics; nothing in the audio path reads it.
@@ -146,6 +156,7 @@ public:
         phase = 0;
         protEnv = protPk = 0.0f;
         protActiveNow = false;
+        protHold = 0;          // a full reset must not inherit the last hold
         out = {};
         // The baseline survives this call, so the warmup readout has to as
         // well: zeroing it would make the UI announce "learning your voice"
@@ -320,7 +331,7 @@ private:
         const bool clip = clipHold > 0;
         // The mirrored detector's verdict, held briefly so a frame that
         // straddles the moment Protection engages is not half-learned.
-        const bool protect = protActiveNow || protHold > 0;
+        const bool protect = ! protBypassed && (protActiveNow || protHold > 0);
 
         // ---- baseline ---------------------------------------------------
         const bool goodFrame = conf > 0.6f && ! clip && ! protect;

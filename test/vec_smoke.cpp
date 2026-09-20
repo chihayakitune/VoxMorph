@@ -236,6 +236,41 @@ int main()
                "Protection bypassed is not a reason to hold the baseline back");
     }
 
+    // ---- 4c. the Protection hold must not outlive a reset or a bypass ------
+    // Both are "the tail from a moment that no longer applies". A 50 ms hold
+    // left over from before a full reset, or from before Protection was
+    // switched off, would silently keep goodFrame shut.
+    {
+        auto loud = voice (fs, (int) (fs * 1.0), 1.0f, 120.0f);
+        float pk = 0.0f;
+        for (float x : loud) pk = std::max (pk, std::abs (x));
+        const float want = std::pow (10.0f, -1.0f / 20.0f);
+        for (auto& x : loud) x *= want / std::max (pk, 1.0e-9f);
+        const float* lc[1] = { loud.data() };
+        auto quiet = voice (fs, (int) (fs * 3.0), 0.25f, 120.0f);
+        const float* qc[1] = { quiet.data() };
+
+        // bypass while the hold is still running: quiet speech must learn
+        VocalEffortEstimator est;  est.prepare (fs);
+        est.process (lc, 1, (int) loud.size(), [] (const VocalEffortEstimator::Output&) {});
+        check (est.protectionActive(), "loud input leaves Protection active (precondition)");
+        est.setProtectionBypassed (true);
+        est.process (qc, 1, (int) quiet.size(), [] (const VocalEffortEstimator::Output&) {});
+        std::printf ("   bypass right after a loud passage: warm %.2f\n", est.current().warm);
+        check (est.current().warm >= 1.0f,
+               "bypass clears the Protection hold (no stale tail blocking goodFrame)");
+
+        // full reset while the hold is running: same requirement
+        VocalEffortEstimator est2;  est2.prepare (fs);
+        est2.process (lc, 1, (int) loud.size(), [] (const VocalEffortEstimator::Output&) {});
+        est2.resetAll();
+        check (! est2.protectionActive(), "resetAll clears the Protection verdict");
+        est2.setProtectionBypassed (true);
+        est2.process (qc, 1, (int) quiet.size(), [] (const VocalEffortEstimator::Output&) {});
+        check (est2.current().warm >= 1.0f,
+               "resetAll clears the Protection hold as well");
+    }
+
     // ---- 5. full reset sends it back to warming up -------------------------
     {
         VocalEffortEstimator est;  est.prepare (fs);

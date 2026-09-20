@@ -18,7 +18,12 @@
   **Protectionがbypass(engprot off または Mix=0)のときは学習を止めない**。
   ProtectionGain本体の音声処理は未変更、確保もロックも追加なし。
   実測: **-7.5 dBFS peak で warm=1.00**、**実際に -1.63 dB 削られる入力では warm=0.02(学習しない)**、
-  同じ入力でもbypass時は warm=1.00
+  同じ入力でもbypass時は warm=1.00。
+  **50msのholdは full reset と bypass開始の両方でクリア**する(直前の判定が、もう走っていない
+  段の理由で学習を止め続けないため)。envelope/peak追従は再有効化時の整合のため保持。
+  `protect` 条件自体も `!protBypassed` でガード。
+  **bypass条件はブロック内で1回だけsnapshotし、ProtectionGainとestimatorへ同じ値を渡す**
+  (`pEngProt` を2回loadすると途中で切り替わって両者が食い違い得るため)
 - **有限だが極端な入力**(例 1e20)は二乗で +inf になり envelope を恒久的に汚染していた。
   `±16.0`(+24 dBFS)でクランプし、control step ごとに有限性を確認して壊れていれば
   signal state だけ落とす(baselineは残す)

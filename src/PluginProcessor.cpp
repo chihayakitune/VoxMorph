@@ -969,7 +969,13 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     // ring entries glide to 1.0 with the pre stage.
     //
     // The Mix 0 term is the pre-existing bypass and is kept as it was.
-    protection.setBypassed (pEngProt->load() <= 0.5f || p.mix <= 1.0e-4f);
+    // ONE snapshot for the whole block, shared with the estimator's Protection
+    // mirror below. Loading pEngProt twice could see the switch move in
+    // between and leave the two stages disagreeing about whether Protection is
+    // even running -- the estimator would then gate its baseline on a stage
+    // that was bypassed, or not gate it on one that was not.
+    const bool protBypass = pEngProt->load() <= 0.5f || p.mix <= 1.0e-4f;
+    protection.setBypassed (protBypass);
 
     // ---- Adaptive Voice Dynamics: control side ----------------------------
     // Everything here is audio-thread state. A pending host reset and a
@@ -1008,9 +1014,9 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     vecWasEnabled  = vecEnabled;
 
     // Protection cannot be reducing anything while it is bypassed, so it is
-    // not a reason for the estimator to hold the baseline back. Same two
-    // conditions Protection itself is given below.
-    vecEst.setProtectionBypassed (pEngProt->load() <= 0.5f || p.mix <= 1.0e-4f);
+    // not a reason for the estimator to hold the baseline back. The SAME
+    // snapshot Protection itself was given above, not a second load.
+    vecEst.setProtectionBypassed (protBypass);
 
     // The estimator runs while the feature is enabled at all, or while the
     // correction is still ramping out.
