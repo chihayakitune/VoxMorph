@@ -10,16 +10,26 @@
 - **baseline学習の閾値が実質機能していなかった**。`peak >= -8 dBFS` で学習を止めていたが、
   ProtectionGainはpeakではなく**短時間エンベロープが -7 dBFS** を超えたときに動く。
   通常の少し大きめの発話でwarmupが完了せず、機能が黙って何もしない状態だった。
-  ゲートを `ProtectionGain::kThresholdDb + 1dB` から導出し、**-7.5 dBFS のpeakでも学習が完了**
-  することをテストで固定。Protection側を再調整すればこちらも追従する
+  **peakによる近似ゲートは2度とも不正だった**(-8dBFS固定 → 閾値+1dB固定margin)。
+  peakとエンベロープの差は素材のcrest factorで音節ごとに変わるので、固定marginは
+  低crestでは厳しすぎ、高crestでは緩すぎる。**近似をやめ、推定器の中で
+  ProtectionGainの検出器そのものを再現**した(Protection前の同じstereo-linked max|x|、
+  同じ attack/release/threshold/緊急peak上限を公開定数から取得)。
+  **Protectionがbypass(engprot off または Mix=0)のときは学習を止めない**。
+  ProtectionGain本体の音声処理は未変更、確保もロックも追加なし。
+  実測: **-7.5 dBFS peak で warm=1.00**、**実際に -1.63 dB 削られる入力では warm=0.02(学習しない)**、
+  同じ入力でもbypass時は warm=1.00
 - **有限だが極端な入力**(例 1e20)は二乗で +inf になり envelope を恒久的に汚染していた。
   `±16.0`(+24 dBFS)でクランプし、control step ごとに有限性を確認して壊れていれば
   signal state だけ落とす(baselineは残す)
 - **reset方針を明確化**。**完全reset(baseline含む・再学習へ)** = `prepareToPlay` / host `reset()` /
   session restore / Stereo Input topology切替 / **Enable OFF→ON**。
-  **時間軸のみreset(baseline保持)** = **Low Latency切替**(話者は同じでDだけ動くため)。
   Enable時に再学習させるのは、UIの「Enable後に通常声を数秒話してください」と一致させるため。
   v0.68.0 の `1bff18c` は session restore で baseline を保持していたが、**今回意図的に反転**
+- **Low Latency切替ではprocessor側で何もresetしない**。当初 `engine.latencySamples()` の比較で
+  時間軸resetしていたが、**pendingDは `PsolaEngine::processChunk` 内で反映されるため比較は1block遅れ**、
+  不要な時系列破壊になっていた。ringは入力時刻索引でD変更後も有効、
+  `PsolaEngine` 自身がD採用の瞬間に `vecF.reset()` する。baselineは引き続き保持
 - `resetSignalState()` が `out.warm` まで0にしていたため、Low Latency切替だけでUIが
   「未学習」に戻って見えた。baselineが残る経路では warm 表示も残すよう修正
 - **Amount 0 で分析が止まっていた**。Enable(分析)と補正の有効化を分離し、
@@ -30,14 +40,21 @@
   `kSnapDb = 1e-3 dB` で厳密0へsnap → **通常声復帰から約199msでviewが外れる**ことを測定
 - **テスト**: `vec_proc_smoke` の stereo / host reset / Low Latency は
   `s == n0+n1+256*k` の等値比較で、`n0+n1 = 144000` が256の倍数でないため**3つとも一度も発火していなかった**。
-  一度だけ確実に発火する条件へ直し、**発火したこと自体をassert**。preset fixtureは書込み可能な
-  テストパスを使い、XML書込み・parse・apply成功をassert。Amount 0学習・reset後再学習も追加。
-  `vec_smoke` に -7.5dBFS warmup / full reset / 1e20復帰 / view脱落を追加
+  一度だけ確実に発火する条件へ直し、**発火したこと自体をassert**。
+  **preset fixtureは `juce::File::tempDirectory` をやめ、実行ファイルと同じbuildツリー配下**
+  (`vec_smoke_tmp`)に作る — レビュー環境ではtempが書込み不可で、7件が
+  「書かれていないpreset」に対してPASSしていた。CTestの `WORKING_DIRECTORY` もbuild dirに設定。
+  createDirectory/write/parse/apply/lock は全て成功assertを維持。
+  **Amount 0 対 OFF の一致を 256 に加えて 768(1セグメント超)でも確認**。reset後再学習も追加。
+  `vec_smoke` に -7.5dBFS warmup / **Protection実動作時に学習しないこと** / bypass時は学習すること /
+  full reset / **1e20+NaN+Inf 混在からの復帰** / view脱落を追加
 - **CMake/CI**: `VOXMORPH_VEC_SMOKE=ON` のときだけ **DSP smoke と processor smoke の2本**を
   target + CTest に登録。macOS/Windows workflow で通常plugin buildの**後に**この2本だけをbuild/run。
   UI harness・実声解析・全テスト群は追加していない
-- **確認**: `ctest` 2/2 PASS、Release Standalone build 成功(error 0)、
-  OFF と Enable ON/Amount 0 の sample-identical をprocessor経路で維持
+- **確認(すべて追補コミット後の実測)**: `ctest` **2/2 Passed**、DSP smoke **ALL PASS**、
+  processor smoke **ALL PASS**(worktree直下から直接実行したものも含む)、
+  Release Standalone build 成功(error 0)、
+  OFF と Enable ON/Amount 0 の sample-identical を **256 と 768 の両方**でmemcmp確認
 - **未実施**: 実声試聴、AU/VST3ビルド、Windows実機確認、長時間・網羅テスト
 
 ## 2026-09-19 v0.68.0 Adaptive Voice Dynamics Phase 0–2(GitHub main へ push 済み)

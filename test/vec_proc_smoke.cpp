@@ -53,9 +53,10 @@ static std::vector<float> voice (double fs, int n, unsigned seed)
 
 // Render `in` (mono, duplicated to stereo) through the processor, blocks of 256.
 static std::vector<float> render (VoxMorphProcessor& p, const std::vector<float>& in,
-                                  const std::function<void (int)>& atBlock = {})
+                                  const std::function<void (int)>& atBlock = {},
+                                  int blkSize = 256)
 {
-    const int blk = 256, n = (int) in.size();
+    const int blk = blkSize, n = (int) in.size();
     std::vector<float> out ((size_t) n * 2);
     juce::AudioBuffer<float> buf (2, blk);
     juce::MidiBuffer midi;
@@ -122,12 +123,16 @@ int main()
         auto xml = voxMorphPresetXml (p);
         for (auto* id : { "vecenabled", "vecamount" })
             if (auto* e = xml->getChildByAttribute ("id", id)) xml->removeChildElement (e, true);
-        // A writable path we choose, and every step asserted: a fixture that
-        // silently failed to write would make the two checks below pass
-        // against a preset that was never applied at all.
-        auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
-                       .getChildFile ("VoxMorphVecSmoke");
-        dir.createDirectory();
+        // A path under the BUILD TREE, not the system temp directory: on at
+        // least one reviewer's machine juce::File::tempDirectory is not
+        // writable, and every check in this section then passed against a
+        // preset that had never been written. The executable lives inside the
+        // build directory, so its own folder is somewhere CMake just created
+        // and CTest can reach (add_test also sets WORKING_DIRECTORY there).
+        auto dir = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
+                       .getParentDirectory().getChildFile ("vec_smoke_tmp");
+        check (dir.createDirectory().wasOk() && dir.isDirectory(),
+               "preset fixture: test directory created under the build tree");
         auto f = dir.getChildFile ("old_preset.vmpreset");
         f.deleteFile();
         check (xml->writeTo (f) && f.existsAsFile() && f.getSize() > 0,
@@ -155,6 +160,7 @@ int main()
                "locked vecenabled keeps its current value (lock policy)");
         p.setParamLocked ("vecenabled", false);
         f.deleteFile();
+        dir.deleteRecursively();
     }
 
     // ---- 4. ON: finite across stereo / reset / low latency -----------------
@@ -241,13 +247,30 @@ int main()
         const auto yb = render (zero, v);
         check (ya.size() == yb.size()
                && std::memcmp (ya.data(), yb.data(), ya.size() * sizeof (float)) == 0,
-               "Enable ON / Amount 0 is sample-identical to OFF");
-        std::printf ("   Amount 0: warm %.2f, running %d\n",
+               "Enable ON / Amount 0 is sample-identical to OFF (256)");
+        std::printf ("   Amount 0 @256: warm %.2f, running %d\n",
                      zero.uiVecWarm.load(), (int) zero.uiVecRunning.load());
         check (zero.uiVecWarm.load() >= 1.0f,
-               "Enable ON / Amount 0 still completes baseline warmup");
+               "Enable ON / Amount 0 still completes baseline warmup (256)");
         check (off.uiVecWarm.load() <= 0.0f,
                "OFF does not analyse at all");
+
+        // And at a block LARGER than the 512 the control ring segments on, so
+        // the segmented path is exercised with a remainder rather than a whole
+        // number of segments.
+        VoxMorphProcessor off2, zero2;
+        for (auto* p : { &off2, &zero2 }) setP (*p, "pitch", 5.0f);
+        setP (zero2, "vecenabled", 1.0f);  setP (zero2, "vecamount", 0.0f);
+        setP (off2,  "vecenabled", 0.0f);
+        for (auto* p : { &off2, &zero2 }) p->prepareToPlay (fs, 768);
+        const auto yc = render (off2,  v, {}, 768);
+        const auto yd = render (zero2, v, {}, 768);
+        check (yc.size() == yd.size()
+               && std::memcmp (yc.data(), yd.data(), yc.size() * sizeof (float)) == 0,
+               "Enable ON / Amount 0 is sample-identical to OFF (768 > one segment)");
+        std::printf ("   Amount 0 @768: warm %.2f\n", zero2.uiVecWarm.load());
+        check (zero2.uiVecWarm.load() >= 1.0f,
+               "Enable ON / Amount 0 still warms up at 768-sample blocks");
     }
 
     // ---- 7. a full reset returns the estimator to warming up ----------------

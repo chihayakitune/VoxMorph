@@ -429,7 +429,6 @@ private:
     std::atomic<bool> vecFullResetReq { false };
     void vecResetTimeline();        // audio thread only: time line + filters
     void vecFullReset();            // audio thread only: the above + baseline
-    int  vecLastLatency = -1;       // engine lookahead seen last block
 
     std::atomic<float>* pPitch     = nullptr;
     std::atomic<float>* pFormant   = nullptr;

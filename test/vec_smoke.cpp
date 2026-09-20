@@ -16,8 +16,10 @@
 #include "PsolaEngine.h"
 #include "VocalEffortEstimator.h"
 #include "AdaptiveVoiceDynamics.h"
+#include "ProtectionGain.h"
 
 #include <cstdio>
+#include <limits>
 #include <cstring>
 #include <vector>
 
@@ -186,6 +188,54 @@ int main()
                "baseline warms up on speech peaking at -7.5 dBFS (Protection's doorstep)");
     }
 
+    // ---- 4b. Protection actually reducing -> the baseline must NOT learn ---
+    // The other half of the gate, and the half the peak approximations kept
+    // getting wrong. Driven loud enough that ProtectionGain -- the real one,
+    // run here on the same samples -- reports a reduction, the estimator has
+    // to refuse to warm up.
+    {
+        VocalEffortEstimator est;  est.prepare (fs);
+        ProtectionGain pg;         pg.prepare (fs, 512);
+
+        auto v = voice (fs, (int) (fs * 6.0), 1.0f, 120.0f);
+        float pk = 0.0f;
+        for (float x : v) pk = std::max (pk, std::abs (x));
+        const float want = std::pow (10.0f, -1.0f / 20.0f);      // -1 dBFS: well inside
+        for (auto& x : v) x *= want / std::max (pk, 1.0e-9f);
+
+        // what ProtectionGain itself does with this material
+        auto copy = v;
+        float worstGr = 0.0f;
+        for (int off = 0; off < (int) copy.size(); off += 512)
+        {
+            const int c = std::min (512, (int) copy.size() - off);
+            float* ch[1] = { copy.data() + off };
+            pg.processPre (ch, 1, c);
+            worstGr = std::min (worstGr, pg.currentGainReductionDb());
+        }
+
+        const float* ch[1] = { v.data() };
+        bool sawActive = false;
+        est.process (ch, 1, (int) v.size(), [&] (const VocalEffortEstimator::Output&)
+        {
+            sawActive = sawActive || est.protectionActive();
+        });
+        std::printf ("   loud input: ProtectionGain reduction %.2f dB, estimator warm %.2f\n",
+                     worstGr, est.current().warm);
+        check (worstGr < -0.5f, "the reference ProtectionGain really is reducing on this input");
+        check (sawActive, "the estimator's mirrored detector agrees Protection is active");
+        check (est.current().warm < 1.0f,
+               "baseline does NOT warm up while Protection is actually reducing");
+
+        // ...and with Protection bypassed the same input is allowed to learn
+        VocalEffortEstimator est2;  est2.prepare (fs);
+        est2.setProtectionBypassed (true);
+        est2.process (ch, 1, (int) v.size(), [] (const VocalEffortEstimator::Output&) {});
+        std::printf ("   same input, Protection bypassed: warm %.2f\n", est2.current().warm);
+        check (est2.current().warm >= 1.0f,
+               "Protection bypassed is not a reason to hold the baseline back");
+    }
+
     // ---- 5. full reset sends it back to warming up -------------------------
     {
         VocalEffortEstimator est;  est.prepare (fs);
@@ -215,7 +265,14 @@ int main()
         const float* wc[1] = { warm.data() };
         est.process (wc, 1, (int) warm.size(), [] (const VocalEffortEstimator::Output&) {});
 
+        // Extreme finite, NaN and Inf together: all three have to leave the
+        // estimator able to read normal speech again afterwards.
         std::vector<float> bad ((size_t) (int) (fs * 0.2), 1.0e20f);
+        for (size_t i = 0; i < bad.size(); i += 7)
+            bad[i] = std::numeric_limits<float>::quiet_NaN();
+        for (size_t i = 3; i < bad.size(); i += 11)
+            bad[i] = (i % 2) ? std::numeric_limits<float>::infinity()
+                             : -std::numeric_limits<float>::infinity();
         const float* bc[1] = { bad.data() };
         est.process (bc, 1, (int) bad.size(), [] (const VocalEffortEstimator::Output&) {});
 
@@ -229,7 +286,7 @@ int main()
         });
         const auto& o = est.current();
         std::printf ("   after 1e20 burst: effort %.3f warm %.2f\n", o.effort, o.warm);
-        check (finite, "estimator output stays finite through a 1e20 burst");
+        check (finite, "estimator output stays finite through a 1e20 / NaN / Inf burst");
         check (std::isfinite (o.effort) && std::isfinite (o.warm),
                "and recovers to finite values on normal input afterwards");
     }

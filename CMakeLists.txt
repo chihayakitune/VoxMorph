@@ -80,7 +80,8 @@ if (VOXMORPH_VEC_SMOKE)
     if (MSVC)
         target_compile_options(VoxMorphVecDspSmoke PRIVATE /utf-8)
     endif()
-    add_test(NAME vec_dsp_smoke COMMAND VoxMorphVecDspSmoke)
+    add_test(NAME vec_dsp_smoke COMMAND VoxMorphVecDspSmoke
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     juce_add_console_app(VoxMorphVecSmoke PRODUCT_NAME "VoxMorphVecSmoke")
     target_sources(VoxMorphVecSmoke PRIVATE test/vec_proc_smoke.cpp src/PluginProcessor.cpp)
@@ -93,8 +94,12 @@ if (VOXMORPH_VEC_SMOKE)
     target_link_libraries(VoxMorphVecSmoke
         PRIVATE juce::juce_audio_utils AnokoeAssets
         PUBLIC  juce::juce_recommended_config_flags)
+    # WORKING_DIRECTORY inside the build tree: the fixture writes its preset
+    # there rather than into the system temp directory, which is not writable
+    # on every reviewer's machine.
     add_test(NAME vec_proc_smoke
-             COMMAND VoxMorphVecSmoke)
+             COMMAND VoxMorphVecSmoke
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 endif()
 
 # ---- UI verification harness (developer tool, OFF by default) ------------

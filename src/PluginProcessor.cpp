@@ -540,9 +540,10 @@ void VoxMorphProcessor::reset()
 // only the time line broke, and re-learning would silence the feature for
 // another ~2 s of speech.
 // Break the control time line and drop every filter memory, but KEEP the
-// learned baseline. Used where the speaker and the microphone are unchanged
-// and only the timing broke -- today that is the Low Latency switch, which
-// moves the engine lookahead the ring is indexed against.
+// learned baseline: the speaker and the microphone are unchanged and only the
+// timing broke. Today this is only reached through vecFullReset() -- a Low
+// Latency switch does NOT need it, because the ring is indexed by input time
+// and PsolaEngine resets its own filter when it adopts the new D.
 void VoxMorphProcessor::vecResetTimeline()
 {
     vecEst.resetSignalState();
@@ -988,9 +989,14 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     // ---- reset policy (see vecFullReset) ---------------------------------
     // Full reset: host reset / session restore (the request flag), a Stereo
     // Input topology change, and Enable OFF->ON.
-    // Time line only: a Low Latency switch -- it moves the engine lookahead
-    // the ring is indexed against, but the speaker has not changed.
-    const int vecLatency = engine.latencySamples();
+    //
+    // A Low Latency switch is deliberately NOT here. The control ring is
+    // indexed by INPUT time, so it stays valid whatever the lookahead becomes,
+    // and PsolaEngine resets its own vec filter at the instant it adopts the
+    // new D -- inside processChunk, which is where pendingD is applied. This
+    // used to compare engine.latencySamples() here and reset on the next
+    // block, which was both redundant and a block late: it broke a control
+    // time line that had not needed breaking.
     const bool vecEnableEdge = vecEnabled && ! vecWasEnabled;
     if (vecFullResetReq.exchange (false, std::memory_order_acq_rel)
         || stereoMode != vecLastStereo
@@ -998,13 +1004,13 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     {
         vecFullReset();
     }
-    else if (vecLastLatency >= 0 && vecLatency != vecLastLatency)
-    {
-        vecResetTimeline();
-    }
     vecLastStereo  = stereoMode;
-    vecLastLatency = vecLatency;
     vecWasEnabled  = vecEnabled;
+
+    // Protection cannot be reducing anything while it is bypassed, so it is
+    // not a reason for the estimator to hold the baseline back. Same two
+    // conditions Protection itself is given below.
+    vecEst.setProtectionBypassed (pEngProt->load() <= 0.5f || p.mix <= 1.0e-4f);
 
     // The estimator runs while the feature is enabled at all, or while the
     // correction is still ramping out.
