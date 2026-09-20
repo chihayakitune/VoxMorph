@@ -122,19 +122,38 @@ int main()
         auto xml = voxMorphPresetXml (p);
         for (auto* id : { "vecenabled", "vecamount" })
             if (auto* e = xml->getChildByAttribute ("id", id)) xml->removeChildElement (e, true);
-        auto f = juce::File::createTempFile (".vmpreset");
-        xml->writeTo (f);
-        int applied = 0, locked = 0;
+        // A writable path we choose, and every step asserted: a fixture that
+        // silently failed to write would make the two checks below pass
+        // against a preset that was never applied at all.
+        auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                       .getChildFile ("VoxMorphVecSmoke");
+        dir.createDirectory();
+        auto f = dir.getChildFile ("old_preset.vmpreset");
+        f.deleteFile();
+        check (xml->writeTo (f) && f.existsAsFile() && f.getSize() > 0,
+               "preset fixture: XML written to a writable test path");
+        auto reparsed = juce::XmlDocument::parse (f);
+        check (reparsed != nullptr && reparsed->getChildByAttribute ("id", "pitch") != nullptr,
+               "preset fixture: the file parses back as a preset");
+        check (reparsed != nullptr && reparsed->getChildByAttribute ("id", "vecenabled") == nullptr,
+               "preset fixture: it really has no vec keys");
 
+        int applied = 0, locked = 0;
         setP (p, "vecenabled", 1.0f);
-        voxMorphApplyPreset (p, f, applied, locked);
+        check (voxMorphApplyPreset (p, f, applied, locked) && applied > 0,
+               "preset fixture: apply succeeded and changed parameters");
         check (getP (p, "vecenabled") < 0.5f, "preset without vec keys loads OFF");
+        check (std::abs (getP (p, "vecamount") - 50.0f) < 1.0e-3f,
+               "preset without vec keys loads Amount 50 %");
 
         setP (p, "vecenabled", 1.0f);
         p.setParamLocked ("vecenabled", true);
-        voxMorphApplyPreset (p, f, applied, locked);
+        applied = 0; locked = 0;
+        check (voxMorphApplyPreset (p, f, applied, locked),
+               "preset fixture: second apply succeeded");
         check (getP (p, "vecenabled") > 0.5f && locked >= 1,
                "locked vecenabled keeps its current value (lock policy)");
+        p.setParamLocked ("vecenabled", false);
         f.deleteFile();
     }
 
@@ -149,18 +168,30 @@ int main()
         for (int i = 0; i < (int) v.size(); ++i)
             v[(size_t) i] *= i < n0 ? 0.0f : (i < n0 + n1 ? 1.0f : 6.0f);
         float maxEff = 0.0f;
+        bool didStereo = false, didReset = false, didLowLat = false;
         auto y = render (p, v, [&] (int b)
         {
             const int s = b * 256;
-            if (s == n0 + n1 + 256 * 40)  setP (p, "stereo", 1.0f);
-            if (s == n0 + n1 + 256 * 80)  p.reset();
-            if (s == n0 + n1 + 256 * 120) setP (p, "lowlat", 1.0f);
+            // Fire once, on the first block at or past each point. The old
+            // form compared s (always a multiple of 256) for EQUALITY with
+            // n0 + n1 + k*256, and n0 + n1 = 144000 is not a multiple of 256 --
+            // so none of these three ever happened and the check below was
+            // asserting nothing about stereo, reset or Low Latency at all.
+            if (! didStereo && s >= n0 + n1 + 256 * 40)
+                { setP (p, "stereo", 1.0f);  didStereo = true; }
+            if (! didReset && s >= n0 + n1 + 256 * 80)
+                { p.reset();                 didReset  = true; }
+            if (! didLowLat && s >= n0 + n1 + 256 * 120)
+                { setP (p, "lowlat", 1.0f);  didLowLat = true; }
             maxEff = std::max (maxEff, p.uiVecEffort.load());
         });
         bool finite = true;
         for (float s : y) finite = finite && std::isfinite (s);
         std::printf ("   max effort readout %.1f, warm %.2f\n", maxEff, p.uiVecWarm.load());
         check (finite, "ON: silence -> normal -> loud + stereo / reset / low latency: finite");
+        check (didStereo, "the Stereo Input switch actually fired");
+        check (didReset,  "the host reset actually fired");
+        check (didLowLat, "the Low Latency switch actually fired");
         check (maxEff > 10.0f, "effort readout rises on the loud part");
     }
 
@@ -190,6 +221,59 @@ int main()
         auto ya = render (a, probe), yb = render (b, probe);
         check (std::memcmp (ya.data(), yb.data(), ya.size() * sizeof (float)) != 0,
                "session restore resets the VEC control/filter state (differs from a running instance)");
+    }
+
+    // ---- 6. Amount 0 : analysis runs, audio is untouched --------------------
+    // The point of separating Enable from Amount. Enable ON / Amount 0 has to
+    // be sample-identical to OFF while still learning the baseline, so the UI
+    // can show warmup progress before the user has chosen an amount.
+    {
+        const int n = (int) (fs * 4.0);
+        auto v = voice (fs, n, 9);
+
+        VoxMorphProcessor off, zero;
+        for (auto* p : { &off, &zero }) setP (*p, "pitch", 5.0f);
+        setP (zero, "vecenabled", 1.0f);  setP (zero, "vecamount", 0.0f);
+        setP (off,  "vecenabled", 0.0f);
+        for (auto* p : { &off, &zero }) p->prepareToPlay (fs, 256);
+
+        const auto ya = render (off,  v);
+        const auto yb = render (zero, v);
+        check (ya.size() == yb.size()
+               && std::memcmp (ya.data(), yb.data(), ya.size() * sizeof (float)) == 0,
+               "Enable ON / Amount 0 is sample-identical to OFF");
+        std::printf ("   Amount 0: warm %.2f, running %d\n",
+                     zero.uiVecWarm.load(), (int) zero.uiVecRunning.load());
+        check (zero.uiVecWarm.load() >= 1.0f,
+               "Enable ON / Amount 0 still completes baseline warmup");
+        check (off.uiVecWarm.load() <= 0.0f,
+               "OFF does not analyse at all");
+    }
+
+    // ---- 7. a full reset returns the estimator to warming up ----------------
+    {
+        const int n = (int) (fs * 4.0);
+        auto v = voice (fs, n, 9);
+
+        VoxMorphProcessor p;
+        setP (p, "pitch", 5.0f);
+        setP (p, "vecenabled", 1.0f);  setP (p, "vecamount", 60.0f);
+        p.prepareToPlay (fs, 256);
+        render (p, v);
+        const float warmBefore = p.uiVecWarm.load();
+
+        // host reset -> serviced on the next block
+        p.reset();
+        auto one = std::vector<float> (v.begin(), v.begin() + 256 * 4);
+        render (p, one);
+        const float warmAfter = p.uiVecWarm.load();
+        std::printf ("   warm before reset %.2f, just after %.2f\n", warmBefore, warmAfter);
+        check (warmBefore >= 1.0f, "warmed up before the reset");
+        check (warmAfter < 1.0f, "host reset sends the baseline back to warming up");
+
+        // and it warms up again from fresh speech
+        render (p, v);
+        check (p.uiVecWarm.load() >= 1.0f, "it re-learns from the next normal speech");
     }
 
     std::printf (fails == 0 ? "ALL PASS\n" : "%d FAIL\n", fails);

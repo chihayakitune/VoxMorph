@@ -62,11 +62,26 @@ target_link_libraries(VoxMorph
             juce::juce_recommended_warning_flags
 )
 
-# ---- Adaptive Voice Dynamics processor smoke test (developer tool, OFF) ---
+# ---- Adaptive Voice Dynamics smoke tests (developer tool, OFF by default) -
+# Two of them, and only these two: the DSP-level one needs no JUCE, the
+# processor-level one runs the real processBlock. Registered with CTest so CI
+# can build and run them in one step after the normal plugin build.
 #   cmake -B build -DVOXMORPH_VEC_SMOKE=ON
-#   cmake --build build --target VoxMorphVecSmoke
-option(VOXMORPH_VEC_SMOKE "Build the Adaptive Voice Dynamics processor smoke test" OFF)
+#   cmake --build build --target VoxMorphVecSmoke VoxMorphVecDspSmoke
+#   ctest --test-dir build --output-on-failure
+option(VOXMORPH_VEC_SMOKE "Build the Adaptive Voice Dynamics smoke tests" OFF)
 if (VOXMORPH_VEC_SMOKE)
+    enable_testing()
+
+    # DSP only: no JUCE, no plugin. Plain executable so it builds in seconds.
+    add_executable(VoxMorphVecDspSmoke test/vec_smoke.cpp)
+    target_include_directories(VoxMorphVecDspSmoke PRIVATE dsp)
+    target_compile_features(VoxMorphVecDspSmoke PRIVATE cxx_std_17)
+    if (MSVC)
+        target_compile_options(VoxMorphVecDspSmoke PRIVATE /utf-8)
+    endif()
+    add_test(NAME vec_dsp_smoke COMMAND VoxMorphVecDspSmoke)
+
     juce_add_console_app(VoxMorphVecSmoke PRODUCT_NAME "VoxMorphVecSmoke")
     target_sources(VoxMorphVecSmoke PRIVATE test/vec_proc_smoke.cpp src/PluginProcessor.cpp)
     target_include_directories(VoxMorphVecSmoke PRIVATE dsp src)
@@ -78,6 +93,8 @@ if (VOXMORPH_VEC_SMOKE)
     target_link_libraries(VoxMorphVecSmoke
         PRIVATE juce::juce_audio_utils AnokoeAssets
         PUBLIC  juce::juce_recommended_config_flags)
+    add_test(NAME vec_proc_smoke
+             COMMAND VoxMorphVecSmoke)
 endif()
 
 # ---- UI verification harness (developer tool, OFF by default) ------------

@@ -67,6 +67,18 @@ public:
     static constexpr float kBodyMaxDb = 2.5f;    // applied as a cut
     static constexpr float kPresMaxDb = 1.5f;    // applied as a cut
 
+    // Below this the correction is snapped to EXACTLY zero.
+    //
+    // Without it the gains only approach zero asymptotically when the speaker
+    // returns to a normal voice: the one-pole never writes a true 0, so every
+    // sample stays "non-zero", lastNonZero keeps advancing, engineNeedsView()
+    // is true for ever and both engines keep running three biquads to apply
+    // 0.0001 dB. 0.001 dB is 0.012 % -- two orders of magnitude under anything
+    // audible -- and snapping there is what actually lets the feature go
+    // quiet: the ring tail then expires and the engines stop being handed a
+    // view at all.
+    static constexpr float kSnapDb = 1.0e-3f;
+
     // Allocates. `maxDelay` = the largest engine lookahead possible at this
     // rate; `segCap` = the most samples one processing segment may hold.
     void prepare (double sampleRate, int maxDelay, int segCap)
@@ -117,6 +129,15 @@ public:
         sPres += smK * (pT - sPres);
         if (! std::isfinite (sTilt) || ! std::isfinite (sBody) || ! std::isfinite (sPres))
             sTilt = sBody = sPres = 0.0f;
+
+        // Snap each smoother once it and its target are both inaudibly small,
+        // so "back to a normal voice" reaches a true zero instead of decaying
+        // towards one for ever. See kSnapDb.
+        auto snap = [] (float& v, float target)
+        {
+            if (std::abs (v) < kSnapDb && std::abs (target) < kSnapDb) v = 0.0f;
+        };
+        snap (sTilt, tT);  snap (sBody, bT);  snap (sPres, pT);
 
         float ti = sTilt * env, bo = sBody * env, pr = sPres * env;
         if (env <= 0.0f) { ti = bo = pr = 0.0f; sTilt = sBody = sPres = 0.0f; }   // exact neutral

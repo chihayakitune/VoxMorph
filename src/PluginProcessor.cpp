@@ -475,7 +475,7 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
         vecCtl.prepare (sampleRate, maxD, vecSegCap);
         vecEst.prepare (sampleRate);
         vecRunning = false;
-        vecResetReq.store (false);
+        vecFullResetReq.store (false);
         uiVecEffort.store (0.0f);  uiVecWarm.store (0.0f);  uiVecRunning.store (false);
     }
     scratchL.assign ((size_t) samplesPerBlock, 0.0f);
@@ -530,7 +530,7 @@ void VoxMorphProcessor::reset()
     protection.reset();
     // Adaptive Voice Dynamics state is owned by the audio thread; ask for it
     // to be reset at the next block boundary instead of touching it here.
-    vecResetReq.store (true);
+    vecFullResetReq.store (true);
 }
 
 // Audio thread. The control time line breaks (host reset, Stereo Input
@@ -539,12 +539,36 @@ void VoxMorphProcessor::reset()
 // envelopes restart. The learned baseline is KEPT -- same speaker, same mic;
 // only the time line broke, and re-learning would silence the feature for
 // another ~2 s of speech.
+// Break the control time line and drop every filter memory, but KEEP the
+// learned baseline. Used where the speaker and the microphone are unchanged
+// and only the timing broke -- today that is the Low Latency switch, which
+// moves the engine lookahead the ring is indexed against.
 void VoxMorphProcessor::vecResetTimeline()
 {
     vecEst.resetSignalState();
     vecCtl.resetTimeline();
     engine.vecReset();
     engineR.vecReset();
+}
+
+// The above PLUS the baseline, so the estimator goes back to warming up.
+//
+// Per the design's reset policy this is what prepareToPlay, a host reset(), a
+// session restore, a Stereo Input topology change and Enable OFF->ON all do.
+// The common thread is that none of them can promise the next voice is the
+// one the baseline was learned from: a new device or rate, a transport jump,
+// a restored session, a different channel topology, or a user who has just
+// switched the feature on and is being told by the UI to "speak normally for
+// a few seconds". Keeping a baseline across those would silently apply one
+// take's idea of "normal" to another -- and would make the UI's own
+// instruction a lie, since warmup would already read complete.
+//
+// (v0.68.0's session-restore fix kept the baseline here. This is the
+// deliberate reversal of that: the restore case belongs with the others.)
+void VoxMorphProcessor::vecFullReset()
+{
+    vecResetTimeline();
+    vecEst.resetAll();
 }
 
 void VoxMorphProcessor::releaseResources()
@@ -949,16 +973,42 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     // ---- Adaptive Voice Dynamics: control side ----------------------------
     // Everything here is audio-thread state. A pending host reset and a
     // Stereo Input switch both break the control time line.
-    if (vecResetReq.exchange (false, std::memory_order_acq_rel) || stereoMode != vecLastStereo)
+    // Both parameters are snapshotted ONCE for the whole block. Reading them
+    // again later could see a different value mid-block and desynchronise the
+    // control ring from the audio it describes.
+    const bool  vecEnabled = pVecOn->load() > 0.5f;
+    const float vecAmt     = std::clamp (pVecAmt->load() * 0.01f, 0.0f, 1.0f);
+
+    // ENABLE and CORRECTION are separate. Enable ON with Amount 0 keeps the
+    // Phase 0 analysis and the baseline warmup running while changing not a
+    // single sample -- which is what makes the UI able to say "speak normally
+    // for a few seconds" before the user has committed to any amount.
+    const bool vecCorrect = vecEnabled && vecAmt > 1.0e-4f;
+
+    // ---- reset policy (see vecFullReset) ---------------------------------
+    // Full reset: host reset / session restore (the request flag), a Stereo
+    // Input topology change, and Enable OFF->ON.
+    // Time line only: a Low Latency switch -- it moves the engine lookahead
+    // the ring is indexed against, but the speaker has not changed.
+    const int vecLatency = engine.latencySamples();
+    const bool vecEnableEdge = vecEnabled && ! vecWasEnabled;
+    if (vecFullResetReq.exchange (false, std::memory_order_acq_rel)
+        || stereoMode != vecLastStereo
+        || vecEnableEdge)
+    {
+        vecFullReset();
+    }
+    else if (vecLastLatency >= 0 && vecLatency != vecLastLatency)
     {
         vecResetTimeline();
-        vecLastStereo = stereoMode;
     }
-    const bool  vecTarget = pVecOn->load() > 0.5f && pVecAmt->load() > 1.0e-4f;
-    const float vecAmt    = pVecAmt->load() * 0.01f;
-    const bool  vecRun    = vecCtl.wantsRun (vecTarget);   // on, or ramping out
-    if (vecRun && ! vecRunning)
-        vecEst.resetSignalState();      // fresh envelopes; baseline kept
+    vecLastStereo  = stereoMode;
+    vecLastLatency = vecLatency;
+    vecWasEnabled  = vecEnabled;
+
+    // The estimator runs while the feature is enabled at all, or while the
+    // correction is still ramping out.
+    const bool vecRun = vecEnabled || vecCtl.wantsRun (vecCorrect);
     vecRunning = vecRun;
     uiVecRunning.store (vecRun, std::memory_order_relaxed);
 
@@ -1010,7 +1060,7 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                 int64_t t = base;
                 vecEst.process (segCh, nc, c, [&] (const VocalEffortEstimator::Output& o)
                 {
-                    vecCtl.push (t++, vecTarget, vecAmt, o.effort, o.bodyEx, o.presEx);
+                    vecCtl.push (t++, vecCorrect, vecAmt, o.effort, o.bodyEx, o.presEx);
                 });
             }
 
@@ -1351,11 +1401,12 @@ void VoxMorphProcessor::setStateInformation (const void* data, int size)
         // A restore is a new session in an instance that may have been running:
         // the Adaptive Voice Dynamics control ring, the correction smoothers and
         // both engines' filter memories still hold the previous voice. Ask the
-        // audio thread to break the time line at the next block boundary (the
-        // learned baseline is kept -- same speaker and microphone; see
-        // vecResetTimeline). This is the same request path as host reset(), so
-        // nothing here touches audio-thread state from the message thread.
-        vecResetReq.store (true);
+        // audio thread for a FULL reset at the next block boundary -- baseline
+        // included, because a restored session is not a promise that the voice
+        // on the other side of it is the one the baseline was learned from (see
+        // vecFullReset). Same request path as host reset(), so nothing here
+        // touches audio-thread state from the message thread.
+        vecFullResetReq.store (true);
     }
 }
 

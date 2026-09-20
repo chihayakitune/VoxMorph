@@ -164,6 +164,106 @@ int main()
                "after OFF the engine stops receiving a view within ramp + D");
     }
 
+    // ---- 4. baseline warmup completes near Protection's threshold ----------
+    // The old gate was a flat peak >= -8 dBFS, so ordinary loud-ish speech
+    // never finished warming up and the feature silently did nothing. -7.5
+    // dBFS peak is inside normal speech and must learn.
+    {
+        VocalEffortEstimator est;  est.prepare (fs);
+        auto v = voice (fs, (int) (fs * 4.0), 1.0f, 120.0f);
+        float pk = 0.0f;
+        for (float x : v) pk = std::max (pk, std::abs (x));
+        const float want = std::pow (10.0f, -7.5f / 20.0f);     // -7.5 dBFS
+        for (auto& x : v) x *= want / std::max (pk, 1.0e-9f);
+        float got = 0.0f;
+        for (float x : v) got = std::max (got, std::abs (x));
+
+        const float* ch[1] = { v.data() };
+        est.process (ch, 1, (int) v.size(), [] (const VocalEffortEstimator::Output&) {});
+        std::printf ("   peak %.2f dBFS -> warm %.2f\n",
+                     20.0f * std::log10 (got), est.current().warm);
+        check (est.current().warm >= 1.0f,
+               "baseline warms up on speech peaking at -7.5 dBFS (Protection's doorstep)");
+    }
+
+    // ---- 5. full reset sends it back to warming up -------------------------
+    {
+        VocalEffortEstimator est;  est.prepare (fs);
+        auto v = voice (fs, (int) (fs * 4.0), 0.25f, 120.0f);
+        const float* ch[1] = { v.data() };
+        est.process (ch, 1, (int) v.size(), [] (const VocalEffortEstimator::Output&) {});
+        const float warmBefore = est.current().warm;
+
+        est.resetAll();
+        check (warmBefore >= 1.0f && est.current().warm == 0.0f,
+               "resetAll drops the baseline and returns to warmup");
+
+        // resetSignalState must NOT: it is the Low Latency / time-line case
+        VocalEffortEstimator est2;  est2.prepare (fs);
+        est2.process (ch, 1, (int) v.size(), [] (const VocalEffortEstimator::Output&) {});
+        est2.resetSignalState();
+        check (est2.current().warm >= 1.0f,
+               "resetSignalState keeps the baseline (time line only)");
+    }
+
+    // ---- 6. a huge FINITE input must not kill the estimator -----------------
+    // 1e20 is finite, but squared it is +inf and would stick in the envelopes
+    // for good. After the burst, normal speech has to read finite again.
+    {
+        VocalEffortEstimator est;  est.prepare (fs);
+        auto warm = voice (fs, (int) (fs * 3.0), 0.25f, 120.0f);
+        const float* wc[1] = { warm.data() };
+        est.process (wc, 1, (int) warm.size(), [] (const VocalEffortEstimator::Output&) {});
+
+        std::vector<float> bad ((size_t) (int) (fs * 0.2), 1.0e20f);
+        const float* bc[1] = { bad.data() };
+        est.process (bc, 1, (int) bad.size(), [] (const VocalEffortEstimator::Output&) {});
+
+        auto back = voice (fs, (int) (fs * 2.0), 0.25f, 120.0f);
+        const float* rc[1] = { back.data() };
+        bool finite = true;
+        est.process (rc, 1, (int) back.size(), [&] (const VocalEffortEstimator::Output& o)
+        {
+            finite = finite && std::isfinite (o.effort) && std::isfinite (o.warm)
+                            && std::isfinite (o.bodyEx) && std::isfinite (o.presEx);
+        });
+        const auto& o = est.current();
+        std::printf ("   after 1e20 burst: effort %.3f warm %.2f\n", o.effort, o.warm);
+        check (finite, "estimator output stays finite through a 1e20 burst");
+        check (std::isfinite (o.effort) && std::isfinite (o.warm),
+               "and recovers to finite values on normal input afterwards");
+    }
+
+    // ---- 7. back to a normal voice -> the view is dropped ------------------
+    // Item 4: without the exact-zero snap the gains decay towards 0 but never
+    // reach it, so engineNeedsView() stays true for ever and both engines keep
+    // filtering an inaudible correction indefinitely.
+    {
+        AvdControl ctl;  ctl.prepare (fs, 2048, 512);
+        const int64_t d = 2048;
+        // drive a correction, then ask for none while staying ENABLED
+        for (int i = 0; i < (int) (fs * 1.0); ++i)
+            ctl.push (ctl.now() + i, true, 1.0f, 1.0f, 1.0f, 1.0f);
+        ctl.advance ((int) (fs * 1.0));
+        check (ctl.engineNeedsView (ctl.now()), "correction active: the engine gets a view");
+
+        int64_t droppedAt = -1;
+        for (int i = 0; i < (int) (fs * 3.0); ++i)
+        {
+            const int64_t t = ctl.now();
+            ctl.push (t, true, 1.0f, 0.0f, 0.0f, 0.0f);   // enabled, effort 0
+            ctl.advance (1);
+            if (droppedAt < 0 && ! ctl.engineNeedsView (ctl.now())) droppedAt = i;
+        }
+        std::printf ("   view dropped %.0f ms after the voice returned to normal\n",
+                     droppedAt < 0 ? -1.0 : 1000.0 * (double) droppedAt / fs);
+        check (droppedAt >= 0,
+               "enabled but effort back to 0: the view is dropped (gains snap to true zero)");
+        check (droppedAt < (int) (fs * 1.5),
+               "and it happens promptly, not after minutes of decay");
+        (void) d;
+    }
+
     std::printf (fails == 0 ? "ALL PASS\n" : "%d FAIL\n", fails);
     return fails == 0 ? 0 : 1;
 }

@@ -422,9 +422,14 @@ private:
     int  vecSegCap     = 512;       // largest segment the ring is sized for
     bool vecRunning    = false;     // estimator ran last block
     bool vecLastStereo = false;
+    bool vecWasEnabled = false;     // Enable edge detector (OFF->ON = full reset)
     // host reset() -> audio thread, taken at the next block boundary
-    std::atomic<bool> vecResetReq { false };
-    void vecResetTimeline();        // audio thread only
+    // Requested from the message thread, serviced on the audio thread at the
+    // next block boundary. A FULL reset drops the learned baseline too.
+    std::atomic<bool> vecFullResetReq { false };
+    void vecResetTimeline();        // audio thread only: time line + filters
+    void vecFullReset();            // audio thread only: the above + baseline
+    int  vecLastLatency = -1;       // engine lookahead seen last block
 
     std::atomic<float>* pPitch     = nullptr;
     std::atomic<float>* pFormant   = nullptr;

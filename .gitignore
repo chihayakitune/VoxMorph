@@ -2,3 +2,4 @@ out_*.wav
 build/
 *.f32
 build-ui/
+build-vec/

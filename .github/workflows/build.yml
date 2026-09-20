@@ -64,6 +64,16 @@ jobs:
                    --version "$VM_VERSION" \
                    "VoxMorph-Installer.pkg"
 
+      # Adaptive Voice Dynamics smoke tests. Built in a SEPARATE tree so the
+      # shipped plugin above is the one that was uploaded, not one rebuilt
+      # with a developer option on. Only these two -- no UI harness, no real
+      # voice analysis, no full test suite.
+      - name: VEC smoke tests
+        run: |
+          cmake -B build-vec -DCMAKE_BUILD_TYPE=Release -DVOXMORPH_VEC_SMOKE=ON
+          cmake --build build-vec --target VoxMorphVecDspSmoke VoxMorphVecSmoke --parallel 3
+          ctest --test-dir build-vec --output-on-failure
+
       - uses: actions/upload-artifact@v6
         with:
           name: VoxMorph-macOS-Installer
@@ -79,6 +89,12 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Release --parallel 3
+
+      - name: VEC smoke tests
+        run: |
+          cmake -B build-vec -DVOXMORPH_VEC_SMOKE=ON
+          cmake --build build-vec --config Release --target VoxMorphVecDspSmoke VoxMorphVecSmoke --parallel 3
+          ctest --test-dir build-vec -C Release --output-on-failure
 
       - uses: actions/upload-artifact@v6
         with:

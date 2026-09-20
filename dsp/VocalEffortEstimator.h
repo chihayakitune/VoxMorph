@@ -27,12 +27,22 @@
 // out-of-phase pair and read a loud voice as silence.
 //
 // TIMING
-// It reads the signal after the noise gate and BEFORE Auto Protection, so
-// the level it sees is never the protected one. Its own peak follower also
-// decides when the input is in Protection's territory (> -8 dBFS) or
-// clipping, from the SAME samples -- so "do not learn the baseline while
-// Protection is acting" needs no gain information from another stage and
-// cannot be misaligned in time.
+// It reads the signal after the noise gate and BEFORE Auto Protection, so the
+// level it sees is never the protected one. Its own peak follower also decides
+// when the input is in Protection's territory or clipping, from the SAME
+// samples -- so "do not learn the baseline while Protection is acting" needs
+// no gain information from another stage and cannot be misaligned in time.
+//
+// That gate used to be a flat peak >= -8 dBFS, which was wrong in both
+// directions and stopped baseline warmup on ordinary loud-ish speech.
+// ProtectionGain does not act on the peak at all: it acts when its short-time
+// ENVELOPE passes kThresholdDb (-7 dBFS), which for voiced material means a
+// peak comfortably above that. The gate is now derived from Protection's own
+// constant with a small margin, so a -7.5 dBFS peak -- well inside normal
+// speech -- can still complete warmup, and retuning Protection moves this with
+// it instead of leaving the two silently disagreeing.
+
+#include "ProtectionGain.h"
 
 #include <algorithm>
 #include <cmath>
@@ -83,10 +93,13 @@ public:
     // Everything, baseline included (prepare / sample-rate change).
     void resetAll()
     {
-        resetSignalState();
+        // Baseline first: resetSignalState() republishes `warm` from it, so
+        // clearing it afterwards would leave the readout claiming a warmup
+        // that no longer exists.
         bValid = false;  warmAcc = 0.0f;
         bLevel = bTilt = bCrest = bBody = bPres = 0.0f;
         learning = true;
+        resetSignalState();
     }
 
     // Envelopes, filters, effort and cadence -- the baseline is kept. Used on
@@ -104,6 +117,11 @@ public:
         clipHold = 0;
         phase = 0;
         out = {};
+        // The baseline survives this call, so the warmup readout has to as
+        // well: zeroing it would make the UI announce "learning your voice"
+        // after something as small as a Low Latency switch, and the user would
+        // be told to speak normally again for a baseline that is already there.
+        out.warm = bValid ? 1.0f : std::min (1.0f, warmNeed > 0.0f ? warmAcc / warmNeed : 0.0f);
     }
 
     // Feed n samples of 1 or 2 channels (read only). `perSample` is called
@@ -118,7 +136,13 @@ public:
             for (int c = 0; c < numCh; ++c)
             {
                 float x = ch[c][i];
-                if (! std::isfinite (x)) x = 0.0f;   // never let NaN into the envelopes
+                // NaN/Inf is not the only way to wreck this. A FINITE 1e20
+                // squares to +inf, and one such sample sticks in eFull for
+                // good -- every later frame then reads level = inf and the
+                // estimator never recovers. Clamp before anything squares or
+                // enters a filter.
+                if (! std::isfinite (x)) x = 0.0f;
+                x = std::clamp (x, -kMaxIn, kMaxIn);
                 const float x2 = x * x;
                 eFull[c] += envK * (x2 - eFull[c]);
                 const float yl = lo[c].run (x), yh = hi[c].run (x);
@@ -150,7 +174,22 @@ public:
 private:
     static constexpr float kEps     = 1.0e-10f;
     static constexpr float kClipLin = 0.99f;
-    static constexpr float kProtDb  = -8.0f;     // at/above: Auto Protection's range
+
+    // Peak at/above which Protection is taken to be acting, so the baseline
+    // stops learning. Derived from Protection's own envelope threshold plus a
+    // margin: the peak of voiced material sits above its envelope, so gating
+    // at the bare threshold would stop learning before Protection does
+    // anything. +1 dB keeps -7.5 dBFS speech learnable and still stops before
+    // a steady tone at this peak would push Protection's envelope over.
+    static constexpr float kProtPeakMarginDb = 1.0f;
+    static constexpr float kProtDb = ProtectionGain::kThresholdDb + kProtPeakMarginDb;
+
+    // Anything louder than this is not a voice; it is a broken host, a bad
+    // file or a feedback squeal. Squaring +24 dBFS already reaches 256, and a
+    // genuinely wild finite value (1e20) would square to +inf and poison every
+    // envelope permanently. Clamping costs one min/max per sample and keeps
+    // the whole estimator in a range its filters are stable over.
+    static constexpr float kMaxIn = 16.0f;       // +24 dBFS
 
     struct Biquad
     {
@@ -184,8 +223,30 @@ private:
     static float db (float e) { return 10.0f * std::log10 (e + kEps); }
     static float ramp (float x, float a, float b) { return std::clamp ((x - a) / (b - a), 0.0f, 1.0f); }
 
+    // Belt and braces: the clamp above should make this impossible, but a
+    // filter state that has gone non-finite would otherwise never come back,
+    // and "the estimator is silently dead" is the worst failure mode here.
+    // Checked once per control step, not per sample.
+    bool signalStateFinite() const
+    {
+        for (int c = 0; c < 2; ++c)
+            if (! std::isfinite (eFull[c]) || ! std::isfinite (eLo[c])
+             || ! std::isfinite (eHi[c])   || ! std::isfinite (eBody[c])
+             || ! std::isfinite (ePres[c]) || ! std::isfinite (peak[c]))
+                return false;
+        return true;
+    }
+
     void controlStep (int numCh)
     {
+        if (! signalStateFinite())
+        {
+            // Drop the poisoned envelopes and the filter memories. The
+            // baseline is a property of the speaker, not of this accident, so
+            // it survives -- the estimator resumes from the next good frame.
+            resetSignalState();
+            return;
+        }
         float Ef = 0, El = 0, Eh = 0, Eb = 0, Ep = 0, Pk = 0;
         int   zcs = 0;
         for (int c = 0; c < numCh; ++c)

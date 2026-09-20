@@ -1,6 +1,44 @@
 # VoxMorph 開発引き継ぎ書 (AIセッション用)
 
-最終更新: v0.67.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+最終更新: v0.68.0 + AVDレビュー修正時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+
+## 2026-09-20 AVD レビュー修正(未push。ブランチ `claude/adaptive-voice-dynamics-20260919`)
+
+`8a1ff5e` の上に、ChatGPTレビュー指摘の6点を最小差分で修正。**DSPの追加機能は無し**
+(Exciter、multiband comp、Dynamic F1-F3、AI分類、target-aware morphはいずれも未着手)。
+
+- **baseline学習の閾値が実質機能していなかった**。`peak >= -8 dBFS` で学習を止めていたが、
+  ProtectionGainはpeakではなく**短時間エンベロープが -7 dBFS** を超えたときに動く。
+  通常の少し大きめの発話でwarmupが完了せず、機能が黙って何もしない状態だった。
+  ゲートを `ProtectionGain::kThresholdDb + 1dB` から導出し、**-7.5 dBFS のpeakでも学習が完了**
+  することをテストで固定。Protection側を再調整すればこちらも追従する
+- **有限だが極端な入力**(例 1e20)は二乗で +inf になり envelope を恒久的に汚染していた。
+  `±16.0`(+24 dBFS)でクランプし、control step ごとに有限性を確認して壊れていれば
+  signal state だけ落とす(baselineは残す)
+- **reset方針を明確化**。**完全reset(baseline含む・再学習へ)** = `prepareToPlay` / host `reset()` /
+  session restore / Stereo Input topology切替 / **Enable OFF→ON**。
+  **時間軸のみreset(baseline保持)** = **Low Latency切替**(話者は同じでDだけ動くため)。
+  Enable時に再学習させるのは、UIの「Enable後に通常声を数秒話してください」と一致させるため。
+  v0.68.0 の `1bff18c` は session restore で baseline を保持していたが、**今回意図的に反転**
+- `resetSignalState()` が `out.warm` まで0にしていたため、Low Latency切替だけでUIが
+  「未学習」に戻って見えた。baselineが残る経路では warm 表示も残すよう修正
+- **Amount 0 で分析が止まっていた**。Enable(分析)と補正の有効化を分離し、
+  **Enable ON / Amount 0 は出力sample-identicalのまま baseline 学習を継続**する。
+  `pVecOn`/`pVecAmt` はブロック内で1回だけsnapshot
+- **`AvdControl` が厳密0に落ちなかった**。通常声に戻っても一極平滑が0へ漸近するだけで、
+  `engineNeedsView` が永久に true、エンジンは可聴閾以下の補正を延々と適用し続けていた。
+  `kSnapDb = 1e-3 dB` で厳密0へsnap → **通常声復帰から約199msでviewが外れる**ことを測定
+- **テスト**: `vec_proc_smoke` の stereo / host reset / Low Latency は
+  `s == n0+n1+256*k` の等値比較で、`n0+n1 = 144000` が256の倍数でないため**3つとも一度も発火していなかった**。
+  一度だけ確実に発火する条件へ直し、**発火したこと自体をassert**。preset fixtureは書込み可能な
+  テストパスを使い、XML書込み・parse・apply成功をassert。Amount 0学習・reset後再学習も追加。
+  `vec_smoke` に -7.5dBFS warmup / full reset / 1e20復帰 / view脱落を追加
+- **CMake/CI**: `VOXMORPH_VEC_SMOKE=ON` のときだけ **DSP smoke と processor smoke の2本**を
+  target + CTest に登録。macOS/Windows workflow で通常plugin buildの**後に**この2本だけをbuild/run。
+  UI harness・実声解析・全テスト群は追加していない
+- **確認**: `ctest` 2/2 PASS、Release Standalone build 成功(error 0)、
+  OFF と Enable ON/Amount 0 の sample-identical をprocessor経路で維持
+- **未実施**: 実声試聴、AU/VST3ビルド、Windows実機確認、長時間・網羅テスト
 
 ## 2026-09-19 v0.68.0 Adaptive Voice Dynamics Phase 0–2(GitHub main へ push 済み)
 
