@@ -12,7 +12,7 @@
 - **補正**: Tilt 1.5kHz high-shelf cut 最大2dB、Body 400Hz/Q0.7 最大−2.5dB、Presence 3.5kHz/Q0.7 最大−1.5dB。gain=Amount×effort×(正のband excess)。20ms平滑、係数は32サンプルごと(ストリーム時刻基準)
 - **OFF/Amount0**: 何もしない経路は旧コードと同じ呼出し・同じ順序(viewなし)。ON→OFFは30msで0へランプ、ringの最後の非0値をエンジンが読み終えたら旧経路へ戻る(遷移区間のみ旧音と不一致)
 - **パラメータ**: 末尾に `vecenabled`(既定OFF)/ `vecamount`(0–100、既定50)。**`APVTS::replaceState` はキーが無いと現在値を保持する**(JUCE 8.0.4ソースで確認)ので、`setStateInformation` で欠落キーに既定値を明示的に書き込む。presetは `voxMorphApplyPreset` が既定値から始めるので元々OFF。ロック中の `vecenabled` はロック方針どおり現在値を保持
-- **reset**: prepare=baselineも含め全リセット。host reset=atomic要求→次ブロック先頭でcontrol時刻・フィルター・推定器envelopeをリセット(baselineは保持)。Stereo Input切替も同じ。Low Latency切替=エンジン内でフィルターのみリセット(ringは入力時刻索引なので有効)
+- **reset**: prepare=baselineも含め全リセット。host reset / **session復元(`setStateInformation`)** = atomic要求→次ブロック先頭でcontrol時刻・フィルター・推定器envelopeをリセット(baselineは保持)。Stereo Input切替も同じ。Low Latency切替=エンジン内でフィルターのみリセット(ringは入力時刻索引なので有効)
 - **UI**: MAIN > ADVANCED > ADAPTIVE VOICE DYNAMICS(Enable / Amount / 読み取り専用 Effort と学習進捗)。ENGINE VALIDATIONの上
 - **smoke**: `test/vec_smoke.cpp`(DSPのみ)と `test/vec_proc_smoke.cpp`(`-DVOXMORPH_VEC_SMOKE=ON`)。詳細は Exchange の `deliveries/2026-09-19_adaptive-voice-dynamics/REPORT.md`
 

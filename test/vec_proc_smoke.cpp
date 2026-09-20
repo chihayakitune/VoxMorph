@@ -164,6 +164,34 @@ int main()
         check (maxEff > 10.0f, "effort readout rises on the loud part");
     }
 
+    // ---- 5. session restore breaks the VEC time line ------------------------
+    // Two instances warmed up identically on a loud passage, so both carry a
+    // non-zero correction and a filter tail. One then has a session restored
+    // (same parameter values, so nothing else can differ). Its first samples
+    // must differ from the one that kept running: the restored instance starts
+    // from neutral control instead of replaying the previous voice's history.
+    {
+        auto warm = voice (fs, (int) (fs * 3.0), 11);
+        for (int i = 0; i < (int) warm.size(); ++i)
+            warm[(size_t) i] *= i < (int) (fs * 2.0) ? 1.0f : 6.0f;   // normal, then loud
+        auto probe = voice (fs, (int) (fs * 0.25), 12);
+
+        VoxMorphProcessor a, b;
+        juce::MemoryBlock state;
+        for (auto* p : { &a, &b })
+        {
+            setP (*p, "pitch", 5.0f);
+            setP (*p, "vecenabled", 1.0f);  setP (*p, "vecamount", 100.0f);
+            p->prepareToPlay (fs, 256);
+            render (*p, warm);
+        }
+        a.getStateInformation (state);                       // same values as b
+        a.setStateInformation (state.getData(), (int) state.getSize());
+        auto ya = render (a, probe), yb = render (b, probe);
+        check (std::memcmp (ya.data(), yb.data(), ya.size() * sizeof (float)) != 0,
+               "session restore resets the VEC control/filter state (differs from a running instance)");
+    }
+
     std::printf (fails == 0 ? "ALL PASS\n" : "%d FAIL\n", fails);
     return fails == 0 ? 0 : 1;
 }

@@ -1348,6 +1348,14 @@ void VoxMorphProcessor::setStateInformation (const void* data, int size)
                     e->setAttribute ("value", rp->convertFrom0to1 (rp->getDefaultValue()));
                 }
         apvts.replaceState (juce::ValueTree::fromXml (*xml));
+        // A restore is a new session in an instance that may have been running:
+        // the Adaptive Voice Dynamics control ring, the correction smoothers and
+        // both engines' filter memories still hold the previous voice. Ask the
+        // audio thread to break the time line at the next block boundary (the
+        // learned baseline is kept -- same speaker and microphone; see
+        // vecResetTimeline). This is the same request path as host reset(), so
+        // nothing here touches audio-thread state from the message thread.
+        vecResetReq.store (true);
     }
 }
 
