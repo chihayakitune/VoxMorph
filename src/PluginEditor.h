@@ -5654,7 +5654,6 @@ private:
 
         const juce::String txt =
               mark (on ("engprot"))   + "   Auto Protection + Restore\n"
-            + mark (on ("engbreath")) + "   Air Breathiness\n"
             + mark (on ("engendbr"))  + "   Ending Breath";
         if (txt != shown)
         {
@@ -7065,20 +7064,15 @@ private:
                  "ください。オフ=大きな入力がそのまま変換へ入ります。"
                  "前段だけ・後段だけという危険な状態を作れないよう、2つで1つのスイッチに"
                  "してあります。"));
-        toggle (*cardAdvanced, "engbreath", "Air Breathiness",
-            tip ("VALIDATION. Turns the Air Breathiness stage on and off without touching its "
-                 "amount: the slider in the AIR section keeps whatever you set, and switching "
-                 "back on restores it. Off feeds the engine 0, which is the same as the "
-                 "slider at 0 - the stage is skipped entirely, not faded.",
-                 "検証用。Air Breathinessの段をオン/オフします。量つまみには触れないので、"
-                 "AIRセクションのスライダーの値はそのまま残り、オンに戻せば元通りです。"
-                 "オフはエンジンへ0を渡すだけで、スライダー0と同じ=その段は完全に"
-                 "スキップされます(フェードではありません)。"));
+        // Air Breathiness had a validation checkbox here (v0.67.0). Removed in
+        // v0.69.0: it is a finished feature, and the switch only ever did what
+        // its own slider at 0 already does -- same samples -- so it added a
+        // second control and nothing else. The AIR slider is its only control.
         toggle (*cardAdvanced, "engendbr", "Ending Breath",
-            tip ("VALIDATION. Same arrangement as Air Breathiness, for the phrase-ending "
+            tip ("VALIDATION. For the phrase-ending "
                  "breath. The amount slider keeps its value; off feeds the engine 0 and the "
                  "stage is skipped, so the phrase-envelope tracking stops running too.",
-                 "検証用。Air Breathinessと同じ仕組みで、語尾の息成分の段をオン/オフします。"
+                 "検証用。語尾の息成分の段をオン/オフします。"
                  "量スライダーの値は保持されます。オフはエンジンへ0を渡してその段を"
                  "スキップし、語尾包絡の追従処理も止まります。"));
         button (*cardAdvanced, "Engine", "ENGINE CONFIG",

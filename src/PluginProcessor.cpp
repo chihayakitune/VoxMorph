@@ -768,7 +768,12 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     // "every Air control at 0" comment in PsolaEngine.h) -- so OFF is the
     // same samples as having the knob at 0, and turning it back on restores
     // whatever the slider was left at.
-    p.airBreath     = pEngBreath->load() > 0.5f ? pBreath2->load() : 0.0f;
+    // Air Breathiness follows its slider and nothing else (v0.69.0). The
+    // "engbreath" validation switch was removed from the UI; its id stays
+    // registered so older sessions load, but a stored OFF is IGNORED --
+    // otherwise a session saved with it off would stay silently off with
+    // no control left to turn it back on.
+    p.airBreath     = pBreath2->load();
     p.airEndBreath  = pEngEndBr ->load() > 0.5f ? pAirEnd ->load() : 0.0f;
     p.gciSync       = pGci->load() > 0.5f;
     // The toggles gate the guards here rather than in the engine: it already
