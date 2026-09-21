@@ -2305,7 +2305,7 @@ int main (int argc, char** argv)
     {
         std::printf ("\n== ENGINE VALIDATION ==\n");
 
-        for (auto* id : { "engprot", "engbreath", "engendbr" })
+        for (auto* id : { "engprot", "engendbr" })
         {
             auto* rp = proc.apvts.getParameter (id);
             check (rp != nullptr, juce::String (id) + " parameter exists");
@@ -2320,6 +2320,73 @@ int main (int argc, char** argv)
                          rp->getName (40).toRawUTF8());
         }
 
+        // v0.69.0: Air Breathiness is a finished feature. Its validation
+        // checkbox is gone -- the AIR slider is the only control -- and a
+        // session that stored engbreath OFF must not leave it silently off.
+        {
+            bool toggle = false;
+            walk (ed.get(), [&] (juce::Component* c)
+            {
+                if (auto* t = dynamic_cast<juce::ToggleButton*> (c))
+                    if (t->getButtonText() == "Air Breathiness") toggle = true;
+            });
+            check (! toggle, "Air Breathiness has no validation checkbox any more");
+
+            // Stored OFF must be ignored: render the same breathy material with
+            // the old switch OFF and ON (slider at full) -- same samples.
+            auto render = [&] (float sw)
+            {
+                auto setv = [&] (const char* id, float plain)
+                {
+                    if (auto* q = proc.apvts.getParameter (id))
+                    { q->beginChangeGesture(); q->setValueNotifyingHost (q->convertTo0to1 (plain)); q->endChangeGesture(); }
+                };
+                setv ("engbreath", sw);  setv ("breath2", 1.0f);
+                setv ("air", 0.6f);      setv ("pitch", 5.0f);
+                proc.prepareToPlay (48000.0, 512);
+                juce::AudioBuffer<float> b (2, 512);  juce::MidiBuffer m;
+                std::vector<float> out;
+                uint32_t seed = 7;
+                for (int blk = 0; blk < 120; ++blk)
+                {
+                    for (int i = 0; i < 512; ++i)
+                    {
+                        seed = seed * 1664525u + 1013904223u;
+                        const double n = (double) (blk * 512 + i);
+                        const float v = 0.2f * (float) std::sin (2.0 * M_PI * 140.0 * n / 48000.0)
+                                      + 0.02f * ((float) (seed >> 8) / 16777216.0f - 0.5f);
+                        b.setSample (0, i, v);  b.setSample (1, i, v);
+                    }
+                    proc.processBlock (b, m);
+                    out.insert (out.end(), b.getReadPointer (0), b.getReadPointer (0) + 512);
+                }
+                setv ("engbreath", 1.0f);  setv ("breath2", 0.0f);
+                setv ("air", 0.0f);        setv ("pitch", 0.0f);
+                return out;
+            };
+            // One discarded render first. The first render after the earlier
+            // sections is NOT reproducible: prepareToPlay does not reset the
+            // parameter smoothers' current values, so it glides in from
+            // whatever the previous section left (measured: 58959 samples
+            // differ between that first render and an identical second one).
+            // Pre-existing and harmless in use, but it would make the OFF/ON
+            // comparison below meaningless -- hence the control.
+            render (1.0f);
+            const auto onA = render (1.0f), onB = render (1.0f);
+            size_t ctl = 0;
+            for (size_t i = 0; i < std::min (onA.size(), onB.size()); ++i)
+                if (onA[i] != onB[i]) ++ctl;
+            std::printf ("  control ON vs ON: %zu differing samples (must be 0)\n", ctl);
+            check (ctl == 0, "control: the same setting renders identically twice");
+            const auto offOut = render (0.0f), onOut = render (1.0f);
+            size_t diff = 0;
+            for (size_t i = 0; i < std::min (offOut.size(), onOut.size()); ++i)
+                if (offOut[i] != onOut[i]) ++diff;
+            std::printf ("  stored engbreath OFF vs ON: %zu differing samples (must be 0)\n", diff);
+            check (diff == 0 && ! offOut.empty(),
+                   "a stored engbreath OFF is ignored (Air Breathiness follows its slider)");
+        }
+
         // A control is actually bound to each of them, and the binding really
         // drives the parameter. An APVTS entry with no control would still
         // save, automate and reset perfectly while being unreachable, and a
@@ -2327,7 +2394,6 @@ int main (int argc, char** argv)
         // ParamRow puts the display name on the toggle's button text.
         const std::pair<const char*, const char*> pairs[] {
             { "Auto Protection", "engprot"   },
-            { "Air Breathiness", "engbreath" },
             { "Ending Breath",   "engendbr"  },
         };
         for (auto& pr : pairs)
