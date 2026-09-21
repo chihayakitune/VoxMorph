@@ -24,7 +24,7 @@
 #include <cstdint>
 #include <array>
 #include "VowelAdaptiveWarp.h"
-#include "AdaptiveVoiceDynamics.h"
+#include "VoiceQualityDynamics.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846   // MSVC (Windows) では未定義のため
@@ -429,7 +429,7 @@ public:
     void prepare (double sampleRate)
     {
         fs        = sampleRate;
-        vecF.prepare (sampleRate);   // Adaptive Voice Dynamics: clean filter state
+        qualityView=nullptr; qualityTimeOffset=0;
         maxLag    = (int) (fs / 60.0);   // lowest tracked f0 = 60 Hz (normal)
         maxLagLow = (int) (fs / 40.0);   // lowest tracked f0 = 40 Hz (Low Voice Mode)
         minLag    = (int) (fs / 500.0);  // highest tracked f0 = 500 Hz
@@ -782,29 +782,24 @@ public:
 
     // Mono in → mono out, n samples. out may alias in.
     //
-    // Adaptive Voice Dynamics (optional): `vec` is a view of the processor's
-    // control ring and `vecBase` the processor stream time of in[0]. The
-    // default (nullptr) is the unchanged engine -- not a single extra
-    // operation on the sample. The view is copied, never kept past the call.
+    // Input-time controls only. Pitch reads the chosen source grain's timestamp;
+    // neither detector input nor tracking state is modified. A zero view is neutral.
     void process (const float* in, float* out, int n,
-                  const AvdView* vec = nullptr, int64_t vecBase = 0)
+                  const vq::View* quality = nullptr, int64_t qualityBase = 0)
     {
         // Internally chop large host buffers into <=512-sample chunks so the
         // engine behaves identically at ANY buffer size: pitch-detection
         // cadence, grain scheduling and dezippering all stay uniform.
         while (n > 512)
         {
-            processChunk (in, out, 512, vec, vecBase);
+            processChunk (in, out, 512, quality, qualityBase);
             in += 512; out += 512; n -= 512;
-            vecBase += 512;            // the control time moves with the chunk
+            qualityBase += 512;            // the control time moves with the chunk
         }
         if (n > 0)
-            processChunk (in, out, n, vec, vecBase);
+            processChunk (in, out, n, quality, qualityBase);
+        qualityView=nullptr;
     }
-
-    // Adaptive Voice Dynamics: drop the wet-filter state (audio thread only;
-    // the processor calls it at a block boundary on reset / stereo change).
-    void vecReset() { vecF.reset(); }
 
     // Put `nextDetectPos` on the first grid point at or past the write head.
     // Only needed when the mode is switched on mid-stream: the grid is
@@ -877,7 +872,7 @@ public:
     }
 
     void processChunk (const float* in, float* out, int n,
-                       const AvdView* vec = nullptr, int64_t vecBase = 0)
+                       const vq::View* quality = nullptr, int64_t qualityBase = 0)
     {
         takeCadenceSwitch();
 
@@ -887,7 +882,7 @@ public:
             // The control ring is indexed by input time, so it stays valid
             // under the new D; only the filter memory belongs to the old
             // output stream.
-            vecF.reset();
+
             std::fill (accBuf.begin(),  accBuf.end(),  0.0f);
             std::fill (normBuf.begin(), normBuf.end(), 0.0f);
             std::fill (candBuf.begin(), candBuf.end(), 0.0f);
@@ -903,7 +898,8 @@ public:
             airPrevFast = 0.0f;
             airPhraseAge = airPhraseGap = airFallSamples = 0;
         }
-        if (vec == nullptr) vecF.idle();   // resume later from a clean state
+        qualityView=quality;
+        qualityTimeOffset=qualityBase-writePos;
         const int64_t start = writePos;
         for (int i = 0; i < n; ++i)
             inBuf[(size_t) ((start + i) & kMask)] = in[i];
@@ -1294,13 +1290,6 @@ public:
             const size_t  idx = (size_t) (oi & kMask);
             const float   nrm = normBuf[idx];
             float wet = nrm > 1.0e-3f ? accBuf[idx] / std::max (nrm, 0.25f) : 0.0f;
-
-            // Adaptive Voice Dynamics: on the reconstructed voice only, before
-            // Natural Air is added back and before the Manual Tilt. Output
-            // sample i came from input time (vecBase + i) - D, and that is
-            // the control it reads.
-            if (vec != nullptr)
-                wet = vecF.apply (wet, *vec, vecBase + i - (int64_t) D);
 
             const int64_t di = oi - D;
             if (airOut && di >= 0)                        // un-pitched breath
@@ -2350,6 +2339,19 @@ private:
         // the global formant amount is being pulled back
         vaHiScale = 1.0f - wHi * (1.0f - hiFAmt);
 
+        const double natural = nextMarkF - (double) D;
+        double c = natural;
+
+        if (v)
+        {
+            const double k = std::round ((natural - lastInMark) / (double) P);
+            c = lastInMark + k * (double) P;
+            if (std::abs (c - natural) > (double) (guardFrac * P))
+                c = natural;
+            c = gciOn ? alignToGci (c, P) : alignToPeak (c, P);
+            lastInMark = c;
+        }
+
         float Ts;
         if (robotize)
             Ts = (float) (fs / robotHz);
@@ -2362,6 +2364,10 @@ private:
             double ft = (fs / (double) P) * pr;
             if (range != 1.0f)
                 ft = (double) centerHz * std::pow (ft / (double) centerHz, (double) range);
+            if (qualityView != nullptr) {
+                const float offset=qualityView->read((int64_t)std::llround(c)+qualityTimeOffset).pitch;
+                if (offset!=0.0f) ft *= std::pow(2.0, (double)offset/12.0);
+            }
             if (floorHz > 20.0f && ft < (double) floorHz)          // soft low lift
                 ft = (double) floorHz * std::pow (ft / (double) floorHz, 0.4);
             ft = std::clamp (ft, 40.0, 1000.0);
@@ -2380,19 +2386,6 @@ private:
 
         const int64_t mi  = (int64_t) std::llround (nextMarkF);
         const double  err = nextMarkF - (double) mi;
-
-        const double natural = nextMarkF - (double) D;
-        double c = natural;
-
-        if (v)
-        {
-            const double k = std::round ((natural - lastInMark) / (double) P);
-            c = lastInMark + k * (double) P;
-            if (std::abs (c - natural) > (double) (guardFrac * P))
-                c = natural;
-            c = gciOn ? alignToGci (c, P) : alignToPeak (c, P);
-            lastInMark = c;
-        }
 
         // grain half width: ~1 input period, but never much wider than the
         // OUTPUT spacing. With large upward shifts a 2-period grain carries a
@@ -3087,8 +3080,9 @@ private:
     bool  robotize = false, lowVoice = false;
     float hiFreq = 0.0f, hiPAmt = 0.5f, hiFAmt = 1.0f;   // High Range guard
 
-    // Adaptive Voice Dynamics wet filter (per engine = per channel)
-    AvdFilter vecF;
+    // Voice Quality source-time pitch controls (shared by both engines)
+    const vq::View* qualityView=nullptr; // valid only during process()
+    int64_t qualityTimeOffset=0;
 
     // Natural Air (harmonic/noise split) state
     float airAmt          = 0.0f;         // effective knob value, capped at 0.6

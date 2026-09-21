@@ -62,22 +62,17 @@ target_link_libraries(VoxMorph
             juce::juce_recommended_warning_flags
 )
 
-# ---- Adaptive Voice Dynamics processor smoke test (developer tool, OFF) ---
-#   cmake -B build -DVOXMORPH_VEC_SMOKE=ON
-#   cmake --build build --target VoxMorphVecSmoke
-option(VOXMORPH_VEC_SMOKE "Build the Adaptive Voice Dynamics processor smoke test" OFF)
-if (VOXMORPH_VEC_SMOKE)
-    juce_add_console_app(VoxMorphVecSmoke PRODUCT_NAME "VoxMorphVecSmoke")
-    target_sources(VoxMorphVecSmoke PRIVATE test/vec_proc_smoke.cpp src/PluginProcessor.cpp)
-    target_include_directories(VoxMorphVecSmoke PRIVATE dsp src)
-    target_compile_definitions(VoxMorphVecSmoke PUBLIC
+# ---- Voice Quality regression (bounded; no audio device) ----------------
+option(VOXMORPH_VQ_TEST "Build Voice Quality processor regression" OFF)
+if (VOXMORPH_VQ_TEST)
+    juce_add_console_app(VoxMorphVqTest PRODUCT_NAME "VoxMorphVqTest")
+    target_sources(VoxMorphVqTest PRIVATE test/voice_quality_proc_test.cpp src/PluginProcessor.cpp)
+    target_include_directories(VoxMorphVqTest PRIVATE dsp src)
+    target_compile_definitions(VoxMorphVqTest PUBLIC
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0
-        JUCE_PLUGINHOST_VST3=1
-        JUCE_STANDALONE_APPLICATION=1
-        JUCE_MODAL_LOOPS_PERMITTED=1)
-    target_link_libraries(VoxMorphVecSmoke
-        PRIVATE juce::juce_audio_utils AnokoeAssets
-        PUBLIC  juce::juce_recommended_config_flags)
+        JUCE_PLUGINHOST_VST3=1 JUCE_STANDALONE_APPLICATION=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+    target_link_libraries(VoxMorphVqTest PRIVATE juce::juce_audio_utils AnokoeAssets
+        PUBLIC juce::juce_recommended_config_flags)
 endif()
 
 # ---- UI verification harness (developer tool, OFF by default) ------------

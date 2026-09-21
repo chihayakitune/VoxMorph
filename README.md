@@ -15,7 +15,8 @@ TD-PSOLA方式で、ピッチとフォルマントを完全に独立して操作
   suppressing old-pitch leakage; **Air Shine** adds high-frequency openness,
   while **Air Breathiness / Ending Breath** strengthen only source-derived
   aperiodic texture globally or on an acoustic phrase-ending release
-- **Robotize / Pitch Floor / Natural Jitter / Softness (Tilt)**
+- **Robotize / Pitch Floor / Natural Jitter**
+- **VOICE QUALITY EQ / Dynamics** — 4 Band Parametric EQ、入力RMSで動くBand別Dynamics、入力時刻同期Dynamic Pitch。旧Tiltはセッション互換用。詳細は[設計書](docs/VOICE_QUALITY_DYNAMICS_DESIGN.md)。
 - **Low Voice Mode** — vocal-fry tracking down to 40 Hz with pitch hold
 - **Low Latency Mode** — ~21 ms conversion delay for live use (normal: ~43 ms)
 - **Auto-Mute on Feedback**, Cmd+S state save, bilingual (EN/JP) tooltips

@@ -4,8 +4,7 @@
 #include "VoiceAnalyzer.h"
 #include "SpatialEngine.h"
 #include "ProtectionGain.h"
-#include "VocalEffortEstimator.h"
-#include "AdaptiveVoiceDynamics.h"
+#include "VoiceQualityDynamics.h"
 
 class VoxMorphProcessor : public juce::AudioProcessor
 {
@@ -79,6 +78,7 @@ public:
         // editor timer (~3 Hz): commit a settled burst of manual edits
         void poll()
         {
+            if (gestureActive) return;
             auto cur = snap();
             if (cur == committed) { pendingActive = false; return; }
             if (pendingActive && cur == pending)
@@ -98,6 +98,9 @@ public:
             applyChanges();
             commitPending();       // then the whole group as ONE step
         }
+
+        void beginGesture() { commitPending(); gestureActive=true; }
+        void endGesture() { gestureActive=false; commitPending(); }
 
         bool canUndo() const { return ! undoStack.empty(); }
         bool canRedo() const { return ! redoStack.empty(); }
@@ -156,7 +159,7 @@ public:
         juce::AudioProcessor* proc = nullptr;
         std::vector<float> committed, pending;
         std::vector<std::vector<float>> undoStack, redoStack;
-        bool pendingActive = false;
+        bool pendingActive = false, gestureActive = false;
     };
     ParamHistory history;
 
@@ -200,10 +203,23 @@ public:
     // Published for a future "AUTO -3.2 dB" indicator; no DSP reads it.
     std::atomic<float> uiProtectionGainDb { 0.0f };
 
-    // Adaptive Voice Dynamics readout (MAIN > ADVANCED). Effort 0..100 at the
-    // INPUT time (not delayed), warmup 0..1, and whether the estimator runs.
-    std::atomic<float> uiVecEffort { 0.0f }, uiVecWarm { 0.0f };
-    std::atomic<bool>  uiVecRunning { false };
+    // Input levels and time-aligned output control, published for the message thread.
+    std::array<std::atomic<float>,4> uiVqLevel{},uiVqGR{};
+    std::atomic<float> uiVqPitch{0},uiVqFullLevel{-120};
+    struct VqPublishedResponse
+    {
+        std::atomic<double> b0{1},b1{0},b2{0},a1{0},a2{0};
+        void store(const vq::Coeff& c) {
+            b0.store(c.b0,std::memory_order_relaxed); b1.store(c.b1,std::memory_order_relaxed);
+            b2.store(c.b2,std::memory_order_relaxed); a1.store(c.a1,std::memory_order_relaxed);
+            a2.store(c.a2,std::memory_order_relaxed);
+        }
+        vq::Coeff load() const {
+            return {b0.load(std::memory_order_relaxed),b1.load(std::memory_order_relaxed),
+                    b2.load(std::memory_order_relaxed),a1.load(std::memory_order_relaxed),a2.load(std::memory_order_relaxed)};
+        }
+    };
+    std::array<VqPublishedResponse,4> uiVqResponse;
 
     // ---- MUTE / MONITOR (v0.30.0, driven by the standalone options bar) ----
     // muted      = the user pressed MUTE; the output is silenced so nothing
@@ -414,17 +430,11 @@ private:
     ProtectionGain protection;
     std::vector<float> monoScratch, scratchL, scratchR;
 
-    // Adaptive Voice Dynamics (vecenabled / vecamount). The estimator reads
-    // the gated input before Protection; the control ring is read by both
-    // engines at their own n - D. See AdaptiveVoiceDynamics.h.
-    VocalEffortEstimator vecEst;
-    AvdControl           vecCtl;
-    int  vecSegCap     = 512;       // largest segment the ring is sized for
-    bool vecRunning    = false;     // estimator ran last block
-    bool vecLastStereo = false;
-    // host reset() -> audio thread, taken at the next block boundary
-    std::atomic<bool> vecResetReq { false };
-    void vecResetTimeline();        // audio thread only
+    vq::Processor voiceQuality;
+    bool vqLastStereo=false;
+    std::atomic<bool> vqResetReq{false};
+    std::atomic<float>* pVq[4][12]{};
+    std::atomic<float>* pVqPitch[6]{};
 
     std::atomic<float>* pPitch     = nullptr;
     std::atomic<float>* pFormant   = nullptr;
@@ -514,8 +524,6 @@ private:
     std::atomic<float>* pEngProt   = nullptr;
     std::atomic<float>* pEngBreath = nullptr;
     std::atomic<float>* pEngEndBr  = nullptr;
-    std::atomic<float>* pVecOn     = nullptr;   // Adaptive Voice Dynamics
-    std::atomic<float>* pVecAmt    = nullptr;
     std::atomic<float>* pMix       = nullptr;
     std::atomic<float>* pGain      = nullptr;
 
