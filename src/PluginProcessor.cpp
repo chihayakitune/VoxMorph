@@ -325,10 +325,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     // Either way an older session or preset comes up with the features on,
     // which is the v0.66.0 behaviour it was saved under.
     //
-    // Protection and Restore share ONE switch on purpose. Lowering the level
-    // into the engine without putting it back, or putting back a level that
-    // was never taken off, are both wrong on their own; only the pair is a
-    // meaningful thing to compare against.
+    // v0.69.0: all three ids are now INERT -- Auto Protection was removed, and
+    // Air Breathiness / Ending Breath follow their sliders -- but they stay
+    // registered here, in order, so older sessions still load and no
+    // automation lane moves.
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "engprot", 1 }, "Auto Protection + Restore", true));
     layout.add (std::make_unique<juce::AudioParameterBool> (
@@ -424,9 +424,6 @@ VoxMorphProcessor::VoxMorphProcessor()
     pAir     = apvts.getRawParameterValue ("air");
     pAirShine = apvts.getRawParameterValue ("airshine");
     pAirEnd   = apvts.getRawParameterValue ("airend");
-    pEngProt   = apvts.getRawParameterValue ("engprot");
-    pEngBreath = apvts.getRawParameterValue ("engbreath");
-    pEngEndBr  = apvts.getRawParameterValue ("engendbr");
     const char* suffix[] = {"on","type","freq","gain","q","dyn","thr","ratio","atk","rel","knee","maxgr"};
     for(int b=0;b<4;++b) for(int k=0;k<12;++k)
         pVq[b][k]=apvts.getRawParameterValue(juce::String("vqb")+juce::String(b+1)+"_"+suffix[k]);
@@ -491,9 +488,6 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     engine.prepare (sampleRate);
     engineR.prepare (sampleRate);
     spatial.prepare (sampleRate, samplesPerBlock);   // allocates its delay lines
-    // Allocates the control-signal delay line (engine lookahead + a block).
-    // prepare() ends in reset(), so the gain history starts at unity.
-    protection.prepare (sampleRate, samplesPerBlock);
     monoScratch.assign ((size_t) samplesPerBlock, 0.0f);
 
     voiceQuality.prepare(sampleRate);
@@ -541,13 +535,11 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     pendingLat = -1;  pendingLatSec = 0.0f;
 }
 
-// The protection gain history is indexed by position in the stream. After a
-// transport jump the samples on the other side were never attenuated, so the
-// stale history would restore a gain that was never applied. Everything else
-// in this processor either has no state or is re-derived every block.
+// Transport jump / bypass edge. Voice Quality's detectors and lookahead are
+// the only state tied to stream position; everything else in this processor
+// either has no state or is re-derived every block.
 void VoxMorphProcessor::reset()
 {
-    protection.reset();
     // Voice Quality state is owned by the audio thread; ask for it
     // to be reset at the next block boundary instead of touching it here.
     vqResetReq.store (true);
@@ -743,19 +735,14 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.breath        = 0.0f;                  // generated-noise Beta retired from the plugin path
     p.airPreserve   = pAir->load();          // Natural Air (standard path)
     p.airShineDb    = pAirShine->load();     // Air Shine
-    // ENGINE VALIDATION: the switches gate the AMOUNT handed to the engine,
-    // they never touch the APVTS value. Turning one off feeds the engine 0,
-    // which it already treats as a complete bypass of that stage (see the
-    // "every Air control at 0" comment in PsolaEngine.h) -- so OFF is the
-    // same samples as having the knob at 0, and turning it back on restores
-    // whatever the slider was left at.
-    // Air Breathiness follows its slider and nothing else (v0.69.0). The
-    // "engbreath" validation switch was removed from the UI; its id stays
-    // registered so older sessions load, but a stored OFF is IGNORED --
-    // otherwise a session saved with it off would stay silently off with
-    // no control left to turn it back on.
+    // Air Breathiness and Ending Breath follow their sliders and nothing else
+    // (v0.69.0). Their "engbreath" / "engendbr" validation switches were
+    // removed from the UI; the ids stay registered so older sessions load,
+    // but a stored OFF is IGNORED -- otherwise a session saved with one off
+    // would stay silently off with no control left to turn it back on. A
+    // slider at 0 is still an exact bypass of its stage.
     p.airBreath     = pBreath2->load();
-    p.airEndBreath  = pEngEndBr ->load() > 0.5f ? pAirEnd ->load() : 0.0f;
+    p.airEndBreath  = pAirEnd ->load();
     p.gciSync       = pGci->load() > 0.5f;
     // The toggles gate the guards here rather than in the engine: it already
     // reads "start = 0" and "floor = 0" as off, so switching them off is the
@@ -948,27 +935,13 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         if (c >= room) capturing.store (false);
     }
 
-    // ---- Auto Voice Protection Gain -------------------------------------
-    // Last thing before the conversion, and deliberately AFTER the visualizer
-    // tap and the ANALYZE capture above: those show the user their real input
-    // level, not the protected one. At normal speaking level this is exactly
-    // unity and skips its own multiply, so the samples reaching the engine are
-    // bit-identical to a build without the stage.
-    //
-    // At Mix 0 the engine is a pure delay of the dry signal -- no conversion to
-    // protect -- so the stage is asked for unity and glides out.
-    // One switch stops BOTH halves. setBypassed asks the stage for unity and
-    // lets it glide out on its normal release rather than cutting it dead, so
-    // flipping the switch while it is actually reducing does not step the
-    // level; once the smoother snaps to exactly 1.0 the multiply is skipped
-    // on both sides and the path is sample-identical again. The restore needs
-    // no separate handling: it undoes the gain from D samples ago, and those
-    // ring entries glide to 1.0 with the pre stage.
-    //
-    // The Mix 0 term is the pre-existing bypass and is kept as it was.
-    protection.setBypassed (pEngProt->load() <= 0.5f || p.mix <= 1.0e-4f);
+    // Auto Voice Protection Gain / Auto Gain Restore were removed in v0.69.0.
+    // Measured (test/level_probe.cpp, against this engine): detection and
+    // conversion are both level-invariant from -42 to +6 dBFS, so reducing
+    // the level into the engine and restoring it afterwards protected against
+    // nothing. Its only real effect had been a -1 dBFS ceiling on the output.
 
-    // Detection: gated original input, before Protection. Only controls cross buses.
+    // Detection: gated original input, before the conversion. Only controls cross buses.
     if(vqResetReq.exchange(false) || stereoMode!=vqLastStereo) {
         voiceQuality.reset(); vqLastStereo=stereoMode;
     }
@@ -989,12 +962,10 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         float* channels[]={ (stereoMode?sL:m)+off,sR+off };
         voiceQuality.detect(channels,nc,count);
         const auto view=voiceQuality.view();
-        protection.processPre(channels,nc,count);
         const int previousDelay=engine.latencySamples();
         engine.process(channels[0],channels[0],count,&view,base);
         if(stereoMode) engineR.process(channels[1],channels[1],count,&view,base);
         const int delay=engine.latencySamples();
-        protection.processPost(channels,nc,count,delay);
         if(delay!=previousDelay) voiceQuality.resetOutput();
         voiceQuality.output(channels,nc,count,base,delay);
     }
@@ -1005,10 +976,8 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
     uiVqPitch.store(p.robotize?0.0f:voiceQuality.appliedPitch,std::memory_order_relaxed);
     uiVqFullLevel.store(voiceQuality.level,std::memory_order_relaxed);
-    uiProtectionGainDb.store (protection.currentGainReductionDb(),
-                              std::memory_order_relaxed);
 
-    // analysis taps re-derived from the restored signal
+    // analysis taps re-derived from the converted signal
     if (stereoMode)
         for (int i = 0; i < n; ++i) m[i] = 0.5f * (sL[i] + sR[i]);
 

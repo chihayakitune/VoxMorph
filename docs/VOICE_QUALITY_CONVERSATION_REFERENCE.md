@@ -2,6 +2,9 @@
 
 参照: 音量閾値ピッチ制御設計 / 6ab0a72c-b8fc-83e8-befd-2abd55c6e60c
 
+> 注(v0.69.0): 本文中の Tracking Protection / ProtectionGain / Protection Restore は削除済み。
+> 理由と実測は VOICE_QUALITY_DYNAMICS_DESIGN.md「目的・変更しない機能」を参照。本文は記録として原文のまま残す。
+
 read_thread の1メッセージ20,000文字上限により94節途中で取得が終了。取得できた本文を要約せず保存。実装上の確定事項・追加のユーザー必須方針・検証結果は VOICE_QUALITY_DYNAMICS_DESIGN.md を参照。
 
 # VoxMorph Voice Quality Dynamics 再設計・実装指示

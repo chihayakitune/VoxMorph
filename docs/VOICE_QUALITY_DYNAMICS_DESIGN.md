@@ -15,10 +15,23 @@ baseline学習、Vocal Effort推定、Body/Presence excess、自動Tilt補正は
 `VocalEffortEstimator` / `AvdControl` / `AvdFilter` の実装と専用旧テストを削除した。
 有用だった入力ストリーム時刻・制御リング・ステレオリンク・分割処理の設計を新しい名前で再実装した。
 
-Tracking Protectionは入力F0/Formant追跡の破綻回避であり、今回の音作り機能とは独立する。
-Tracking Protectionの状態をDynamics/Pitchの発動条件にしない。
 Dynamic Pitch/EQの値や処理済み音声をTrackerへ戻さない。Formantの動的補正も今回の対象外。
-`ProtectionGain`のprocessPre / processPost、閾値、ゲイン復元処理は維持する。
+
+**Tracking Protection(`ProtectionGain` = Auto Protection)は v0.69.0 で削除した。**
+当初この文書は「`ProtectionGain`のprocessPre / processPost、閾値、ゲイン復元処理は維持する」
+としていたが、その前提が実測で成り立たなかった。`test/level_probe.cpp` をこのエンジン
+(Dynamic Pitch入り)に対して実行した結果:
+
+- 検出: 同じ母音を -60〜+6 dBFS で入れても f0 と F1〜F3 の推定値・信頼度が全く同じ
+  (YINのCMNDFと対数スペクトル上のフォルマント推定はどちらもレベルに依存しない)。
+  ±24 dBの揺れや -24→-6 dBFS の段差でもばらつきは一定音量時と同等
+- 変換: 出力÷レベル比の残差は -42〜+6 dBFS で約 -125 dB(float丸め誤差のみ)
+
+レベルを下げてエンジンへ入れ後で戻す処理は何も守っておらず、実際の効果は
+復元後出力の -1 dBFS 天井だけだった。検出用の別ルートも存在しない(ピッチは入力
+コピー、フォルマントは出力グレイン自体を解析する)ため、ルート別の保護も不要。
+`engprot` パラメータIDは互換性のため登録したまま、値は無視する。
+Voice QualityのDetectorは従来どおり変換前(Gate後)の信号を読む。
 
 ## 信号経路
 
@@ -33,9 +46,7 @@ Input -> Pre FX -> Gate
                     |                [GR x 4, pitch semitones]
                     |                         |
                     +-> Conversion Bus       |
-                         ProtectionGain::processPre
                          PSOLA <--------------+ pitch at source grain time c
-                         ProtectionGain::processPost
                          4-band IIR EQ <------+ GR at output time t-D
                          Mute -> Output Gain -> Spatial -> Post FX -> Output
 ```
@@ -43,7 +54,7 @@ Input -> Pre FX -> Gate
 Detection Busの音声を出力に混ぜない。音声Delayや追加lookaheadはない。
 EQの追加ホスト報告Latencyは0。Filter smoothing、RMS integration、Attack/Releaseは
 意図した時定数であり追加音声Delayではない。
-EQはProcessorのProtection Restore直後の変換出力に適用する。
+EQはProcessorのPSOLA直後の変換出力に適用する。
 現行エンジンのMixはエンジン内部にあるため、この地点ではMix済み信号全体をEQする。
 従ってMix=0でも明示的に設定したEQは有効。Dynamic PitchはPSOLAのwet側にのみ作用する。
 
@@ -99,7 +110,7 @@ APVTSの量子化誤差によるゼロ付近の微小な値（絶対値1e-5未�
 
 ## Detector / Dynamics の数式
 
-DetectorはGate後、Protectionより前の信号だけを読む。
+DetectorはGate後、変換より前の信号だけを読む。
 BandごとのDetector状態と出力EQのFilter状態は完全に分離する。
 Bellの検出は中心周波数でunityのbandpass、Low Shelfはlowpass、High Shelfはhighpass。
 Detector Frequency/Q/Typeは選択Band設定に従う。Static GainはDetectorへ適用しない。

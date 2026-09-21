@@ -98,9 +98,9 @@ class VoiceQualityPanel : public juce::Component, private juce::Timer
         {
             auto row = std::make_unique<ParamRow>(
                 proc, id, kind, label,
-                "Voice Quality EQ / Dynamics. Detection uses gated input before Engine "
-                "Protection."
-                "\n入力レベルは変換・Protection前で検出します。ThresholdはdBFS、GainはEQのdBです。");
+                "Voice Quality EQ / Dynamics. Detection uses the gated input, before "
+                "the conversion."
+                "\n入力レベルは変換前で検出します。ThresholdはdBFS、GainはEQのdBです。");
             if (id.endsWith("thr"))
                 row->setReadoutWidth(82);
             row->onLockChanged = [this]

@@ -5627,7 +5627,7 @@ public:
         note           .setBounds (r.removeFromTop (104));
         r.removeFromTop (8);
         underValidation.setBounds (r.removeFromTop (22));
-        status         .setBounds (r.removeFromTop (62));
+        status         .setBounds (r.removeFromTop (22));
         whereHint      .setBounds (r.removeFromTop (18));
         r.removeFromTop (10);
         adopted        .setBounds (r.removeFromTop (22));
@@ -5656,8 +5656,7 @@ private:
         auto mark = [] (bool b) { return b ? juce::String ("ON ") : juce::String ("OFF"); };
 
         const juce::String txt =
-              mark (on ("engprot"))   + "   Auto Protection + Restore\n"
-            + mark (on ("engendbr"))  + "   Ending Breath";
+              mark (on ("engendbr"))  + "   Ending Breath";
         if (txt != shown)
         {
             shown = txt;
@@ -7018,21 +7017,10 @@ private:
         // that window mirrors them read-only. Two sets of controls for one
         // parameter is how a UI grows two truths.
         groupHeading (*cardAdvanced, "ENGINE VALIDATION");
-        toggle (*cardAdvanced, "engprot", "Auto Protection",
-            tip ("VALIDATION. Turns the automatic level protection around the conversion on "
-                 "and off as a pair: the gain taken off in front of the engine, and the gain "
-                 "put back after it. It only acts above -7 dBFS, so at normal speaking level "
-                 "on and off are the same samples - use it to compare a shout or a mic bump. "
-                 "Off means loud input reaches the conversion at full level. The two halves "
-                 "share one switch because taking the level off without putting it back (or "
-                 "putting back a level that was never taken off) is not a setting anyone "
-                 "should be able to run.",
-                 "検証用。変換の前後にある自動レベル保護を、前段(下げる)と後段(戻す)の"
-                 "ペアでオン/オフします。-7 dBFSを超えたときだけ働くので、通常の発話音量では"
-                 "オンとオフで1サンプルも変わりません。大声やマイクへの接触音でA/Bして"
-                 "ください。オフ=大きな入力がそのまま変換へ入ります。"
-                 "前段だけ・後段だけという危険な状態を作れないよう、2つで1つのスイッチに"
-                 "してあります。"));
+        // Auto Protection had a validation checkbox here (v0.67.0). The feature
+        // itself was removed in v0.69.0: the engine measured level-invariant,
+        // so lowering the level into it and restoring it afterwards protected
+        // against nothing (test/level_probe.cpp).
         // Air Breathiness had a validation checkbox here (v0.67.0). Removed in
         // v0.69.0: it is a finished feature, and the switch only ever did what
         // its own slider at 0 already does -- same samples -- so it added a
