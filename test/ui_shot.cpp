@@ -123,6 +123,78 @@ static void shoot (juce::AudioProcessorEditor& ed, const juce::File& out)
                  ed.getWidth(), ed.getHeight());
 }
 
+// Counts controls whose visible name is `name` (a Label's text or a Button's
+// text) anywhere under `root`.
+static int countNamed (juce::Component* root, const juce::String& name)
+{
+    int n = 0;
+    if (root == nullptr) return 0;
+    walk (root, [&] (juce::Component* c)
+    {
+        if (auto* l = dynamic_cast<juce::Label*> (c))  if (l->getText() == name) ++n;
+        if (auto* b = dynamic_cast<juce::Button*> (c)) if (b->getButtonText() == name) ++n;
+    });
+    return n;
+}
+
+// Opens (or re-fronts) the Engine Config window and returns its content. The
+// adopted settings live ONLY there since v0.69.0, so a check that searched
+// the editor alone would report them missing.
+static juce::Component* engineConfigContent (juce::Component* ed)
+{
+    if (auto* b = findButton (ed, "ENGINE CONFIG")) b->triggerClick();
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
+    for (int i = 0; i < juce::TopLevelWindow::getNumTopLevelWindows(); ++i)
+        if (auto* w = juce::TopLevelWindow::getTopLevelWindow (i))
+            if (w->getName() == "Engine Config")
+                if (auto* dw = dynamic_cast<juce::DocumentWindow*> (w))
+                    return dw->getContentComponent();
+    return nullptr;
+}
+
+// Mojibake: UTF-8 bytes that were read as 8-bit characters. juce::String
+// (const char*) does exactly that to a Japanese literal, so every byte turns
+// into its own Latin-1 character. Detected by putting the characters back as
+// bytes: if everything is below 256, some are above 127, and the bytes form
+// valid multi-byte UTF-8, the text is a mis-decoded UTF-8 string. Genuine
+// Latin-1 text (a lone "e acute", say) is not valid UTF-8 and is not flagged.
+static bool looksLikeMojibake (const juce::String& s)
+{
+    if (s.containsChar ((juce::juce_wchar) 0xFFFD)) return true;   // replacement char
+    juce::MemoryBlock bytes;
+    bool high = false;
+    for (auto p = s.getCharPointer(); ! p.isEmpty(); )
+    {
+        const auto c = p.getAndAdvance();
+        if (c > 0xFF) return false;          // real Unicode: decoded correctly
+        if (c > 0x7F) high = true;
+        const char b = (char) (unsigned char) c;
+        bytes.append (&b, 1);
+    }
+    if (! high) return false;
+    const char zero = 0;
+    bytes.append (&zero, 1);
+    return juce::CharPointer_UTF8::isValidString ((const char*) bytes.getData(), (int) bytes.getSize());
+}
+
+// Every Label, Button and tooltip under `root` that reads as mojibake.
+static void collectMojibake (juce::Component* root, juce::StringArray& out)
+{
+    if (root == nullptr) return;
+    walk (root, [&] (juce::Component* c)
+    {
+        juce::String t;
+        if (auto* l = dynamic_cast<juce::Label*> (c))  t = l->getText();
+        if (auto* b = dynamic_cast<juce::Button*> (c)) t = b->getButtonText();
+        if (t.isNotEmpty() && looksLikeMojibake (t)) out.add (t.substring (0, 40));
+        if (auto* tc = dynamic_cast<juce::TooltipClient*> (c))
+        {
+            const auto tip = tc->getTooltip();
+            if (tip.isNotEmpty() && looksLikeMojibake (tip)) out.add (tip.substring (0, 40));
+        }
+    });
+}
+
 int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -1192,8 +1264,12 @@ int main (int argc, char** argv)
                 if (auto* b = dynamic_cast<juce::Button*> (c))
                     if (b->getButtonText() == "Pulse Smoothing") ++rows;
             });
-            std::printf ("  controls named \"Pulse Smoothing\": %d\n", rows);
-            check (rows >= 1, "a row is bound to it");
+            // v0.69.0: an ADOPTED setting, so it lives in Engine Config and
+            // nowhere else -- one control, one truth.
+            const int inCfg = countNamed (engineConfigContent (ed.get()), "Pulse Smoothing");
+            std::printf ("  \"Pulse Smoothing\": %d on MAIN, %d in Engine Config\n", rows, inCfg);
+            check (rows == 0, "Pulse Smoothing is no longer on the MAIN tab");
+            check (inCfg == 1, "Pulse Smoothing has exactly one checkbox, in Engine Config");
 
             auto run = [&] (bool on)
             {
@@ -1285,8 +1361,10 @@ int main (int argc, char** argv)
                 if (auto* b = dynamic_cast<juce::Button*> (c))
                     if (b->getButtonText() == "Pulse Body") ++rows;
             });
-            std::printf ("  controls named \"Pulse Body\": %d\n", rows);
-            check (rows >= 1, "a row is bound to it on the MAIN tab");
+            // v0.69.0: FIXED at 0.75 and hidden. No control anywhere.
+            const int inCfg = countNamed (engineConfigContent (ed.get()), "Pulse Body");
+            std::printf ("  \"Pulse Body\": %d on MAIN, %d in Engine Config\n", rows, inCfg);
+            check (rows == 0 && inCfg == 0, "Pulse Body has no control anywhere (fixed at 0.75)");
 
             auto run = [&] (float body)
             {
@@ -1343,18 +1421,19 @@ int main (int argc, char** argv)
             for (size_t i = 0; i < std::min (zero.size(), zero2.size()); ++i)
                 if (zero[i] != zero2[i]) ++diff;
             check (diff == 0 && ! zero.empty(), "Pulse Body 0 is repeatable to the sample");
+            // v0.69.0: the value is FIXED at 0.75, so the stored parameter must
+            // no longer reach the engine at all. That is what "fixed" has to
+            // mean -- otherwise a session saved at 0 would keep sounding like 0
+            // with no control left to change it. So param 0 and param 0.75
+            // must now give the SAME samples. (That 0.75 rounds the waveform
+            // out was established in v0.52.0 and is not re-proven here.)
             size_t moved = 0;
             for (size_t i = 0; i < std::min (zero.size(), wide.size()); ++i)
                 if (zero[i] != wide[i]) ++moved;
-            check (moved > zero.size() / 10, "Pulse Body 0.75 actually changes the output");
-            const double a0 = asym (zero), a1 = asym (wide);
-            std::printf ("  peak ratio: body 0 = %.3f, body 0.75 = %.3f\n", a0, a1);
-            // Deliberately loose: the exact numbers belong to THIS generator,
-            // and the real measurement lives on the user's recording (see
-            // HANDOVER v0.52.0). All this has to catch is the lever being
-            // wired backwards or not at all.
-            check (std::abs (a1 - 1.0) < std::abs (a0 - 1.0),
-                   "Pulse Body moves the waveform toward symmetry");
+            std::printf ("  param 0 vs 0.75: %zu differing samples (must be 0), peak ratio %.3f\n",
+                         moved, asym (zero));
+            check (moved == 0 && ! zero.empty(),
+                   "the stored pulsebody value is ignored (fixed at 0.75)");
             auto* pp = proc.apvts.getParameter ("pitch");
             pp->beginChangeGesture(); pp->setValueNotifyingHost (pp->convertTo0to1 (0.0f)); pp->endChangeGesture();
             pb->beginChangeGesture(); pb->setValueNotifyingHost (0.0f); pb->endChangeGesture();
@@ -1385,8 +1464,10 @@ int main (int argc, char** argv)
                 if (auto* b = dynamic_cast<juce::Button*> (c))
                     if (b->getButtonText() == "Onset Hold") ++rows;
             });
-            std::printf ("  controls named \"Onset Hold\": %d\n", rows);
-            check (rows >= 1, "a row is bound to it");
+            const int inCfg = countNamed (engineConfigContent (ed.get()), "Onset Hold");
+            std::printf ("  \"Onset Hold\": %d on MAIN, %d in Engine Config\n", rows, inCfg);
+            check (rows == 0, "Onset Hold is no longer on the MAIN tab");
+            check (inCfg == 1, "Onset Hold has exactly one checkbox, in Engine Config");
 
             auto run = [&] (bool on)
             {
@@ -1682,8 +1763,13 @@ int main (int argc, char** argv)
                 if (auto* b = dynamic_cast<juce::Button*> (c))
                     if (b->getButtonText() == "Onset Repair") ++rows;
             });
-            std::printf ("  rows named \"Onset Repair\" on the MAIN tab: %d\n", rows);
-            check (rows >= 1, "a row is bound to it outside the BETA window");
+            // v0.69.0: adopted, so its only control is the Engine Config
+            // checkbox. It must still be outside the BETA window -- adopted
+            // means standard, not experimental.
+            const int inCfg = countNamed (engineConfigContent (ed.get()), "Onset Repair");
+            std::printf ("  \"Onset Repair\": %d on MAIN, %d in Engine Config\n", rows, inCfg);
+            check (rows == 0, "Onset Repair is no longer on the MAIN tab");
+            check (inCfg == 1, "Onset Repair has exactly one checkbox, in Engine Config (not BETA)");
 
             auto run = [&] (bool on)
             {
@@ -2282,7 +2368,11 @@ int main (int argc, char** argv)
                 return n;
             };
 
-            check (countEngineWindows() == 0, "no Engine Config window before the click");
+            // Since v0.69.0 the earlier sections open this window to find the
+            // adopted checkboxes, so it may already exist here. What matters is
+            // that there is never more than one, which the checks below and
+            // the reopen check assert.
+            check (countEngineWindows() <= 1, "at most one Engine Config window before the click");
 
             cfgBtn->triggerClick();
             juce::MessageManager::getInstance()->runDispatchLoopUntil (200);
@@ -2302,6 +2392,95 @@ int main (int argc, char** argv)
             cfgBtn->triggerClick();
             juce::MessageManager::getInstance()->runDispatchLoopUntil (200);
             check (countEngineWindows() == 1, "reopening reuses the window, does not stack a second");
+
+            // ---- v0.69.0: ADOPTED settings live here, as checkboxes -----
+            if (auto* cfg = engineConfigContent (ed.get()))
+            {
+                std::printf ("\n== Engine Config: adopted settings ==\n");
+                const std::pair<const char*, const char*> adopted[] {
+                    { "Pulse Smoothing", "pulsesmooth"   },
+                    { "Onset Hold",      "onsethold"     },
+                    { "Onset Repair",    "onsetbackfill" },
+                };
+                for (auto& a : adopted)
+                {
+                    auto* rp = proc.apvts.getParameter (a.second);
+                    check (rp != nullptr && rp->getDefaultValue() > 0.5f,
+                           juce::String (a.first) + " defaults to ON");
+                    auto* t = dynamic_cast<juce::ToggleButton*> (findButton (cfg, a.first));
+                    check (t != nullptr, juce::String (a.first) + " has a checkbox in Engine Config");
+                    check (countNamed (ed.get(), a.first) == 0,
+                           juce::String (a.first) + " is NOT also on MAIN (no second control)");
+                    auto* v = proc.apvts.getRawParameterValue (a.second);
+                    if (t == nullptr || v == nullptr) continue;
+                    const float before = v->load();
+                    t->triggerClick();
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
+                    const float after = v->load();
+                    t->triggerClick();
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
+                    std::printf ("  %-16s %.0f -> %.0f -> %.0f\n", a.first, before, after, v->load());
+                    check (std::abs (after - before) > 0.5f,
+                           juce::String (a.first) + " checkbox actually switches the parameter");
+                    check (std::abs (v->load() - before) < 0.5f,
+                           juce::String (a.first) + " checkbox switches back");
+                }
+
+                {   // picture of the window, for a human to look at
+                    auto img = cfg->createComponentSnapshot (cfg->getLocalBounds(), true, 1.0f);
+                    juce::PNGImageFormat png;
+                    juce::FileOutputStream os (outDir.getChildFile ("engine_config.png"));
+                    if (os.openedOk()) { os.setPosition (0); os.truncate(); png.writeImageToStream (img, os); }
+                }
+
+                // Repair Strength: fixed at 0.75 and hidden like Pulse Body
+                check (countNamed (ed.get(), "Onset Repair Strength") == 0
+                    && countNamed (cfg, "Onset Repair Strength") == 0,
+                       "Onset Repair Strength has no control anywhere (fixed at 0.75)");
+            }
+
+            // ---- version tag in the header -----------------------------
+            // Must be the CMake project() version, visible, and inside the
+            // editor -- not a hand-typed string that can fall behind.
+            {
+                const juce::String want = juce::String ("v") + VOXMORPH_VERSION_STRING;
+                juce::Label* found = nullptr;
+                walk (ed.get(), [&] (juce::Component* c)
+                {
+                    if (auto* l = dynamic_cast<juce::Label*> (c))
+                        if (l->getText() == want) found = l;
+                });
+                std::printf ("  version tag: %s  %s\n", want.toRawUTF8(),
+                             found != nullptr ? (found->isShowing() ? "shown" : "hidden") : "MISSING");
+                check (found != nullptr, "the header shows the build's version (" + want + ")");
+                check (found != nullptr && found->isShowing() && found->getWidth() > 0,
+                       "the version tag is actually visible");
+                // one picture of the header strip, for a human to look at
+                auto img = ed->createComponentSnapshot (ed->getLocalBounds().withHeight (72), true, 1.0f);
+                juce::PNGImageFormat png;
+                juce::FileOutputStream os (outDir.getChildFile ("header.png"));
+                if (os.openedOk()) { os.setPosition (0); os.truncate(); png.writeImageToStream (img, os); }
+            }
+
+            // ---- mojibake: nothing on screen may read as mis-decoded UTF-8
+            // The static check (scripts/check_utf8_literals.py) looks at the
+            // source; this looks at what actually ended up in the components,
+            // including text assembled at run time, which no source scan sees.
+            {
+                juce::StringArray bad;
+                collectMojibake (ed.get(), bad);
+                collectMojibake (engineConfigContent (ed.get()), bad);
+                for (auto& b : bad) std::printf ("  MOJIBAKE: %s\n", b.toRawUTF8());
+                std::printf ("  mojibake strings on screen: %d\n", bad.size());
+                check (bad.isEmpty(), "no Label / Button / tooltip reads as mojibake");
+
+                // and the detector itself must be able to fire, or a pass
+                // above would mean nothing
+                const auto planted = juce::String ("\xe6\x96\x87\xe5\xad\x97");  // UTF-8 bytes read as 8-bit
+                check (looksLikeMojibake (planted), "the mojibake detector fires on real mojibake");
+                check (! looksLikeMojibake (juce::String::fromUTF8 ("\xe6\x96\x87\xe5\xad\x97")),
+                       "and does not fire on correctly decoded Japanese");
+            }
 
             // and it is left OPEN on purpose: the editor is destroyed below,
             // and JUCE's leak detector is what checks that it goes with it.

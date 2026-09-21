@@ -3460,7 +3460,7 @@ public:
         juce::String s;
         if (nSet + nLocked > 0)
             s = juce::String (nSet) + juce::String::fromUTF8 (" APPLIED")
-              + (nLocked > 0 ? juce::String (" · ") + juce::String (nLocked)
+              + (nLocked > 0 ? juce::String::fromUTF8 (" · ") + juce::String (nLocked)
                              + juce::String::fromUTF8 (" LOCKED") : juce::String());
         else if (canMatch)
             s = juce::String::fromUTF8 ("READY");
@@ -4518,12 +4518,12 @@ inline const AsmrScene* getAsmrScenes (int& count)
 {
     static const AsmrScene k[] = {
         //  name          jp             x      y   bin   dist  air  room  size width orbit depth
-        { "Off",        "効果なし",    0.0f,  0.0f, false, 100,   0,    0,  50,  100, 0.0f,  60 },
-        { "Close Left", "左耳ささやき", -0.62f, 0.28f, true,  70,  10,   12,  30,  110, 0.0f,  60 },
-        { "Close Right","右耳ささやき",  0.62f, 0.28f, true,  70,  10,   12,  30,  110, 0.0f,  60 },
-        { "Behind",     "背後から",     0.0f, -0.75f, true, 100,  25,   26,  55,  100, 0.0f,  60 },
-        { "Across",     "少し離れて",   0.0f,  0.85f, true, 100,  45,   40,  70,  100, 0.0f,  60 },
-        { "Orbit",      "ぐるぐる",     0.0f,  0.0f, true,  90,  20,   22,  45,  115, 0.12f, 75 },
+        { "Off",        "効果なし",    0.0f,  0.0f, false, 100,   0,    0,  50,  100, 0.0f,  60 },   // utf8-ok: .jp is decoded by fromUTF8 where it is shown
+        { "Close Left", "左耳ささやき", -0.62f, 0.28f, true,  70,  10,   12,  30,  110, 0.0f,  60 },   // utf8-ok: .jp is decoded by fromUTF8 where it is shown
+        { "Close Right","右耳ささやき",  0.62f, 0.28f, true,  70,  10,   12,  30,  110, 0.0f,  60 },   // utf8-ok: .jp is decoded by fromUTF8 where it is shown
+        { "Behind",     "背後から",     0.0f, -0.75f, true, 100,  25,   26,  55,  100, 0.0f,  60 },   // utf8-ok: .jp is decoded by fromUTF8 where it is shown
+        { "Across",     "少し離れて",   0.0f,  0.85f, true, 100,  45,   40,  70,  100, 0.0f,  60 },   // utf8-ok: .jp is decoded by fromUTF8 where it is shown
+        { "Orbit",      "ぐるぐる",     0.0f,  0.0f, true,  90,  20,   22,  45,  115, 0.12f, 75 },   // utf8-ok: .jp is decoded by fromUTF8 where it is shown
     };
     count = (int) (sizeof (k) / sizeof (k[0]));
     return k;
@@ -4802,7 +4802,7 @@ public:
 
         auto initHead = [this] (juce::Label& l, const char* en, const char* jp)
         {
-            l.setText (juce::String (en) + "   " + juce::String::fromUTF8 (jp),
+            l.setText (juce::String::fromUTF8 (en) + "   " + juce::String::fromUTF8 (jp),
                        juce::dontSendNotification);
             l.setFont (juce::Font (juce::FontOptions (13.5f, juce::Font::bold)));
             l.setColour (juce::Label::textColourId, ak::heading);
@@ -5321,12 +5321,12 @@ public:
 
         holdLongRow = std::make_unique<ParamRow> (proc, "onsetholdlong", ParamRow::Kind::toggle,
             "Onset Hold Long",
-            vmTip ("EXPERIMENTAL. Lets Onset Hold (MAIN tab) hold for longer - about 58 ms "
+            vmTip ("EXPERIMENTAL. Lets Onset Hold (Engine Config) hold for longer - about 58 ms "
                    "instead of 35 - and keeps following the pitch while it holds instead of "
                    "freezing it. It only affects dropouts in the MIDDLE of a phrase, not the "
                    "start; measured on a real take it removed two of twenty-two of them over "
                    "110 seconds, so the difference is small. Off = the standard behaviour.",
-                   "MAINタブのOnset Holdの保持時間を約35ms→58msに延ばし、保持中も音程の追従を"
+                   "Engine ConfigのOnset Holdの保持時間を約35ms→58msに延ばし、保持中も音程の追従を"
                    "続けます。効くのは句の「途中」で起きる脱落だけで、句の頭には効きません。"
                    "実声での測定では110秒中22回が20回になる程度なので、差はわずかです。"
                    "オフ=標準の動作。"));
@@ -5473,6 +5473,10 @@ private:
 // It carries NO copy of the validation switches. A second set of controls for
 // the same parameters is how a UI ends up with two truths, so the status text
 // below is READ-ONLY -- it reflects the MAIN tab, it cannot drive it.
+//
+// The ADOPTED section is different: those three settings live ONLY here (their
+// MAIN rows were removed, not duplicated), so their checkboxes are the one and
+// only control for each of them.
 class EngineConfigPanel : public juce::Component,
                           private juce::Timer
 {
@@ -5491,13 +5495,13 @@ public:
         note.setText (juce::String::fromUTF8 (
             "Engine-level settings. Features still being validated keep their switch on the "
             "MAIN tab (ADVANCED > ENGINE VALIDATION) so the same take can be compared with "
-            "and without them; once a decision is made, an adopted feature becomes always-on "
-            "and moves here, and a rejected one becomes always-off and moves to BETA.\n"
+            "and without them. Adopted features live here, on by default, each with its own "
+            "switch; rejected ones move to BETA.\n"
             "\n"
             "エンジン全体の設定です。検証中の機能は同じ素材でA/Bできるよう、"
             "MAINタブの ADVANCED > ENGINE VALIDATION にスイッチを置いています。"
-            "検証後、採用した項目は常時ONにしてこちらへ、"
-            "非採用の項目は常時OFFにしてBETAへ移します。"),
+            "採用した機能はここに既定ONで置き、それぞれ個別にON/OFFできます。"
+            "非採用の機能はBETAへ移します。"),
             juce::dontSendNotification);
         note.setFont (juce::Font (juce::FontOptions (11.5f)));
         note.setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
@@ -5521,17 +5525,79 @@ public:
         whereHint.setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
         addAndMakeVisible (whereHint);
 
-        adopted.setText (juce::String::fromUTF8 ("ADOPTED — ALWAYS ON"),
+        adopted.setText (juce::String::fromUTF8 ("ADOPTED"),
                          juce::dontSendNotification);
         ak::styleSectionHeading (adopted);
         addAndMakeVisible (adopted);
 
         adoptedNote.setText (juce::String::fromUTF8 (
-            "Nothing has been adopted yet. Settings that graduate from validation appear here "
-            "and no longer have a switch.\n"
-            "採用済みの項目はまだありません。検証を終えた設定がここに並び、"
-            "スイッチは無くなります。"),
+            "Standard behaviour, on by default. Turn one off only to compare against, or to "
+            "get the older behaviour back.\n"
+            "標準の動作で、既定はONです。比較したいときや、以前の動作に戻したいときだけ"
+            "オフにしてください。"),
             juce::dontSendNotification);
+
+        // The three adopted settings, bound to their APVTS parameters exactly
+        // like the MAIN tab's rows (same ParamRow, same undo, same host
+        // automation). They are the ONLY controls for these ids -- the MAIN
+        // rows were removed rather than duplicated, so there is one truth.
+        pulseRow = std::make_unique<ParamRow> (proc, "pulsesmooth", ParamRow::Kind::toggle,
+            "Pulse Smoothing",
+            vmTip  ("Removes the low growl that a large upward shift can add. Voices are rarely "
+                 "perfectly regular - most have a slight alternation between one glottal pulse "
+                 "and the next - and when the pitch is raised a lot, that alternation stays "
+                 "behind at the ORIGINAL pitch and is heard as a rumble underneath the new "
+                 "voice. This averages each pulse with the one before it, which cancels the "
+                 "alternating part and leaves the voice's own body untouched. It only does "
+                 "anything above about +4 semitones, so smaller shifts sound exactly as before. "
+                 "Turn it off if you want the raw grain behaviour back.",
+                 "大きく上げたときに乗る低い唸り(ゴロゴロ音)を取り除きます。声は完全に規則的では"
+                 "なく、多くの場合で声門パルスが1つおきにわずかに強弱します。ピッチを大きく上げると"
+                 "その強弱だけが元のピッチの位置に取り残され、新しい声の下に唸りとして聞こえます。"
+                 "各パルスを1つ前のパルスと平均することで、この交互成分だけを打ち消し、声の芯は"
+                 "そのまま残します。おおよそ+4半音より上でしか動作しないので、小さい変換の音は"
+                 "従来と完全に同じです。元のグレイン動作に戻したい場合はオフにしてください。"));
+        addAndMakeVisible (*pulseRow);
+        holdRow = std::make_unique<ParamRow> (proc, "onsethold", ParamRow::Kind::toggle,
+            "Onset Hold",
+            vmTip  ("Stops a thump at the start of phrases. The engine has to decide, many times a "
+                 "second, whether what it is hearing is a pitched voice or not - and the test it "
+                 "uses compares a slice of sound with a slightly delayed copy of itself. During "
+                 "the swell at the start of a phrase the two slices differ in loudness even "
+                 "though the voice is perfectly steady, so the test fails for a few hundredths "
+                 "of a second and the engine treats your voice as unpitched. Unpitched sound is "
+                 "passed through WITHOUT the pitch change, so a burst of your own untransposed "
+                 "voice escapes at the loudest moment of the attack - which is heard as a knock "
+                 "or thump. This keeps the previous pitch through those few frames, but only "
+                 "while the sound still looks like a voice, so consonants like S and SH are "
+                 "unaffected, and the pitch keeps being tracked through the hold so it does not go stale. Leave it on unless you want the old behaviour back.",
+                 "句の頭で鳴る「ボコっ」という打撃音のような音を止めます。エンジンは1秒に何度も"
+                 "「今聞こえているのは音程のある声かどうか」を判定していますが、その判定は音の"
+                 "一部と少しずらした自分自身を比べる方式です。発声の立ち上がりでは音量が急に"
+                 "大きくなるため、声そのものは安定していても比較する2つの音量が食い違い、"
+                 "数十ミリ秒だけ判定に失敗して「音程の無い音」と見なされます。音程の無い音は"
+                 "ピッチ変換をせずにそのまま通すので、立ち上がりのいちばん大きいところで"
+                 "変換前の低い地声が一瞬漏れ、それが打撃音のように聞こえます。この機能は"
+                 "その数フレームだけ直前の音程を保持します。ただし「まだ声に見える」間だけ"
+                 "なので、サ行などの子音には影響しません。保持中も音程の追従は続けるため、古い音程に貼り付いたままにはなりません。従来の動作に戻したいとき以外は"
+                 "オンのままにしてください。"));
+        addAndMakeVisible (*holdRow);
+        repairRow = std::make_unique<ParamRow> (proc, "onsetbackfill", ParamRow::Kind::toggle,
+            "Onset Repair",
+            vmTip  ("Fixes the low growl at the start of phrases. The engine prepares sound slightly "
+                 "ahead of what you hear, so at the moment it works out the pitch of a new "
+                 "phrase, roughly 27 ms of the opening has been prepared but not played - "
+                 "prepared without the pitch change, because nothing knew it yet. This throws "
+                 "that away and redoes it with the pitch in hand, and takes the bottom out of "
+                 "whatever was already gone (a fixed 0.75 low cut). It adds no delay. Turn "
+                 "it off to get the behaviour from before v0.57.0 back exactly.",
+                 "句の頭で鳴る低い唸りを直します。エンジンは聞こえている音より少し先まで音を"
+                 "用意しているので、新しい句の音程を掴んだ時点で、出だしの約27ms分が"
+                 "「まだ再生されていないが、音程が分からないまま用意された」状態で残っています。"
+                 "この機能はそれを捨てて、掴んだ音程で作り直し、間に合わなかった分は低域を"
+                 "削って処理します(強さは0.75で固定)。遅延は増えません。"
+                 "オフにすると v0.57.0 以前の動作に完全に戻ります。"));
+        addAndMakeVisible (*repairRow);
         adoptedNote.setFont (juce::Font (juce::FontOptions (11.5f)));
         adoptedNote.setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
         adoptedNote.setJustificationType (juce::Justification::topLeft);
@@ -5546,7 +5612,7 @@ public:
 
         refresh();
         startTimerHz (5);          // read-only mirror; stops with the panel
-        setSize (600, 400);
+        setSize (600, 540);        // +3 adopted rows, taller note
         sendLookAndFeelChange();
     }
 
@@ -5556,14 +5622,22 @@ public:
     {
         auto r = getLocalBounds().reduced (14, 10);
         heading        .setBounds (r.removeFromTop (24));
-        note           .setBounds (r.removeFromTop (74));
+        // 3 lines of English, a blank line and 3 of Japanese at this width;
+        // at 74 the last Japanese line slid under the next heading.
+        note           .setBounds (r.removeFromTop (104));
         r.removeFromTop (8);
         underValidation.setBounds (r.removeFromTop (22));
         status         .setBounds (r.removeFromTop (62));
         whereHint      .setBounds (r.removeFromTop (18));
         r.removeFromTop (10);
         adopted        .setBounds (r.removeFromTop (22));
-        adoptedNote    .setBounds (r.removeFromTop (46));
+        adoptedNote    .setBounds (r.removeFromTop (40));
+        r.removeFromTop (4);
+        pulseRow ->setBounds (r.removeFromTop (28));
+        r.removeFromTop (4);
+        holdRow  ->setBounds (r.removeFromTop (28));
+        r.removeFromTop (4);
+        repairRow->setBounds (r.removeFromTop (28));
         closeBtn       .setBounds (r.removeFromBottom (30).removeFromRight (100).reduced (0, 2));
     }
 
@@ -5596,6 +5670,7 @@ private:
     juce::LookAndFeel_V4 lnf { juce::LookAndFeel_V4::getLightColourScheme() };
     juce::TooltipWindow  tips { this, 400 };
     juce::Label heading, note, underValidation, status, whereHint, adopted, adoptedNote;
+    std::unique_ptr<ParamRow> pulseRow, holdRow, repairRow;   // adopted settings
     juce::String shown;
     juce::TextButton closeBtn { "Close" };
 };
@@ -5660,6 +5735,20 @@ public:
         subtitle.setFont (ak::font (14.0f));
         subtitle.setColour (juce::Label::textColourId, ak::heading);
         addAndMakeVisible (subtitle);
+
+        // Small version tag beside the subtitle. It comes from CMake's
+        // project() version through VOXMORPH_VERSION_STRING, so it is always
+        // the version that was actually built -- nobody has to remember to
+        // edit a string here when the number changes.
+       #ifndef VOXMORPH_VERSION_STRING
+        #define VOXMORPH_VERSION_STRING "dev"
+       #endif
+        version.setText ("v" VOXMORPH_VERSION_STRING, juce::dontSendNotification);
+        version.setFont (ak::font (11.0f));
+        version.setColour (juce::Label::textColourId, ak::heading.withAlpha (0.55f));
+        version.setJustificationType (juce::Justification::centredLeft);
+        version.setInterceptsMouseClicks (false, false);
+        addAndMakeVisible (version);
 
         msg.setFont (ak::font (11.0f));
         msg.setColour (juce::Label::textColourId, juce::Colour (0xff8a7f83));
@@ -5738,9 +5827,18 @@ public:
         const int logoW = juce::jlimit (110, 178, r.getWidth() / 4);
         auto brand = r;
         brand.removeFromLeft (logoW + 22);
-        subtitle.setBounds (brand.removeFromLeft (juce::jmax (0, brand.getWidth() - 4)));
-        msg.setBounds (subtitle.getBounds());
-        subtitle.setVisible (msg.getText().isEmpty());
+        brand.removeFromRight (4);
+        // The status message still gets the whole strip; the subtitle is
+        // sized to its text so the version tag can sit right after it.
+        msg.setBounds (brand);
+        const int subW = 8 + (int) std::ceil (juce::GlyphArrangement::getStringWidth (
+                                                  subtitle.getFont(), subtitle.getText()));
+        auto sub = brand;
+        subtitle.setBounds (sub.removeFromLeft (juce::jmin (subW, sub.getWidth())));
+        version .setBounds (sub.removeFromLeft (juce::jmin (64, sub.getWidth())));
+        const bool quiet = msg.getText().isEmpty();
+        subtitle.setVisible (quiet);
+        version .setVisible (quiet);
     }
 
     // The white bar itself is painted by the editor, BEFORE the band, so the
@@ -5814,6 +5912,7 @@ private:
     {
         msg.setText (s, juce::dontSendNotification);
         subtitle.setVisible (false);
+        version .setVisible (false);   // the message owns the strip while shown
         msgSec = 5.0f;
     }
 
@@ -5836,12 +5935,14 @@ private:
         {
             msg.setText ({}, juce::dontSendNotification);
             subtitle.setVisible (true);
+            version .setVisible (true);
         }
     }
 
     VoxMorphProcessor& proc;
     bool standalone = false;
     juce::Label subtitle, msg;
+    juce::Label version;             // small "v0.69.0" tag, from CMake
     ak::StatusButton monBtn  { "Monitor", "ui_mark_M_Monitor_png", false };
     ak::StatusButton muteBtn { "Mute",    "ui_mark_M_Mute_png",    true  };
     juce::TextButton plugBtn { "Plugin" };
@@ -6874,88 +6975,11 @@ private:
         // no matter what else asks for a recoloured copy.
         cardAdvanced = &newCard ("ADVANCED", "ui_mark_M_Advanced_png",
                                  ak::headBlue, ak::markBlue);
-        toggle (*cardAdvanced, "pulsesmooth", "Pulse Smoothing",
-            tip ("Removes the low growl that a large upward shift can add. Voices are rarely "
-                 "perfectly regular - most have a slight alternation between one glottal pulse "
-                 "and the next - and when the pitch is raised a lot, that alternation stays "
-                 "behind at the ORIGINAL pitch and is heard as a rumble underneath the new "
-                 "voice. This averages each pulse with the one before it, which cancels the "
-                 "alternating part and leaves the voice's own body untouched. It only does "
-                 "anything above about +4 semitones, so smaller shifts sound exactly as before. "
-                 "Turn it off if you want the raw grain behaviour back.",
-                 "大きく上げたときに乗る低い唸り(ゴロゴロ音)を取り除きます。声は完全に規則的では"
-                 "なく、多くの場合で声門パルスが1つおきにわずかに強弱します。ピッチを大きく上げると"
-                 "その強弱だけが元のピッチの位置に取り残され、新しい声の下に唸りとして聞こえます。"
-                 "各パルスを1つ前のパルスと平均することで、この交互成分だけを打ち消し、声の芯は"
-                 "そのまま残します。おおよそ+4半音より上でしか動作しないので、小さい変換の音は"
-                 "従来と完全に同じです。元のグレイン動作に戻したい場合はオフにしてください。"));
-        toggle (*cardAdvanced, "onsethold", "Onset Hold",
-            tip ("Stops a thump at the start of phrases. The engine has to decide, many times a "
-                 "second, whether what it is hearing is a pitched voice or not - and the test it "
-                 "uses compares a slice of sound with a slightly delayed copy of itself. During "
-                 "the swell at the start of a phrase the two slices differ in loudness even "
-                 "though the voice is perfectly steady, so the test fails for a few hundredths "
-                 "of a second and the engine treats your voice as unpitched. Unpitched sound is "
-                 "passed through WITHOUT the pitch change, so a burst of your own untransposed "
-                 "voice escapes at the loudest moment of the attack - which is heard as a knock "
-                 "or thump. This keeps the previous pitch through those few frames, but only "
-                 "while the sound still looks like a voice, so consonants like S and SH are "
-                 "unaffected, and the pitch keeps being tracked through the hold so it does not go stale. Leave it on unless you want the old behaviour back.",
-                 "句の頭で鳴る「ボコっ」という打撃音のような音を止めます。エンジンは1秒に何度も"
-                 "「今聞こえているのは音程のある声かどうか」を判定していますが、その判定は音の"
-                 "一部と少しずらした自分自身を比べる方式です。発声の立ち上がりでは音量が急に"
-                 "大きくなるため、声そのものは安定していても比較する2つの音量が食い違い、"
-                 "数十ミリ秒だけ判定に失敗して「音程の無い音」と見なされます。音程の無い音は"
-                 "ピッチ変換をせずにそのまま通すので、立ち上がりのいちばん大きいところで"
-                 "変換前の低い地声が一瞬漏れ、それが打撃音のように聞こえます。この機能は"
-                 "その数フレームだけ直前の音程を保持します。ただし「まだ声に見える」間だけ"
-                 "なので、サ行などの子音には影響しません。保持中も音程の追従は続けるため、古い音程に貼り付いたままにはなりません。従来の動作に戻したいとき以外は"
-                 "オンのままにしてください。"));
-        toggle (*cardAdvanced, "onsetbackfill", "Onset Repair",
-            tip ("Fixes the low growl at the start of phrases. The engine prepares sound slightly "
-                 "ahead of what you hear, so at the moment it works out the pitch of a new "
-                 "phrase, roughly 27 ms of the opening has been prepared but not played - "
-                 "prepared without the pitch change, because nothing knew it yet. This throws "
-                 "that away and redoes it with the pitch in hand, and takes the bottom out of "
-                 "whatever was already gone (see Repair Strength below). It adds no delay. Turn "
-                 "it off to get the behaviour from before v0.57.0 back exactly.",
-                 "句の頭で鳴る低い唸りを直します。エンジンは聞こえている音より少し先まで音を"
-                 "用意しているので、新しい句の音程を掴んだ時点で、出だしの約27ms分が"
-                 "「まだ再生されていないが、音程が分からないまま用意された」状態で残っています。"
-                 "この機能はそれを捨てて、掴んだ音程で作り直し、間に合わなかった分は低域を"
-                 "削って処理します(下のRepair Strength)。遅延は増えません。"
-                 "オフにすると v0.57.0 以前の動作に完全に戻ります。"));
-        slider (*cardAdvanced, "prelowcut", "Onset Repair Strength",
-            tip ("How hard to cut the bottom out of the part of the phrase opening that could not "
-                 "be re-rendered - the part already sent on before the pitch was known. 0 leaves "
-                 "it alone and relies on the re-render only; 1 removes about 24 dB below the "
-                 "speaker's own pitch. The default 0.75 is the setting chosen by ear. The airy "
-                 "top of the attack always passes, so consonants keep their bite, and anything "
-                 "that looks like S or SH is left alone. Only active while Onset Repair is on, "
-                 "and only on upward shifts.",
-                 "句の出だしのうち、作り直しが間に合わなかった部分(音程が分かる前に既に送り出して"
-                 "しまった部分)の低域をどれだけ削るか。0=削らず作り直しだけに任せる、"
-                 "1=話者自身の音程より下を約24dB削ります。既定の0.75は試聴で選ばれた値です。"
-                 "立ち上がりの空気感は常に通すので子音の勢いは保たれ、サ行のように見える音には"
-                 "手を付けません。Onset Repairがオンのとき、かつ上げ方向のシフトのときだけ"
-                 "動作します。"));
-        slider (*cardAdvanced, "pulsebody", "Pulse Body",
-            tip ("How much of each glottal pulse survives a large upward shift. To stop a raised "
-                 "voice sounding like two voices at once, the engine cuts a shorter slice out of "
-                 "your voice the further up you go - and past about +7 semitones that slice ends "
-                 "before the pulse has finished closing, so the output waveform is a sharper, "
-                 "more one-sided spike than your own voice ever was. Raising this hands the "
-                 "missing tail back; measured on a real take, 0.75 (the default) puts the "
-                 "waveform's shape exactly where the original recording was. It costs about 2 dB "
-                 "of low end, so higher settings sound brighter and thinner. It does nothing on "
-                 "downward shifts. 0 = the behaviour before v0.52.0.",
-                 "大きく上げたときに、声門パルスをどれだけ残すか。ピッチを上げるほど「二重声」を"
-                 "避けるためにグレインを短く切る必要があり、+7半音あたりから声門が閉じ切る前で"
-                 "パルスが切れます。その結果、出力波形は元の声より鋭く上下非対称なスパイクに"
-                 "なります。この値を上げると切れていた後半が戻ります。実声で測ったところ、"
-                 "既定の0.75で波形の非対称性が原音とほぼ同じになりました。低域が約2dB減るため、"
-                 "上げるほど明るく細い音になります。下げ方向のシフトでは何もしません。"
-                 "0=v0.52.0より前の動作。"));
+        // Pulse Smoothing, Onset Hold and Onset Repair moved to Engine Config
+        // (v0.69.0) as ADOPTED settings -- on by default, each still with its
+        // own checkbox there. Onset Repair Strength and Pulse Body are now
+        // fixed at 0.75 in the processor and no longer shown anywhere; their
+        // ids stay registered so older sessions and automation still load.
         toggle (*cardAdvanced, "lowvoice", "Low Voice Mode",
             tip ("Extends pitch tracking for very low voices and vocal fry. It may retain more of "
                  "the original low-period texture depending on the voice.",

@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.22)
-project(VoxMorph VERSION 0.68.0)
+project(VoxMorph VERSION 0.69.0)
+
+# The one place the version is written. Every target -- plugin, standalone
+# and the developer harnesses, which compile the editor too -- gets it, so the
+# number shown in the app, the installer's version (build.yml reads the
+# project() line) and this line cannot drift apart.
+add_compile_definitions (VOXMORPH_VERSION_STRING="${PROJECT_VERSION}")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,6 +67,20 @@ target_link_libraries(VoxMorph
             juce::juce_recommended_lto_flags
             juce::juce_recommended_warning_flags
 )
+
+# ---- Mojibake guard (always registered when Python is available) ---------
+# juce::String (const char*) does not decode UTF-8, so a Japanese literal
+# handed to it straight shows up as garbage -- and the build succeeds, so
+# nothing notices until someone reads the screen. This fails the test run
+# instead. See scripts/check_utf8_literals.py for exactly what it enforces.
+find_package (Python3 COMPONENTS Interpreter QUIET)
+if (Python3_Interpreter_FOUND)
+    enable_testing()
+    add_test (NAME utf8_literals
+              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_utf8_literals.py
+                      ${CMAKE_CURRENT_SOURCE_DIR}/src
+              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
 
 # ---- Voice Quality regression (bounded; no audio device) ----------------
 option(VOXMORPH_VQ_TEST "Build Voice Quality processor regression" OFF)
