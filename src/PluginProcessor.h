@@ -515,6 +515,13 @@ private:
     std::atomic<float>* pRobotHz   = nullptr;
     // ENGINE VALIDATION switches (v0.67.0). See createLayout for why all
     // three default to ON and why Protection/Restore share one switch.
+    // Adopted engine settings whose strength is no longer user-adjustable
+    // (v0.69.0). Both were already the defaults and the settings chosen by
+    // ear. The parameters stay registered for session compatibility; the
+    // processor uses these instead of their stored values.
+    static constexpr float kFixedPulseBody      = 0.75f;
+    static constexpr float kFixedRepairStrength = 0.75f;
+
     std::atomic<float>* pEngProt   = nullptr;
     std::atomic<float>* pEngBreath = nullptr;
     std::atomic<float>* pEngEndBr  = nullptr;

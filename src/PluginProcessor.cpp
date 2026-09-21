@@ -587,12 +587,12 @@ juce::String VoxMorphProcessor::addFx (bool post, const juce::File& vst3)
     for (auto* fmt : fxFormats.getFormats())
         fmt->findAllTypesForFile (types, vst3.getFullPathName());
     if (types.isEmpty())
-        return "VST3として認識できませんでした";
+        return juce::String::fromUTF8 ("VST3として認識できませんでした");
 
     juce::String err;
     auto inst = fxFormats.createPluginInstance (*types[0], fxSr, fxBlk, err);
     if (inst == nullptr)
-        return err.isNotEmpty() ? err : juce::String ("読み込みに失敗しました");
+        return err.isNotEmpty() ? err : juce::String::fromUTF8 ("読み込みに失敗しました");
 
     inst->setPlayConfigDetails (2, 2, fxSr, fxBlk);
     inst->prepareToPlay (fxSr, fxBlk);
@@ -807,7 +807,14 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.robotize      = pRobot->load() > 0.5f;
     p.lowVoice      = pLowVoice->load() > 0.5f;
     p.grainAvg      = pPulseSmooth->load() > 0.5f;
-    p.pulseBody     = pPulseBody->load();
+    // Pulse Body is FIXED at 0.75 (v0.69.0). It was measured to put the
+    // output waveform's asymmetry where the original recording's was, and was
+    // already the default; it is no longer shown or honoured from the
+    // parameter. The "pulsebody" id stays registered so older sessions and
+    // automation still load -- their stored value is simply ignored, which is
+    // what "fixed" has to mean, or a session saved at 0.3 would keep sounding
+    // like 0.3 with no control left to change it.
+    p.pulseBody     = kFixedPulseBody;
     // v0.56.1: back to the v0.54.0 setting -- 3 frames, period frozen.
     // v0.55.0's 5-frame tracked hold went in before the user had heard it,
     // and the factorial in v0.56.0 then showed that no hold setting moves the
@@ -826,7 +833,11 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     // to leave a filter running.
     const bool repairOn = pOnsetBackfill->load() > 0.5f;
     p.onsetBackfill    = repairOn;
-    p.preLockLowCut    = repairOn ? pPreLowCut->load() : 0.0f;
+    // Repair Strength is FIXED at 0.75 for the same reason and in the same
+    // way as Pulse Body above. Onset Repair itself stays switchable (Engine
+    // Config): OFF still takes BOTH mechanisms out, so the pre-v0.57.0 signal
+    // path is still reachable exactly.
+    p.preLockLowCut    = repairOn ? kFixedRepairStrength : 0.0f;
     // One switch for the whole ending-side change, state machine included.
     // A strength of 0 is NOT enough to mean "off": the state machine alone
     // moves the onset cut off the endings, which is audible, so OFF has to
