@@ -1459,15 +1459,14 @@ int main()
         if (! ok) ++naFail;
     }
 
-    // (b3z) The ENGINE VALIDATION switches (MAIN tab, v0.67.0) turn these two
-    // stages off by feeding the engine an amount of 0 instead of the slider
-    // value -- the slider itself is left alone so it comes back on re-enable.
-    // That only works if 0 is a REAL bypass and not a very small amount, so
-    // that is what is checked here: amount 0 must be sample-identical to a
-    // run that never mentions the control, on material that would actually
-    // engage the stage. Checked with Natural Air both off and on, because
-    // with Air on the air path is running anyway and only the breathiness
-    // emphasis has to disappear.
+    // (b3z) A slider at 0 must be a REAL bypass of Air Breathiness and Ending
+    // Breath, not a very small amount: "slider at 0 = off" is how the user
+    // turns either one off (their v0.67.0 validation switches were removed in
+    // v0.69.0 precisely because the slider already does this). So amount 0
+    // must be sample-identical to a run that never mentions the control, on
+    // material that would actually engage the stage. Checked with Natural
+    // Air both off and on, because with Air on the air path is running anyway
+    // and only the breathiness emphasis has to disappear.
     {
         const auto breathy = makeBreathy (120.0, 2.2);
         const auto phrase  = makeBreathyRelease (120.0);

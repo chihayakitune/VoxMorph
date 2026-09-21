@@ -2305,21 +2305,6 @@ int main (int argc, char** argv)
     {
         std::printf ("\n== ENGINE VALIDATION ==\n");
 
-        for (auto* id : { "engendbr" })
-        {
-            auto* rp = proc.apvts.getParameter (id);
-            check (rp != nullptr, juce::String (id) + " parameter exists");
-            if (rp == nullptr) continue;
-            // All three must default to ON: that is what makes a session or
-            // preset saved before they existed come up with the v0.66.0
-            // behaviour rather than silently switching features off.
-            check (rp->getDefaultValue() > 0.5f,
-                   juce::String (id) + " defaults to ON");
-            std::printf ("  %-10s default=%.0f  name=%s\n", id,
-                         rp->getDefaultValue(),
-                         rp->getName (40).toRawUTF8());
-        }
-
         // v0.69.0: Air Breathiness is a finished feature. Its validation
         // checkbox is gone -- the AIR slider is the only control -- and a
         // session that stored engbreath OFF must not leave it silently off.
@@ -2328,9 +2313,10 @@ int main (int argc, char** argv)
             walk (ed.get(), [&] (juce::Component* c)
             {
                 if (auto* t = dynamic_cast<juce::ToggleButton*> (c))
-                    if (t->getButtonText() == "Air Breathiness") toggle = true;
+                    if (t->getButtonText() == "Air Breathiness"
+                     || t->getButtonText() == "Ending Breath") toggle = true;
             });
-            check (! toggle, "Air Breathiness has no validation checkbox any more");
+            check (! toggle, "Air Breathiness and Ending Breath have no validation checkbox");
             check (countNamed (ed.get(), "Auto Protection") == 0,
                    "Auto Protection is gone from the UI (feature removed)");
 
@@ -2344,6 +2330,7 @@ int main (int argc, char** argv)
                     { q->beginChangeGesture(); q->setValueNotifyingHost (q->convertTo0to1 (plain)); q->endChangeGesture(); }
                 };
                 setv ("engbreath", sw);  setv ("breath2", 1.0f);
+                setv ("engendbr",  sw);  setv ("airend",  1.0f);
                 setv ("air", 0.6f);      setv ("pitch", 5.0f);
                 proc.prepareToPlay (48000.0, 512);
                 juce::AudioBuffer<float> b (2, 512);  juce::MidiBuffer m;
@@ -2363,6 +2350,7 @@ int main (int argc, char** argv)
                     out.insert (out.end(), b.getReadPointer (0), b.getReadPointer (0) + 512);
                 }
                 setv ("engbreath", 1.0f);  setv ("breath2", 0.0f);
+                setv ("engendbr",  1.0f);  setv ("airend",  0.0f);
                 setv ("air", 0.0f);        setv ("pitch", 0.0f);
                 return out;
             };
@@ -2384,42 +2372,16 @@ int main (int argc, char** argv)
             size_t diff = 0;
             for (size_t i = 0; i < std::min (offOut.size(), onOut.size()); ++i)
                 if (offOut[i] != onOut[i]) ++diff;
-            std::printf ("  stored engbreath OFF vs ON: %zu differing samples (must be 0)\n", diff);
+            std::printf ("  stored engbreath+engendbr OFF vs ON: %zu differing samples (must be 0)\n", diff);
             check (diff == 0 && ! offOut.empty(),
-                   "a stored engbreath OFF is ignored (Air Breathiness follows its slider)");
+                   "stored OFFs are ignored (both breath features follow their sliders)");
         }
 
-        // A control is actually bound to each of them, and the binding really
-        // drives the parameter. An APVTS entry with no control would still
-        // save, automate and reset perfectly while being unreachable, and a
-        // control with a broken attachment looks identical on a screenshot.
-        // ParamRow puts the display name on the toggle's button text.
-        const std::pair<const char*, const char*> pairs[] {
-            { "Ending Breath",   "engendbr"  },
-        };
-        for (auto& pr : pairs)
-        {
-            auto* b = findButton (ed.get(), pr.first);
-            auto* t = dynamic_cast<juce::ToggleButton*> (b);
-            check (t != nullptr, juce::String (pr.first) + " toggle exists on the MAIN tab");
-            auto* v = proc.apvts.getRawParameterValue (pr.second);
-            check (v != nullptr, juce::String (pr.second) + " raw value reachable");
-            if (t == nullptr || v == nullptr) continue;
-
-            const float before = v->load();
-            t->triggerClick();
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
-            const float after = v->load();
-            check (std::abs (after - before) > 0.5f,
-                   juce::String (pr.first) + " toggle actually drives " + pr.second);
-
-            t->triggerClick();      // put it back the way we found it
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
-            check (std::abs (v->load() - before) < 0.5f,
-                   juce::String (pr.first) + " toggle returns to its previous state");
-            std::printf ("  %-16s -> %-9s  %.0f -> %.0f -> %.0f\n",
-                         pr.first, pr.second, before, after, v->load());
-        }
+        // (The toggle-binding loop that lived here checked each ENGINE
+        // VALIDATION switch; none remain in v0.69.0. The adopted checkboxes
+        // in Engine Config are bound and exercised further down.)
+        check (countNamed (ed.get(), "ENGINE VALIDATION") == 0,
+               "the empty ENGINE VALIDATION group is not shown");
 
         auto* cfgBtn = findButton (ed.get(), "ENGINE CONFIG");
         check (cfgBtn != nullptr, "ENGINE CONFIG button exists on the MAIN tab");
