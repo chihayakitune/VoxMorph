@@ -325,10 +325,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     // Either way an older session or preset comes up with the features on,
     // which is the v0.66.0 behaviour it was saved under.
     //
-    // v0.69.0: "engprot" (Auto Protection) and "engbreath" (Air Breathiness)
-    // no longer do anything -- Auto Protection was removed, Air Breathiness
-    // follows its slider -- but both ids stay registered here, in order, so
-    // older sessions still load and no automation lane moves.
+    // v0.69.0: all three ids are now INERT -- Auto Protection was removed, and
+    // Air Breathiness / Ending Breath follow their sliders -- but they stay
+    // registered here, in order, so older sessions still load and no
+    // automation lane moves.
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "engprot", 1 }, "Auto Protection + Restore", true));
     layout.add (std::make_unique<juce::AudioParameterBool> (
@@ -396,8 +396,6 @@ VoxMorphProcessor::VoxMorphProcessor()
     pAir     = apvts.getRawParameterValue ("air");
     pAirShine = apvts.getRawParameterValue ("airshine");
     pAirEnd   = apvts.getRawParameterValue ("airend");
-    pEngBreath = apvts.getRawParameterValue ("engbreath");
-    pEngEndBr  = apvts.getRawParameterValue ("engendbr");
     pVecOn     = apvts.getRawParameterValue ("vecenabled");
     pVecAmt    = apvts.getRawParameterValue ("vecamount");
     // (deprecated "airband"/"air2"/"air2low" are intentionally not read)
@@ -759,19 +757,14 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     p.breath        = 0.0f;                  // generated-noise Beta retired from the plugin path
     p.airPreserve   = pAir->load();          // Natural Air (standard path)
     p.airShineDb    = pAirShine->load();     // Air Shine
-    // ENGINE VALIDATION: the switches gate the AMOUNT handed to the engine,
-    // they never touch the APVTS value. Turning one off feeds the engine 0,
-    // which it already treats as a complete bypass of that stage (see the
-    // "every Air control at 0" comment in PsolaEngine.h) -- so OFF is the
-    // same samples as having the knob at 0, and turning it back on restores
-    // whatever the slider was left at.
-    // Air Breathiness follows its slider and nothing else (v0.69.0). The
-    // "engbreath" validation switch was removed from the UI; its id stays
-    // registered so older sessions load, but a stored OFF is IGNORED --
-    // otherwise a session saved with it off would stay silently off with
-    // no control left to turn it back on.
+    // Air Breathiness and Ending Breath follow their sliders and nothing else
+    // (v0.69.0). Their "engbreath" / "engendbr" validation switches were
+    // removed from the UI; the ids stay registered so older sessions load,
+    // but a stored OFF is IGNORED -- otherwise a session saved with one off
+    // would stay silently off with no control left to turn it back on. A
+    // slider at 0 is still an exact bypass of its stage.
     p.airBreath     = pBreath2->load();
-    p.airEndBreath  = pEngEndBr ->load() > 0.5f ? pAirEnd ->load() : 0.0f;
+    p.airEndBreath  = pAirEnd ->load();
     p.gciSync       = pGci->load() > 0.5f;
     // The toggles gate the guards here rather than in the engine: it already
     // reads "start = 0" and "floor = 0" as off, so switching them off is the

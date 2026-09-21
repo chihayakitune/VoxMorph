@@ -5490,15 +5490,13 @@ public:
         addAndMakeVisible (heading);
 
         note.setText (juce::String::fromUTF8 (
-            "Engine-level settings. Features still being validated keep their switch on the "
-            "MAIN tab (ADVANCED > ENGINE VALIDATION) so the same take can be compared with "
-            "and without them. Adopted features live here, on by default, each with its own "
-            "switch; rejected ones move to BETA.\n"
+            "Engine-level settings. A new feature being validated gets a switch on the MAIN "
+            "tab so the same take can be compared with and without it. Adopted features live "
+            "here, on by default, each with its own switch; rejected ones move to BETA.\n"
             "\n"
-            "エンジン全体の設定です。検証中の機能は同じ素材でA/Bできるよう、"
-            "MAINタブの ADVANCED > ENGINE VALIDATION にスイッチを置いています。"
-            "採用した機能はここに既定ONで置き、それぞれ個別にON/OFFできます。"
-            "非採用の機能はBETAへ移します。"),
+            "エンジン全体の設定です。検証中の新機能は、同じ素材でA/Bできるよう"
+            "MAINタブにスイッチを置きます。採用した機能はここに既定ONで置き、"
+            "それぞれ個別にON/OFFできます。非採用の機能はBETAへ移します。"),
             juce::dontSendNotification);
         note.setFont (juce::Font (juce::FontOptions (11.5f)));
         note.setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
@@ -5516,7 +5514,7 @@ public:
         addAndMakeVisible (status);
 
         whereHint.setText (juce::String::fromUTF8 (
-            "Switched on the MAIN tab — ADVANCED > ENGINE VALIDATION."),
+            "Nothing is under validation at the moment. / 現在、検証中の機能はありません。"),
             juce::dontSendNotification);
         whereHint.setFont (juce::Font (juce::FontOptions (11.0f)));
         whereHint.setColour (juce::Label::textColourId, juce::Colour (0xff8f9ab5));
@@ -5609,7 +5607,18 @@ public:
 
         refresh();
         startTimerHz (5);          // read-only mirror; stops with the panel
-        setSize (600, 540);        // +3 adopted rows, taller note
+        // Window height from the same measurements resized() uses, so the
+        // window fits its content instead of carrying a fixed guess.
+        {
+            const int w = 600 - 28;                       // reduced (14, 10)
+            const int rows = 3 * (4 + 28);                // the adopted checkboxes
+            const int h = 10 + 24 + heightFor (note, w) + 8
+                        + 22 + (status.getText().isEmpty() ? 0 : heightFor (status, w))
+                        + heightFor (whereHint, w) + 10
+                        + 22 + heightFor (adoptedNote, w) + rows
+                        + 20 + 30 + 10;                   // gap, Close, bottom margin
+            setSize (600, h);
+        }
         sendLookAndFeelChange();
     }
 
@@ -5619,16 +5628,21 @@ public:
     {
         auto r = getLocalBounds().reduced (14, 10);
         heading        .setBounds (r.removeFromTop (24));
-        // 3 lines of English, a blank line and 3 of Japanese at this width;
-        // at 74 the last Japanese line slid under the next heading.
-        note           .setBounds (r.removeFromTop (104));
+        // Sized from the TEXT, not a fixed number. A fixed height was wrong
+        // twice in a row: too short, and the last Japanese line slid under the
+        // next heading (a Label squeezes whatever does not fit); then too tall
+        // once the note was shortened, leaving a hole.
+        note           .setBounds (r.removeFromTop (heightFor (note, r.getWidth())));
         r.removeFromTop (8);
         underValidation.setBounds (r.removeFromTop (22));
-        status         .setBounds (r.removeFromTop (22));
-        whereHint      .setBounds (r.removeFromTop (18));
+        // Empty while nothing is under validation: take no room, so the
+        // "nothing at the moment" line sits right under its heading.
+        status         .setBounds (r.removeFromTop (status.getText().isEmpty()
+                                                        ? 0 : heightFor (status, r.getWidth())));
+        whereHint      .setBounds (r.removeFromTop (heightFor (whereHint, r.getWidth())));
         r.removeFromTop (10);
         adopted        .setBounds (r.removeFromTop (22));
-        adoptedNote    .setBounds (r.removeFromTop (40));
+        adoptedNote    .setBounds (r.removeFromTop (heightFor (adoptedNote, r.getWidth())));
         r.removeFromTop (4);
         pulseRow ->setBounds (r.removeFromTop (28));
         r.removeFromTop (4);
@@ -5641,6 +5655,19 @@ public:
     void paint (juce::Graphics& g) override { g.fillAll (juce::Colour (0xfffafbff)); }
 
 private:
+    // Height a Label needs to show ALL of its text, word-wrapped, at `width`.
+    // Measured with the Label's own font and border, so it tracks both.
+    static int heightFor (const juce::Label& l, int width)
+    {
+        const auto border = l.getBorderSize();
+        juce::AttributedString as;
+        as.append (l.getText(), l.getFont());
+        as.setWordWrap (juce::AttributedString::byWord);
+        juce::TextLayout tl;
+        tl.createLayout (as, (float) juce::jmax (1, width - border.getLeftAndRight()));
+        return (int) std::ceil (tl.getHeight()) + border.getTopAndBottom() + 2;
+    }
+
     void timerCallback() override { refresh(); }
 
     void refresh()
@@ -5652,8 +5679,10 @@ private:
         };
         auto mark = [] (bool b) { return b ? juce::String ("ON ") : juce::String ("OFF"); };
 
-        const juce::String txt =
-              mark (on ("engendbr"))  + "   Ending Breath";
+        // No feature is under validation right now, so there is nothing to
+        // mirror. When one is added, list it here the way the old entries were.
+        juce::ignoreUnused (on, mark);
+        const juce::String txt;
         if (txt != shown)
         {
             shown = txt;
@@ -7038,38 +7067,18 @@ private:
             updateVecReadout();
         }
 
-        // ---- ENGINE VALIDATION (v0.67.0) ----------------------------
-        // The three features v0.66.0 added, each with a switch, so the same
-        // take can be heard with and without it. They sit on MAIN rather than
-        // in a window on purpose: an A/B you have to open a dialog for is an
-        // A/B nobody does. Every one defaults to ON = the v0.66.0 behaviour.
-        //
-        // These switches are NOT duplicated in the Engine Config window --
-        // that window mirrors them read-only. Two sets of controls for one
-        // parameter is how a UI grows two truths.
-        groupHeading (*cardAdvanced, "ENGINE VALIDATION");
-        // Auto Protection had a validation checkbox here (v0.67.0). The feature
-        // itself was removed in v0.69.0: the engine measured level-invariant,
-        // so lowering the level into it and restoring it afterwards protected
-        // against nothing (test/level_probe.cpp).
-        // Air Breathiness had a validation checkbox here (v0.67.0). Removed in
-        // v0.69.0: it is a finished feature, and the switch only ever did what
-        // its own slider at 0 already does -- same samples -- so it added a
-        // second control and nothing else. The AIR slider is its only control.
-        toggle (*cardAdvanced, "engendbr", "Ending Breath",
-            tip ("VALIDATION. For the phrase-ending "
-                 "breath. The amount slider keeps its value; off feeds the engine 0 and the "
-                 "stage is skipped, so the phrase-envelope tracking stops running too.",
-                 "検証用。語尾の息成分の段をオン/オフします。"
-                 "量スライダーの値は保持されます。オフはエンジンへ0を渡してその段を"
-                 "スキップし、語尾包絡の追従処理も止まります。"));
+        // ENGINE VALIDATION (v0.67.0) held A/B switches for the three features
+        // v0.66.0 added. By v0.69.0 none are left: Auto Protection was removed
+        // (measured to protect against nothing), and Air Breathiness and Ending
+        // Breath are finished features whose switch only ever did what their
+        // own slider at 0 already does. The group comes back when a new feature
+        // needs an A/B on this tab.
         button (*cardAdvanced, "Engine", "ENGINE CONFIG",
-            tip ("Opens the Engine Config window: what the validation switches above are for, "
-                 "and where adopted settings will live once they stop being switchable. The "
-                 "switches themselves stay on this tab while validation is running.",
-                 "Engine Configウィンドウを開きます。上の検証スイッチの位置づけと、"
-                 "採用が決まった設定の置き場所を説明しています。検証中はスイッチ自体は"
-                 "このタブに置いたままです。"),
+            tip ("Opens the Engine Config window: the adopted engine settings (Pulse "
+                 "Smoothing, Onset Hold, Onset Repair), each with its own on/off switch.",
+                 "Engine Configウィンドウを開きます。採用済みのエンジン設定"
+                 "(Pulse Smoothing、Onset Hold、Onset Repair)を、それぞれ個別に"
+                 "ON/OFFできます。"),
             [this]
             {
                 if (engineWin == nullptr) engineWin = std::make_unique<EngineConfigWindow> (proc);

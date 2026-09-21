@@ -502,8 +502,6 @@ private:
     int    fxBlk = 512;
     bool   fxLoading = false;   // suppress saves while restoring at startup
     std::atomic<float>* pRobotHz   = nullptr;
-    // ENGINE VALIDATION switches (v0.67.0). See createLayout for why all
-    // three default to ON and why Protection/Restore share one switch.
     // Adopted engine settings whose strength is no longer user-adjustable
     // (v0.69.0). Both were already the defaults and the settings chosen by
     // ear. The parameters stay registered for session compatibility; the
@@ -511,8 +509,6 @@ private:
     static constexpr float kFixedPulseBody      = 0.75f;
     static constexpr float kFixedRepairStrength = 0.75f;
 
-    std::atomic<float>* pEngBreath = nullptr;
-    std::atomic<float>* pEngEndBr  = nullptr;
     std::atomic<float>* pVecOn     = nullptr;   // Adaptive Voice Dynamics
     std::atomic<float>* pVecAmt    = nullptr;
     std::atomic<float>* pMix       = nullptr;
