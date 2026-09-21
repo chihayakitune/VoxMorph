@@ -2305,7 +2305,7 @@ int main (int argc, char** argv)
     {
         std::printf ("\n== ENGINE VALIDATION ==\n");
 
-        for (auto* id : { "engprot", "engendbr" })
+        for (auto* id : { "engendbr" })
         {
             auto* rp = proc.apvts.getParameter (id);
             check (rp != nullptr, juce::String (id) + " parameter exists");
@@ -2331,6 +2331,8 @@ int main (int argc, char** argv)
                     if (t->getButtonText() == "Air Breathiness") toggle = true;
             });
             check (! toggle, "Air Breathiness has no validation checkbox any more");
+            check (countNamed (ed.get(), "Auto Protection") == 0,
+                   "Auto Protection is gone from the UI (feature removed)");
 
             // Stored OFF must be ignored: render the same breathy material with
             // the old switch OFF and ON (slider at full) -- same samples.
@@ -2393,7 +2395,6 @@ int main (int argc, char** argv)
         // control with a broken attachment looks identical on a screenshot.
         // ParamRow puts the display name on the toggle's button text.
         const std::pair<const char*, const char*> pairs[] {
-            { "Auto Protection", "engprot"   },
             { "Ending Breath",   "engendbr"  },
         };
         for (auto& pr : pairs)

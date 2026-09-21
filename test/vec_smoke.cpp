@@ -16,7 +16,6 @@
 #include "PsolaEngine.h"
 #include "VocalEffortEstimator.h"
 #include "AdaptiveVoiceDynamics.h"
-#include "ProtectionGain.h"
 
 #include <cstdio>
 #include <limits>
@@ -188,87 +187,35 @@ int main()
                "baseline warms up on speech peaking at -7.5 dBFS (Protection's doorstep)");
     }
 
-    // ---- 4b. Protection actually reducing -> the baseline must NOT learn ---
-    // The other half of the gate, and the half the peak approximations kept
-    // getting wrong. Driven loud enough that ProtectionGain -- the real one,
-    // run here on the same samples -- reports a reduction, the estimator has
-    // to refuse to warm up.
+    // ---- 4b. the only level gate left is clipping ---------------------------
+    // Auto Protection was removed (v0.69.0), and with it the estimator's
+    // mirror of its detector. So a loud but UNCLIPPED voice is now ordinary
+    // material and must be learned from, while a clipping one must not: its
+    // spectrum and crest are the clipper's, not the speaker's.
     {
-        VocalEffortEstimator est;  est.prepare (fs);
-        ProtectionGain pg;         pg.prepare (fs, 512);
-
-        auto v = voice (fs, (int) (fs * 6.0), 1.0f, 120.0f);
-        float pk = 0.0f;
-        for (float x : v) pk = std::max (pk, std::abs (x));
-        const float want = std::pow (10.0f, -1.0f / 20.0f);      // -1 dBFS: well inside
-        for (auto& x : v) x *= want / std::max (pk, 1.0e-9f);
-
-        // what ProtectionGain itself does with this material
-        auto copy = v;
-        float worstGr = 0.0f;
-        for (int off = 0; off < (int) copy.size(); off += 512)
+        auto scaled = [&] (float peakLin)
         {
-            const int c = std::min (512, (int) copy.size() - off);
-            float* ch[1] = { copy.data() + off };
-            pg.processPre (ch, 1, c);
-            worstGr = std::min (worstGr, pg.currentGainReductionDb());
-        }
+            auto v = voice (fs, (int) (fs * 4.0), 1.0f, 120.0f);
+            float pk = 0.0f;
+            for (float x : v) pk = std::max (pk, std::abs (x));
+            for (auto& x : v) x *= peakLin / std::max (pk, 1.0e-9f);
+            return v;
+        };
+        auto loud = scaled (std::pow (10.0f, -1.0f / 20.0f));         // -1 dBFS
+        VocalEffortEstimator a;  a.prepare (fs);
+        const float* la[1] = { loud.data() };
+        a.process (la, 1, (int) loud.size(), [] (const VocalEffortEstimator::Output&) {});
+        std::printf ("   -1 dBFS unclipped: warm %.2f\n", a.current().warm);
+        check (a.current().warm >= 1.0f,
+               "a loud but unclipped voice is learned from (no Protection gate any more)");
 
-        const float* ch[1] = { v.data() };
-        bool sawActive = false;
-        est.process (ch, 1, (int) v.size(), [&] (const VocalEffortEstimator::Output&)
-        {
-            sawActive = sawActive || est.protectionActive();
-        });
-        std::printf ("   loud input: ProtectionGain reduction %.2f dB, estimator warm %.2f\n",
-                     worstGr, est.current().warm);
-        check (worstGr < -0.5f, "the reference ProtectionGain really is reducing on this input");
-        check (sawActive, "the estimator's mirrored detector agrees Protection is active");
-        check (est.current().warm < 1.0f,
-               "baseline does NOT warm up while Protection is actually reducing");
-
-        // ...and with Protection bypassed the same input is allowed to learn
-        VocalEffortEstimator est2;  est2.prepare (fs);
-        est2.setProtectionBypassed (true);
-        est2.process (ch, 1, (int) v.size(), [] (const VocalEffortEstimator::Output&) {});
-        std::printf ("   same input, Protection bypassed: warm %.2f\n", est2.current().warm);
-        check (est2.current().warm >= 1.0f,
-               "Protection bypassed is not a reason to hold the baseline back");
-    }
-
-    // ---- 4c. the Protection hold must not outlive a reset or a bypass ------
-    // Both are "the tail from a moment that no longer applies". A 50 ms hold
-    // left over from before a full reset, or from before Protection was
-    // switched off, would silently keep goodFrame shut.
-    {
-        auto loud = voice (fs, (int) (fs * 1.0), 1.0f, 120.0f);
-        float pk = 0.0f;
-        for (float x : loud) pk = std::max (pk, std::abs (x));
-        const float want = std::pow (10.0f, -1.0f / 20.0f);
-        for (auto& x : loud) x *= want / std::max (pk, 1.0e-9f);
-        const float* lc[1] = { loud.data() };
-        auto quiet = voice (fs, (int) (fs * 3.0), 0.25f, 120.0f);
-        const float* qc[1] = { quiet.data() };
-
-        // bypass while the hold is still running: quiet speech must learn
-        VocalEffortEstimator est;  est.prepare (fs);
-        est.process (lc, 1, (int) loud.size(), [] (const VocalEffortEstimator::Output&) {});
-        check (est.protectionActive(), "loud input leaves Protection active (precondition)");
-        est.setProtectionBypassed (true);
-        est.process (qc, 1, (int) quiet.size(), [] (const VocalEffortEstimator::Output&) {});
-        std::printf ("   bypass right after a loud passage: warm %.2f\n", est.current().warm);
-        check (est.current().warm >= 1.0f,
-               "bypass clears the Protection hold (no stale tail blocking goodFrame)");
-
-        // full reset while the hold is running: same requirement
-        VocalEffortEstimator est2;  est2.prepare (fs);
-        est2.process (lc, 1, (int) loud.size(), [] (const VocalEffortEstimator::Output&) {});
-        est2.resetAll();
-        check (! est2.protectionActive(), "resetAll clears the Protection verdict");
-        est2.setProtectionBypassed (true);
-        est2.process (qc, 1, (int) quiet.size(), [] (const VocalEffortEstimator::Output&) {});
-        check (est2.current().warm >= 1.0f,
-               "resetAll clears the Protection hold as well");
+        auto clipped = scaled (3.0f);
+        for (auto& x : clipped) x = std::clamp (x, -1.0f, 1.0f);      // hard clip
+        VocalEffortEstimator b;  b.prepare (fs);
+        const float* lb[1] = { clipped.data() };
+        b.process (lb, 1, (int) clipped.size(), [] (const VocalEffortEstimator::Output&) {});
+        std::printf ("   clipping input: warm %.2f\n", b.current().warm);
+        check (b.current().warm < 1.0f, "a clipping voice is NOT learned from");
     }
 
     // ---- 5. full reset sends it back to warming up -------------------------

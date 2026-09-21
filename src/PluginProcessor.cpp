@@ -325,10 +325,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxMorphProcessor::createLay
     // Either way an older session or preset comes up with the features on,
     // which is the v0.66.0 behaviour it was saved under.
     //
-    // Protection and Restore share ONE switch on purpose. Lowering the level
-    // into the engine without putting it back, or putting back a level that
-    // was never taken off, are both wrong on their own; only the pair is a
-    // meaningful thing to compare against.
+    // v0.69.0: "engprot" (Auto Protection) and "engbreath" (Air Breathiness)
+    // no longer do anything -- Auto Protection was removed, Air Breathiness
+    // follows its slider -- but both ids stay registered here, in order, so
+    // older sessions still load and no automation lane moves.
     layout.add (std::make_unique<juce::AudioParameterBool> (
                 juce::ParameterID { "engprot", 1 }, "Auto Protection + Restore", true));
     layout.add (std::make_unique<juce::AudioParameterBool> (
@@ -396,7 +396,6 @@ VoxMorphProcessor::VoxMorphProcessor()
     pAir     = apvts.getRawParameterValue ("air");
     pAirShine = apvts.getRawParameterValue ("airshine");
     pAirEnd   = apvts.getRawParameterValue ("airend");
-    pEngProt   = apvts.getRawParameterValue ("engprot");
     pEngBreath = apvts.getRawParameterValue ("engbreath");
     pEngEndBr  = apvts.getRawParameterValue ("engendbr");
     pVecOn     = apvts.getRawParameterValue ("vecenabled");
@@ -462,7 +461,6 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     spatial.prepare (sampleRate, samplesPerBlock);   // allocates its delay lines
     // Allocates the control-signal delay line (engine lookahead + a block).
     // prepare() ends in reset(), so the gain history starts at unity.
-    protection.prepare (sampleRate, samplesPerBlock);
     monoScratch.assign ((size_t) samplesPerBlock, 0.0f);
 
     // Adaptive Voice Dynamics. The ring spans the longest engine lookahead
@@ -527,7 +525,6 @@ void VoxMorphProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 // in this processor either has no state or is re-derived every block.
 void VoxMorphProcessor::reset()
 {
-    protection.reset();
     // Adaptive Voice Dynamics state is owned by the audio thread; ask for it
     // to be reset at the next block boundary instead of touching it here.
     vecFullResetReq.store (true);
@@ -967,31 +964,11 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         if (c >= room) capturing.store (false);
     }
 
-    // ---- Auto Voice Protection Gain -------------------------------------
-    // Last thing before the conversion, and deliberately AFTER the visualizer
-    // tap and the ANALYZE capture above: those show the user their real input
-    // level, not the protected one. At normal speaking level this is exactly
-    // unity and skips its own multiply, so the samples reaching the engine are
-    // bit-identical to a build without the stage.
-    //
-    // At Mix 0 the engine is a pure delay of the dry signal -- no conversion to
-    // protect -- so the stage is asked for unity and glides out.
-    // One switch stops BOTH halves. setBypassed asks the stage for unity and
-    // lets it glide out on its normal release rather than cutting it dead, so
-    // flipping the switch while it is actually reducing does not step the
-    // level; once the smoother snaps to exactly 1.0 the multiply is skipped
-    // on both sides and the path is sample-identical again. The restore needs
-    // no separate handling: it undoes the gain from D samples ago, and those
-    // ring entries glide to 1.0 with the pre stage.
-    //
-    // The Mix 0 term is the pre-existing bypass and is kept as it was.
-    // ONE snapshot for the whole block, shared with the estimator's Protection
-    // mirror below. Loading pEngProt twice could see the switch move in
-    // between and leave the two stages disagreeing about whether Protection is
-    // even running -- the estimator would then gate its baseline on a stage
-    // that was bypassed, or not gate it on one that was not.
-    const bool protBypass = pEngProt->load() <= 0.5f || p.mix <= 1.0e-4f;
-    protection.setBypassed (protBypass);
+    // Auto Voice Protection Gain / Auto Gain Restore were removed in v0.69.0.
+    // Measured (test/level_probe.cpp): the engine's detection and conversion
+    // are both level-invariant from -42 to +6 dBFS, so reducing the level into
+    // the engine and restoring it afterwards protected against nothing. Its
+    // only real effect had been a -1 dBFS ceiling on the restored output.
 
     // ---- Adaptive Voice Dynamics: control side ----------------------------
     // Everything here is audio-thread state. A pending host reset and a
@@ -1029,11 +1006,6 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     vecLastStereo  = stereoMode;
     vecWasEnabled  = vecEnabled;
 
-    // Protection cannot be reducing anything while it is bypassed, so it is
-    // not a reason for the estimator to hold the baseline back. The SAME
-    // snapshot Protection itself was given above, not a second load.
-    vecEst.setProtectionBypassed (protBypass);
-
     // The estimator runs while the feature is enabled at all, or while the
     // correction is still ramping out.
     const bool vecRun = vecEnabled || vecCtl.wantsRun (vecCorrect);
@@ -1045,11 +1017,6 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         // OFF (or fully ramped out and the engines past the last non-zero
         // control): exactly the pre-existing path -- same calls, same order,
         // no view, so the engines do not touch a sample.
-        {
-            float* preCh[2] = { stereoMode ? sL : m, sR };
-            protection.processPre (preCh, stereoMode ? 2 : 1, n);
-        }
-
         if (stereoMode)
         {
             engine.process  (sL, sL, n);
@@ -1058,24 +1025,15 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         else
             engine.process (m, m, n);
 
-        // ---- Auto Gain Restore ------------------------------------------
-        // Straight after the conversion (Natural Air and the rest of the voice
-        // DSP run inside the engine) and before the mute, the Output Gain, the
-        // spatial stage and the Post FX. It reads the gain from D samples ago,
-        // because that is the input the samples in front of us came from.
-        {
-            float* postCh[2] = { stereoMode ? sL : m, sR };
-            protection.processPost (postCh, stereoMode ? 2 : 1, n, engine.latencySamples());
-        }
         vecCtl.advance (n);
     }
     else
     {
-        // ON: estimator -> Protection -> engines -> Restore, per segment. A
+        // ON: estimator -> engines, per segment. A
         // segment never exceeds the ring's sizing, so an oversized host block
         // cannot overwrite control the engines have not read yet. Segments
-        // are multiples of 512, which is the engine's own internal chunk, and
-        // Protection is per-sample, so the split does not change either.
+        // are multiples of 512, which is the engine's own internal chunk, so
+        // the split does not change it.
         for (int off = 0; off < n; off += vecSegCap)
         {
             const int c = std::min (vecSegCap, n - off);
@@ -1092,8 +1050,6 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                 });
             }
 
-            protection.processPre (segCh, nc, c);
-
             // Both engines get the same view and the same base, so L and R
             // read identical control at identical input times.
             const AvdView view = vecCtl.view();
@@ -1106,7 +1062,6 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             else
                 engine.process (segCh[0], segCh[0], c, vp, base);
 
-            protection.processPost (segCh, nc, c, engine.latencySamples());
             vecCtl.advance (c);
         }
     }
@@ -1115,10 +1070,8 @@ void VoxMorphProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         uiVecEffort.store (vecRun ? o.effort * 100.0f : 0.0f, std::memory_order_relaxed);
         uiVecWarm  .store (o.warm, std::memory_order_relaxed);
     }
-    uiProtectionGainDb.store (protection.currentGainReductionDb(),
-                              std::memory_order_relaxed);
 
-    // analysis taps re-derived from the restored signal
+    // analysis taps re-derived from the converted signal
     if (stereoMode)
         for (int i = 0; i < n; ++i) m[i] = 0.5f * (sL[i] + sR[i]);
 

@@ -19,7 +19,8 @@
 // The engine's output is D samples (~43 ms, ~21 ms Low Latency) behind its
 // input. Applying the effort measured on the current block to the output of
 // the current block would correct the syllable BEFORE the one that was loud.
-// Same reasoning as ProtectionGain's restore. No audio delay is added.
+// The ring is how the output reads the control for the input it came from.
+// No audio delay is added.
 //
 // STEREO
 // Both engines receive the same AvdView and the same base time for the same

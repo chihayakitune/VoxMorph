@@ -2,7 +2,7 @@
 
 // VoxMorph -- Vocal Effort Estimator (Adaptive Voice Dynamics, Phase 0-2)
 //
-// Dependency-free single-header C++17, same convention as ProtectionGain.h.
+// Dependency-free single-header C++17.
 //
 // WHAT IT ESTIMATES
 // A baseline-relative approximation of "how much harder than usual is this
@@ -26,33 +26,15 @@
 // peak is the max). Detecting on the signed L+R sum would cancel an
 // out-of-phase pair and read a loud voice as silence.
 //
-// TIMING, AND NOT LEARNING WHILE PROTECTION IS ACTING
-// It reads the signal after the noise gate and BEFORE Auto Protection, so the
-// level it sees is never the protected one.
+// TIMING
+// It reads the signal after the noise gate, before the conversion. Clipping
+// is the only level-based reason a frame is kept out of the baseline.
 //
-// "Do not learn the baseline while Protection is acting" is therefore decided
-// here, from the same samples, with no gain information from another stage and
-// no way to be misaligned in time. It is decided by MIRRORING ProtectionGain's
-// own detector exactly -- the same stereo-linked max|x|, the same attack and
-// release, the same threshold and the same emergency peak ceiling, all taken
-// from ProtectionGain's public constants.
-//
-// Two earlier attempts got this wrong in the same way: both approximated the
-// decision from a raw peak (first a flat -8 dBFS, then Protection's threshold
-// plus a fixed margin). Neither can work, because Protection does not look at
-// the peak at all -- it looks at a short-time envelope, and the gap between a
-// peak and that envelope is the material's crest factor, which changes from
-// syllable to syllable. A fixed margin is therefore simultaneously too strict
-// on low-crest material (baseline stops learning while Protection is idle) and
-// too loose on high-crest material (baseline learns while Protection is
-// actively pulling the level down). Running the real detector removes the
-// approximation instead of retuning it.
-//
-// When Protection is bypassed -- its switch off, or Mix at 0 -- it cannot be
-// acting, so it is not a reason to stop learning. The processor says so each
-// block through setProtectionBypassed(); clipping remains a separate gate.
+// (Until v0.69.0 it also mirrored Auto Protection's detector so the baseline
+// would not learn while Protection was changing the level. Auto Protection
+// was removed -- the engine measured level-invariant, so it protected
+// against nothing -- and the mirror went with it.)
 
-#include "ProtectionGain.h"
 
 #include <algorithm>
 #include <cmath>
@@ -84,15 +66,6 @@ public:
         peakRel = opK (0.025);
         const double cfs = fs / kCadence;            // control-rate coefficients
         auto cK = [cfs] (double tau) { return (float) (1.0 - std::exp (-1.0 / (tau * cfs))); };
-        // ProtectionGain's OWN detector, rebuilt from its public constants so
-        // the two cannot drift apart. Per sample, not per control step: that
-        // is how Protection sees it.
-        protAtkK  = opK (ProtectionGain::kEnvAttackSec);
-        protRelK  = opK (ProtectionGain::kEnvReleaseSec);
-        protPkRelK= opK (ProtectionGain::kPeakRelSec);
-        protThr   = std::pow (10.0f, ProtectionGain::kThresholdDb * 0.05f);
-        protCeil  = std::pow (10.0f, ProtectionGain::kPeakCeilDb  * 0.05f);
-
         atkK     = cK (0.025);                       // effort attack  ~25 ms
         relK     = cK (0.220);                       // effort release ~220 ms
         baseK    = cK (10.0);                        // baseline tracking ~10 s
@@ -108,25 +81,6 @@ public:
         }
         resetAll();
     }
-
-    // Told once per block by the processor. With Protection bypassed (its
-    // switch off, or Mix at 0) it cannot be reducing anything, so it is not a
-    // reason to hold the baseline back.
-    //
-    // Switching bypass ON drops the verdict AND the hold: otherwise the 50 ms
-    // tail from the moment before would go on blocking goodFrame for a stage
-    // that is no longer running. The envelope and peak followers are KEPT --
-    // they are just a picture of the input, and keeping them means re-enabling
-    // Protection resumes from the real level instead of from zero.
-    void setProtectionBypassed (bool b) noexcept
-    {
-        if (b && ! protBypassed) { protActiveNow = false;  protHold = 0; }
-        protBypassed = b;
-    }
-
-    // True while the mirrored detector says ProtectionGain is reducing. For
-    // tests and diagnostics; nothing in the audio path reads it.
-    bool protectionActive() const noexcept { return protActiveNow; }
 
     // Everything, baseline included (prepare / sample-rate change).
     void resetAll()
@@ -154,9 +108,6 @@ public:
         zcr = 0.0f;
         clipHold = 0;
         phase = 0;
-        protEnv = protPk = 0.0f;
-        protActiveNow = false;
-        protHold = 0;          // a full reset must not inherit the last hold
         out = {};
         // The baseline survives this call, so the warmup readout has to as
         // well: zeroing it would make the UI announce "learning your voice"
@@ -199,23 +150,6 @@ public:
                 if (s != prevSign[c]) ++zc[c];
                 prevSign[c] = s;
             }
-            // Stereo-linked, exactly as ProtectionGain does it: the max of the
-            // absolute values across the channels it would be handed.
-            float link = 0.0f;
-            for (int c = 0; c < numCh; ++c)
-            {
-                float v = ch[c][i];
-                if (! std::isfinite (v)) v = 0.0f;
-                link = std::max (link, std::abs (std::clamp (v, -kMaxIn, kMaxIn)));
-            }
-            protEnv += (link > protEnv ? protAtkK : protRelK) * (link - protEnv);
-            protPk   = link > protPk ? link : protPk + protPkRelK * (link - protPk);
-            if (! std::isfinite (protEnv)) protEnv = 0.0f;
-            if (! std::isfinite (protPk))  protPk  = 0.0f;
-            protActiveNow = ! protBypassed && (protEnv > protThr || protPk > protCeil);
-            if (protActiveNow) protHold = (int) (0.05 * fs);   // 50 ms tail
-            else if (protHold > 0) --protHold;
-
             if (clipHold > 0) --clipHold;
 
             if (++phase >= kCadence)
@@ -329,12 +263,9 @@ private:
         out.conf = conf;
 
         const bool clip = clipHold > 0;
-        // The mirrored detector's verdict, held briefly so a frame that
-        // straddles the moment Protection engages is not half-learned.
-        const bool protect = ! protBypassed && (protActiveNow || protHold > 0);
 
         // ---- baseline ---------------------------------------------------
-        const bool goodFrame = conf > 0.6f && ! clip && ! protect;
+        const bool goodFrame = conf > 0.6f && ! clip;
         if (! bValid)
         {
             // warmup: running mean over accepted voiced frames
@@ -388,11 +319,6 @@ private:
 
     double fs = 48000.0;
     float envK = 0, peakRel = 0, atkK = 0, relK = 0, baseK = 0, exK = 0, warmNeed = 1;
-    // mirror of ProtectionGain's detector (see the header note)
-    float protAtkK = 0, protRelK = 0, protPkRelK = 0, protThr = 1.0f, protCeil = 1.0f;
-    float protEnv = 0.0f, protPk = 0.0f;
-    int   protHold = 0;
-    bool  protBypassed = false, protActiveNow = false;
     Band  lo[2], hi[2], bo[2], pr[2];
     float eFull[2] {}, eLo[2] {}, eHi[2] {}, eBody[2] {}, ePres[2] {}, peak[2] {};
     int   zc[2] {};
