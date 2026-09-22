@@ -83,8 +83,24 @@ if (Python3_Interpreter_FOUND)
 endif()
 
 # ---- Voice Quality regression (bounded; no audio device) ----------------
+# Two tests, registered with CTest so CI runs them after the plugin build:
+#   cmake -B build -DVOXMORPH_VQ_TEST=ON
+#   cmake --build build --target VoxMorphVqDspTest VoxMorphVqTest
+#   ctest --test-dir build --output-on-failure
 option(VOXMORPH_VQ_TEST "Build Voice Quality processor regression" OFF)
 if (VOXMORPH_VQ_TEST)
+    enable_testing()
+
+    # DSP only: no JUCE, no plugin. Plain executable so it builds in seconds.
+    add_executable(VoxMorphVqDspTest test/voice_quality_test.cpp)
+    target_include_directories(VoxMorphVqDspTest PRIVATE dsp)
+    target_compile_features(VoxMorphVqDspTest PRIVATE cxx_std_17)
+    if (MSVC)
+        target_compile_options(VoxMorphVqDspTest PRIVATE /utf-8)
+    endif()
+    add_test(NAME voice_quality_dsp COMMAND VoxMorphVqDspTest
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
     juce_add_console_app(VoxMorphVqTest PRODUCT_NAME "VoxMorphVqTest")
     target_sources(VoxMorphVqTest PRIVATE test/voice_quality_proc_test.cpp src/PluginProcessor.cpp)
     target_include_directories(VoxMorphVqTest PRIVATE dsp src)
@@ -93,6 +109,10 @@ if (VOXMORPH_VQ_TEST)
         JUCE_PLUGINHOST_VST3=1 JUCE_STANDALONE_APPLICATION=1 JUCE_MODAL_LOOPS_PERMITTED=1)
     target_link_libraries(VoxMorphVqTest PRIVATE juce::juce_audio_utils AnokoeAssets
         PUBLIC juce::juce_recommended_config_flags)
+    # Run inside the build tree: the preset fixture is written to the working
+    # directory, which is not the read-only checkout.
+    add_test(NAME voice_quality_proc COMMAND VoxMorphVqTest
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 endif()
 
 # ---- UI verification harness (developer tool, OFF by default) ------------

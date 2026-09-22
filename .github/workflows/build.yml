@@ -21,6 +21,14 @@ jobs:
       - name: Build
         run: cmake --build build --parallel 3
 
+      # Voice Quality regressions: the DSP test and the real-processor test,
+      # and only these (plus the UTF-8 guard, which CTest also registers).
+      - name: Voice Quality tests
+        run: |
+          cmake -B build -DVOXMORPH_VQ_TEST=ON
+          cmake --build build --parallel 3 --target VoxMorphVqDspTest VoxMorphVqTest
+          ctest --test-dir build --output-on-failure
+
       - name: Ad-hoc codesign
         run: |
           codesign --force --deep -s - "build/VoxMorph_artefacts/Release/AU/VoxMorph.component"
@@ -87,6 +95,12 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Release --parallel 3
+
+      - name: Voice Quality tests
+        run: |
+          cmake -B build -DVOXMORPH_VQ_TEST=ON
+          cmake --build build --config Release --parallel 3 --target VoxMorphVqDspTest VoxMorphVqTest
+          ctest --test-dir build -C Release --output-on-failure
 
       - uses: actions/upload-artifact@v6
         with:

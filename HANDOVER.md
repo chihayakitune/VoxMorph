@@ -1,6 +1,97 @@
 # VoxMorph 開発引き継ぎ書 (AIセッション用)
 
-最終更新: v0.67.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+最終更新: v0.69.0 時点。新しいAIセッションを開始する際は、このファイルを読ませること。
+
+## 2026-09-22 v0.69.0 を main へ統合(Voice Quality の上に移植)
+
+v0.69.0 は当初 AVD ブランチ上で作ったが、その間に main が `9d5b321`(AVD を Voice Quality =
+4バンド Dynamic EQ + Dynamic Pitch に置換)へ進んだため、**main の上へ移植**した。
+AVD 向けのレビュー修正は Voice Quality に置き換わって不要になったので**持ち込んでいない**。
+
+- **Auto Protection を main からも削除**。移植前に `test/level_probe.cpp` を **main のエンジン
+  (Dynamic Pitch 入り)で再測定**し、結果は以前と同一(検出は -60〜+6 dBFS で完全に同じ、
+  変換残差は -42〜+6 dBFS で約 -125 dB)。`dsp/ProtectionGain.h` も main と測定版でバイト一致。
+  **改善の余地は無く、削除が正解**と判断。Voice Quality の検出は元々「変換前(Gate後)」を読み、
+  EQ は PSOLA 直後に掛かるので、Protection を抜いても Voice Quality の位置関係は変わらない
+- `docs/VOICE_QUALITY_DYNAMICS_DESIGN.md` の「ProtectionGain の processPre / processPost …は維持する」
+  (Tracking Protection)を削除の記述と実測値に書き換え、信号経路図から Protection を除去。
+  会話記録 `VOICE_QUALITY_CONVERSATION_REFERENCE.md` は原文のまま、冒頭に削除済みの注記だけ追加
+- **文字化けガードが main の実バグを検出**: Voice Quality の全行のツールチップ
+  (「入力レベルは変換前で検出します…」)が `juce::String(const char*)` 経由で化けていた。`fromUTF8` で修正
+- **テスト**: Voice Quality の2本(`voice_quality_test` = DSPのみ、`voice_quality_proc_test` = 実プロセッサ)を
+  `-DVOXMORPH_VQ_TEST=ON` で CTest に登録(`voice_quality_dsp` / `voice_quality_proc`)し、
+  CI の macOS/Windows 両方で通常ビルド後に実行。utf8 ガードはビルド前に実行
+- **確認(ローカル macOS)**: ctest 3/3(`utf8_literals` / `voice_quality_dsp` / `voice_quality_proc`)、
+  `ui_shot` ALL PASS(文字化け0件、採用3項目のチェックボックス 1→0→1、Pulse Body 保存値で出力差0、
+  engbreath/engendbr 保存値で出力差0、Auto Protection と ENGINE VALIDATION が画面に無い、`v0.69.0` 表示)、
+  **対照として Voice Quality の修正を戻すと `ui_shot` が文字化け48件で FAIL** することを確認、
+  `offline_test` FAIL 0、Release Standalone build 成功
+- **未確認**: 実機での聴感・目視、AU/VST3 のホスト上での動作
+- 以下の詳細2節は AVD ブランチで書いたもの。AVD 固有の記述は除いた
+
+### 詳細: Auto Protection の要否判定 / Air Breathiness のチェックボックス削除
+
+#### Auto Protection — 測定の結果、2つの意図とも対象となる問題が存在しない
+ユーザーの意図は (a) 音量変化でフォルマント検出が外れるのを防ぐ、(b) 音量変化で変換がぶれるのを防ぐ。
+「検出用ルートと変換用ルートが分かれているならそれぞれに」「どちらも有効でないなら実装不要として報告」との指示。
+
+- **経路**: エンジン内に独立した検出ルートは**無い**。ピッチ検出は入力のコピー(`inBuf`)を、
+  フォルマント検出は**出力に使うグレインそのもの**をFFTする。同じサンプルを読んでいる
+- **測定** `test/level_probe.cpp`(formant_probe と同じ既知フォルマントの合成母音、F 500/1500/2500、f0 140):
+  - **(a) 検出**: -60〜+6 dBFS の12段階すべてで **f0 = 140.0 Hz、F1/F2/F3 誤差が完全に同一**
+    (-4.01 / +0.04 / -0.25 st。F1の-4 stはこの母音での追跡器固有の偏りで、全レベルで同じ=音量起因ではない)、
+    信頼度 1.00、有効フレーム 243/243。**±12 / ±24 dB の揺れや +18 dB のステップ中も f0 のばらつき 0.02 Hz、F2 の中央値変化 0.24 st**
+  - **(b) 変換**: 出力を音量比で割って基準(-18 dBFS)と比べた残差が **-42〜+6 dBFS で約 -125 dB**(浮動小数点の丸め誤差)。
+    つまり**変換は音量に対して完全に線形**。-48 dBFS 以下でだけ -56〜-61 dB に上がる(絶対値の下限処理の影響、それでも聴感上は無視できる)
+- **結論**: YIN(累積平均正規化)も対数スペクトルのフォルマント推定も**スケール不変**なので、
+  音量で検出が外れる問題も、変換がぶれる問題も存在しない。**どちらの目的でも Auto Protection は効かない**
+- **v0.65.0 の自分の設計根拠の誤り**: 「OLA正規化の床で残差が振幅に比例して増える」としたが、
+  **比例するなら信号との比は一定**で、音量が大きいほど悪化することはない。測定(b)が +6 dBFS でも -125 dB であることがその裏付け
+- 現状の Auto Protection の実質的な効果は「出力を -1 dBFS で頭打ちにする」ことだけだった
+- **ユーザー承認により削除**: `dsp/ProtectionGain.h` と `test/protection_test.cpp` を削除、processBlock の前段/後段・prepare/reset・UI読み出し・ENGINE VALIDATION のチェックボックス・Engine Config の一覧から除去。`engprot` の ID は互換性のため登録のみ残す(値は無視)
+- 通常音量ではもともと乗算をスキップしていたので**音は変わらない**。変わるのは -7 dBFS を超える大入力で、以前は出力が -1 dBFS で頭打ちになっていたのが、そのまま出るようになる
+
+#### Air Breathiness / Ending Breath のチェックボックス削除
+- v0.67.0 の指示書が「v0.66.0 で追加された3項目」として検証用スイッチを指定したもの。
+  当時の Air Breathiness は `baef0e2`(WIP)で入ったばかりで聴感評価前だった。
+  ただし**スライダー0で同じ音になる**(テストで1サンプル一致を確認済み)ので、チェックボックスは最初から冗長だった
+- MAIN > ADVANCED > ENGINE VALIDATION と Engine Config の「UNDER VALIDATION」一覧から削除。**AIRスライダーが唯一の操作**
+- `engbreath` の ID は互換性のため登録したまま、**保存値は無視**(OFFで保存されたセッションが、戻す手段のないまま無音化するのを防ぐ)。
+  実描画で OFF/ON の出力差 0 サンプルを確認(同じ設定を2回描画した対照も 0)
+- **Ending Breath のチェックボックスもユーザー承認で削除**(Air Breathiness と同じ扱い、機能はAIRセクションのスライダーで残す)。`engendbr` もIDだけ残して保存値は無視
+- これで ENGINE VALIDATION が空になったため、**MAIN の見出しごと非表示**。Engine Config の「UNDER VALIDATION」は将来の検証用の枠として残し、「現在、検証中の機能はありません」と表示
+- Engine Config のラベルとウィンドウの高さを**文章量から計算**する方式に変更(固定値で「はみ出して隠れる」「短くなって空白が残る」を2回続けて起こしたため)
+- **Ending Breath の中身**: 声が0.12秒以上続いたあと音量が下がり続ける区間を語尾とみなし、その間だけ Air Breathiness と同じ帯域(約2.5kHz以上)の**元の声に含まれる息成分**を持ち上げる。ノイズ生成はしない。**スライダー初期値0なので既定では無効**。聴感評価の記録は無い
+
+### 詳細: 文字化け対策 / 採用項目のEngine Config移設 / バージョン表記
+
+- **文字化けの原因**: `juce::String (const char*)` は UTF-8 を解釈せず8bit文字として読む
+  (Debugでは assert)。日本語リテラルを直接渡すと各バイトが別々のLatin-1文字になり化ける。
+  ビルドは通るので、画面を見るまで誰も気づかない。実際に化けていたのは3か所:
+  Matching の「APPLIED **·** LOCKED」の中黒、FX読込失敗時の2つのエラー文
+  (「VST3として認識できませんでした」「読み込みに失敗しました」)
+- **再発防止(2層)**:
+  - **静的**: `scripts/check_utf8_literals.py` — 非ASCIIリテラルが UTF-8 をデコードする
+    呼び出し(`fromUTF8` と、中身を読んで確認済みのヘルパー `tip`/`vmTip`/`tipOf`/`initHead`)の
+    **直下にない**と失敗。表に格納して使用箇所でデコードする正当な例外は行末に
+    `// utf8-ok: <デコード箇所>` を明記。**ソースファイル自体がUTF-8でない**場合も失敗
+    (Shift-JIS保存は全リテラルを正しく包んでも化けるため)。仕込んだ3種の欠陥を検出することを確認済み。
+    CTest(`utf8_literals`、Pythonがあれば常時登録)と、**CI の macOS/Windows 両方でビルド前**に実行
+  - **実行時**: `ui_shot` が editor と Engine Config の全 Label/Button/tooltip を走査し、
+    「文字を8bitに戻すと正しいUTF-8になる」文字列を文字化けとして検出。検出器自体が
+    本物の文字化けで発火し正常な日本語では発火しないこともassert
+  - `initHead` は日本語側しか `fromUTF8` していなかったので、英語側も直してから許可リストへ
+- **Engine Config へ移設(採用項目)**: `Pulse Smoothing` / `Onset Hold` / `Onset Repair` を
+  MAIN > ADVANCED から削除し、Engine Config の **ADOPTED** にチェックボックスとして配置。
+  **既定ON、個別にON/OFF可**。MAIN側は複製ではなく削除(1パラメータ1コントロール)。
+  パラメータIDは不変なので既存セッション・プリセット・オートメーションはそのまま
+- **固定・非表示**: `Onset Repair Strength` と `Pulse Body` を **0.75 で確定**しUIから削除。
+  プロセッサは保存値を**無視して** `kFixedRepairStrength` / `kFixedPulseBody` = 0.75 を使う
+  (保存値を尊重すると、0.3で保存されたセッションが変更手段のないまま0.3で鳴り続けるため)。
+  IDは登録したまま。Onset Repair を OFF にすれば従来どおり v0.57.0 以前の経路に完全に戻る
+- **バージョン表記**: ヘッダーの「VoiceChanger & PluginHost」の右に小さく `v0.69.0`。
+  CMake の `project()` から `VOXMORPH_VERSION_STRING` として全ターゲットへ渡すので、
+  表示・インストーラ版数・CMakeLists が食い違わない
 
 ## 2026-09-19 v0.68.0 Adaptive Voice Dynamics Phase 0–2(GitHub main へ push 済み)
 
